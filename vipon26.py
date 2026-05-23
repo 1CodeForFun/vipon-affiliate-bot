@@ -969,10 +969,10 @@ def try_reveal_code(driver):
         try:
             el = WebDriverWait(driver, 6).until(EC.element_to_be_clickable((By.XPATH, xp)))
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-            time.sleep(0.3)
+            time.sleep(0.5)
             try: driver.execute_script("arguments[0].click();", el)
             except Exception: el.click()
-            time.sleep(0.6)
+            time.sleep(2.0)   # wait for AJAX to return the code after click
         except Exception:
             continue
 
@@ -1013,14 +1013,20 @@ def scrape_product_page(driver, wait, pid):
     except TimeoutException:
         log("  ⏱️ page load timeout, retry once…"); driver.get(url)
     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
-    time.sleep(0.4)
+    time.sleep(2.0)   # let JS fully render the page before looking for the reveal button
 
     if "/product/" not in driver.current_url:
         driver.get(url)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
+        time.sleep(2.0)
 
     try_reveal_code(driver)
     code = extract_code(driver)
+    # Retry once if code not found — AJAX may still be in flight
+    if not code or not is_plausible_code(code, strict=False):
+        time.sleep(3.0)
+        try_reveal_code(driver)
+        code = extract_code(driver)
     code = (code or "").strip().upper()
     if not is_plausible_code(code, strict=False):
         log("  ✗ no valid code — skipping")
