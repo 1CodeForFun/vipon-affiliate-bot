@@ -410,17 +410,30 @@ def _tts_to_mp3(text: str, out_path: str) -> bool:
 
 GEMINI_KEY_PATHS = ["/mnt/data/geminikey.txt", os.path.expanduser("~/geminikey.txt")]
 
-def _read_gemini_key():
+def _read_gemini_keys():
+    """Return a list of Gemini API keys.
+    Checks ~/geminikeys.txt first (one key per line, multiple accounts).
+    Falls back to single-key geminikey.txt for backward compatibility."""
+    multi_path = os.path.expanduser("~/geminikeys.txt")
+    if os.path.exists(multi_path):
+        try:
+            with open(multi_path, "r", encoding="utf-8", errors="ignore") as f:
+                keys = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+            if keys:
+                return keys
+        except Exception:
+            pass
+    # Legacy single-key fallback
     for path in GEMINI_KEY_PATHS:
         try:
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8", errors="ignore") as f:
                     k = f.read().strip()
                     if k:
-                        return k
+                        return [k]
         except Exception:
             continue
-    return None
+    return []
 
 def _build_post_prompt(link, code, discount_pct, expiry, title, price) -> str:
     return (
@@ -443,17 +456,17 @@ def generate_social_post(link, code, discount_pct, expiry, title, price):
 
     prompt = _build_post_prompt(link, code, discount_pct, expiry, title, price)
 
-    # ── Try Gemini 1.5 Flash (free: 1 500 req/day) ────────────
-    gemini_key = _read_gemini_key()
-    if gemini_key:
+    # ── Try Gemini keys in order, rotate on 429 rate-limit ───────
+    gemini_keys = _read_gemini_keys()
+    for kidx, gemini_key in enumerate(gemini_keys):
         try:
-            url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-                   f"gemini-2.5-flash-lite:generateContent?key={gemini_key}")
+            api_url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+                       f"gemini-2.5-flash-lite:generateContent?key={gemini_key}")
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"temperature": 0.8, "maxOutputTokens": 300}
             }
-            resp = requests.post(url, json=payload, timeout=25)
+            resp = requests.post(api_url, json=payload, timeout=25)
             if resp.ok:
                 j   = resp.json()
                 txt = (j.get("candidates", [{}])[0]
@@ -461,12 +474,15 @@ def generate_social_post(link, code, discount_pct, expiry, title, price):
                          .get("parts", [{}])[0]
                          .get("text", "")).strip()
                 if txt:
-                    log("  ✓ Post generated via Gemini (free)")
+                    log(f"  ✓ Post generated via Gemini (key {kidx+1}/{len(gemini_keys)})")
                     return txt
+            elif resp.status_code == 429:
+                log(f"  ⚠️ Gemini key {kidx+1}/{len(gemini_keys)} rate-limited — trying next")
+                continue
             else:
-                log(f"  ⚠️ Gemini {resp.status_code}: {resp.text[:200]}")
+                log(f"  ⚠️ Gemini key {kidx+1} error {resp.status_code}: {resp.text[:150]}")
         except Exception as e:
-            log(f"  ⚠️ Gemini post error: {e}")
+            log(f"  ⚠️ Gemini key {kidx+1} exception: {e}")
 
     # ── Fallback: OpenAI GPT-3.5-turbo ────────────────────────
     api_key = _read_openai_key()

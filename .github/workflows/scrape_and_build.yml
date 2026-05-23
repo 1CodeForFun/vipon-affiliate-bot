@@ -53,6 +53,7 @@ jobs:
           cp secrets/geminikey.txt ~/geminikey.txt
           cp secrets/vipon_accounts.json ~/vipon_accounts.json
           cp secrets/cloudinary.json ~/cloudinary.json
+          [ -f secrets/geminikeys.txt ] && cp secrets/geminikeys.txt ~/geminikeys.txt || true
 
       - name: Run scrape & build
         run: python vipon26.py
