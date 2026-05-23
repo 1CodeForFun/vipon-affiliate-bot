@@ -48,8 +48,29 @@ TAG_PINTEREST     = "pinpinterestfd-20"
 GOOGLE_SHEET_NAME = "vipon"
 GOOGLE_CREDS_FILE = "vipon_google_creds.json"
 
-USERNAME = "ayman1elmasry@yahoo.com"
-PASSWORD = "HighVoltage123*"
+# ── Vipon.com accounts — loaded from ~/vipon_accounts.json ──────
+# Format: [{"username": "...", "password": "..."}, ...]
+def _load_vipon_accounts():
+    path = os.path.expanduser("~/vipon_accounts.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            accs = json.load(f)
+        if accs:
+            return accs
+    return [{"username": "ayman1elmasry@yahoo.com", "password": "HighVoltage123*"}]
+
+VIPON_ACCOUNTS  = _load_vipon_accounts()
+_account_index  = 0   # mutable via _rotate_account()
+
+def _current_account():
+    return VIPON_ACCOUNTS[_account_index % len(VIPON_ACCOUNTS)]
+
+def _rotate_account():
+    global _account_index
+    _account_index = (_account_index + 1) % len(VIPON_ACCOUNTS)
+    acc = _current_account()
+    print(f"[rotate] switching to account {_account_index + 1}/{len(VIPON_ACCOUNTS)}: {acc['username']}")
+    return acc
 
 # ── Video dimensions: 720×1280 is valid for all Reels/Shorts, ~56% fewer pixels → much faster ──
 VIDEO_W = 720
@@ -76,9 +97,17 @@ IMPLICIT_WAIT    = 4
 
 MUSIC_DIR = os.path.expanduser("~/assets/music")
 
-CLOUDINARY_CLOUD_NAME   = "diufrf8l7"
-CLOUDINARY_API_KEY      = "278766692116231"
-CLOUDINARY_API_SECRET   = "ZmG521qjt-CNr0EgUWj3pJikScw"
+# ── Cloudinary credentials — loaded from ~/cloudinary.json ──────
+# Format: {"cloud_name": "...", "api_key": "...", "api_secret": "..."}
+def _load_cloudinary_creds():
+    path = os.path.expanduser("~/cloudinary.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            cfg = json.load(f)
+        return cfg["cloud_name"], cfg["api_key"], cfg["api_secret"]
+    return "diufrf8l7", "278766692116231", "ZmG521qjt-CNr0EgUWj3pJikScw"
+
+CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET = _load_cloudinary_creds()
 CLOUDINARY_VIDEO_FOLDER = "vipon_reels"
 
 MAX_TILES_SNAPSHOT = 300
@@ -612,10 +641,11 @@ def _dismiss_overlays(driver):
             continue
 
 def login(driver, wait):
-    log("▶ Logging in…")
+    acc = _current_account()
+    log(f"▶ Logging in as {acc['username']}…")
     driver.get("https://www.myvipon.com/login")
-    wait.until(EC.presence_of_element_located((By.NAME, "LoginForm[email]"))).send_keys(USERNAME)
-    wait.until(EC.presence_of_element_located((By.NAME, "LoginForm[password]"))).send_keys(PASSWORD)
+    wait.until(EC.presence_of_element_located((By.NAME, "LoginForm[email]"))).send_keys(acc["username"])
+    wait.until(EC.presence_of_element_located((By.NAME, "LoginForm[password]"))).send_keys(acc["password"])
     for xp in [
         "//div[contains(@class,'google_test') and normalize-space(text())='Log In']",
         "//button[@type='submit']",
@@ -1295,6 +1325,8 @@ def main():
         login(driver, wait)
         tiles = collect_promo_tiles_random(driver, wait)
         count = 0
+        consecutive_fails = 0
+        ROTATION_THRESHOLD = 8  # switch account after this many consecutive no-code results
 
         for pid, _, _ in tiles:
             if count >= PRODUCT_LIMIT:
@@ -1303,14 +1335,27 @@ def main():
                 data = scrape_product_page(driver, wait, pid)
             except TimeoutException:
                 log(f"  ⏱️ hard timeout on PID {pid} — skip")
-                continue
+                consecutive_fails += 1
+                data = None
             except WebDriverException as e:
                 log(f"  ⚠️ webdriver error on PID {pid}: {e} — skip")
-                continue
+                consecutive_fails += 1
+                data = None
 
             if data is None:
+                consecutive_fails += 1
+                # Auto-rotate account when we hit the daily code limit
+                if consecutive_fails >= ROTATION_THRESHOLD and len(VIPON_ACCOUNTS) > 1:
+                    _rotate_account()
+                    try:
+                        login(driver, wait)
+                        consecutive_fails = 0
+                        log(f"  ✓ Account rotated successfully")
+                    except Exception as e:
+                        log(f"  ⚠️ Re-login after rotation failed: {e}")
                 continue
 
+            consecutive_fails = 0
             scraped.append(data)
             count += 1
             log(f"✓ Scraped {count}/{PRODUCT_LIMIT}: {data['title'][:60]}")

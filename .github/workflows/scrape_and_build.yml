@@ -51,6 +51,8 @@ jobs:
           cp secrets/PAAPI.csv ~/PAAPI.csv
           cp secrets/videokey.txt ~/videokey.txt
           cp secrets/geminikey.txt ~/geminikey.txt
+          cp secrets/vipon_accounts.json ~/vipon_accounts.json
+          cp secrets/cloudinary.json ~/cloudinary.json
 
       - name: Run scrape & build
         run: python vipon26.py
