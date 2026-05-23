@@ -640,6 +640,15 @@ def _dismiss_overlays(driver):
         except Exception:
             continue
 
+def logout(driver):
+    """Navigate to the logout URL so the next login() starts from a clean state."""
+    try:
+        driver.get("https://www.myvipon.com/logout")
+        time.sleep(2)
+        log("✓ Logged out")
+    except Exception as e:
+        log(f"  ⚠️ Logout error (ignored): {e.__class__.__name__}")
+
 def login(driver, wait):
     acc = _current_account()
     log(f"▶ Logging in as {acc['username']}…")
@@ -1333,8 +1342,10 @@ def main():
                 logged_in = True
                 break
             except Exception as e:
-                log(f"  ⚠️ Login failed for {_current_account()['username']}: {e}")
+                log(f"  ⚠️ Login failed for {_current_account()['username']}: {e.__class__.__name__}")
                 if _attempt < len(VIPON_ACCOUNTS) - 1:
+                    logout(driver)              # clear session before trying next account
+                    driver.delete_all_cookies()
                     _rotate_account()
         if not logged_in:
             log("✗ All accounts failed to login — exiting")
@@ -1367,7 +1378,8 @@ def main():
                     # Always reset counter so we don't loop endlessly on failed re-login
                     consecutive_fails = 0
                     try:
-                        driver.delete_all_cookies()   # clear session before re-login
+                        logout(driver)                # must log out or /login redirects to home
+                        driver.delete_all_cookies()   # clear any remaining session cookies
                         login(driver, wait)
                         log(f"  ✓ Account rotated successfully")
                     except Exception as e:
