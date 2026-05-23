@@ -241,8 +241,10 @@ def _build_yt_client():
         td = json.load(f)
 
     expiry_str = td.get("expiry")
+    # google-auth's creds.expired compares expiry with datetime.utcnow() (naive),
+    # so expiry must also be naive UTC — do NOT attach tzinfo here.
     expiry = (
-        datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M:%SZ")
         if expiry_str else None
     )
 
