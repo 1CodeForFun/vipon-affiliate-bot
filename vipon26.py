@@ -657,7 +657,10 @@ def login(driver, wait):
             btn.click(); break
         except Exception:
             continue
-    wait.until(EC.presence_of_element_located((By.XPATH, "//a[contains(@href,'logout')]")))
+    # Give post-login redirect more time than the default WAIT_SECS
+    WebDriverWait(driver, 30).until(
+        EC.presence_of_element_located((By.XPATH, "//a[contains(@href,'logout')]"))
+    )
     _dismiss_overlays(driver)
     log("✓ Logged in")
 
@@ -1322,7 +1325,21 @@ def main():
     # ── PHASE 1: Scrape ──────────────────────────────────────────
     scraped = []
     try:
-        login(driver, wait)
+        # Try every account until one logs in successfully
+        logged_in = False
+        for _attempt in range(len(VIPON_ACCOUNTS)):
+            try:
+                login(driver, wait)
+                logged_in = True
+                break
+            except Exception as e:
+                log(f"  ⚠️ Login failed for {_current_account()['username']}: {e}")
+                if _attempt < len(VIPON_ACCOUNTS) - 1:
+                    _rotate_account()
+        if not logged_in:
+            log("✗ All accounts failed to login — exiting")
+            raise RuntimeError("All Vipon accounts failed to login")
+
         tiles = collect_promo_tiles_random(driver, wait)
         count = 0
         consecutive_fails = 0
