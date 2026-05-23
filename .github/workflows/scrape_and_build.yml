@@ -35,14 +35,19 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Install Amazon PA-API SDK (not on PyPI — installed from Amazon GitHub)
-        run: pip install git+https://github.com/amzn/paapi5-python-sdk.git
+      - name: Install Amazon PA-API SDK from secrets repo
+        run: |
+          if [ -f secrets/paapi5_sdk.zip ]; then
+            mkdir -p paapi5_python_sdk
+            unzip -qo secrets/paapi5_sdk.zip -d paapi5_python_sdk
+            echo "paapi5_python_sdk extracted successfully"
+          else
+            echo "WARNING: paapi5_sdk.zip not found in secrets repo — Amazon images will be skipped"
+          fi
 
       - name: Copy credential files
         run: |
-          # vipon_google_creds.json is read from the working directory (relative path)
           cp secrets/vipon_google_creds.json .
-          # These three are read from ~ (home dir) by vipon26.py
           cp secrets/PAAPI.csv ~/PAAPI.csv
           cp secrets/videokey.txt ~/videokey.txt
           cp secrets/geminikey.txt ~/geminikey.txt

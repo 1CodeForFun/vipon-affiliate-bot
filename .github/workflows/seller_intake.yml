@@ -36,8 +36,15 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Install Amazon PA-API SDK (not on PyPI — installed from Amazon GitHub)
-        run: pip install git+https://github.com/amzn/paapi5-python-sdk.git
+      - name: Install Amazon PA-API SDK from secrets repo
+        run: |
+          if [ -f secrets/paapi5_sdk.zip ]; then
+            mkdir -p paapi5_python_sdk
+            unzip -qo secrets/paapi5_sdk.zip -d paapi5_python_sdk
+            echo "paapi5_python_sdk extracted successfully"
+          else
+            echo "WARNING: paapi5_sdk.zip not found in secrets repo — Amazon images will be skipped"
+          fi
 
       - name: Copy credential files
         run: |
