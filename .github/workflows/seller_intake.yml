@@ -36,12 +36,15 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Copy credential files to working directory
+      - name: Install Amazon PA-API SDK (not on PyPI — installed from Amazon GitHub)
+        run: pip install git+https://github.com/amzn/paapi5-python-sdk.git
+
+      - name: Copy credential files
         run: |
           cp secrets/vipon_google_creds.json .
-          cp secrets/PAAPI.csv .
-          cp secrets/videokey.txt .
-          cp secrets/geminikey.txt .
+          cp secrets/PAAPI.csv ~/PAAPI.csv
+          cp secrets/videokey.txt ~/videokey.txt
+          cp secrets/geminikey.txt ~/geminikey.txt
 
       - name: Run seller intake
         run: python seller8.py

@@ -5,7 +5,7 @@ gspread
 oauth2client
 requests
 edge-tts
-paapi5-python-sdk
+# paapi5-python-sdk is NOT on PyPI — installed separately from Amazon's GitHub in workflows
 cloudinary
 google-auth
 google-auth-oauthlib
