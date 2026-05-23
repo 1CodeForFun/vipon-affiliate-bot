@@ -1,0 +1,26 @@
+secrets/
+
+# Credential files — never commit these
+vipon_google_creds.json
+fb_page_token.json
+fb_page_token-ultafind.json
+token_youtube.json
+truehvYT.json
+PAAPI.csv
+videokey.txt
+geminikey.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.venv/
+
+# Temp video/audio files
+*.mp4
+*.mp3
+*.wav
+/tmp/
+temp/

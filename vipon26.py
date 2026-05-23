@@ -1,0 +1,1404 @@
+#!/usr/bin/env python3
+# vipon25.py — Optimized: 720p FFmpeg (fast), edge-tts (free VO), Gemini (free post text),
+#              Chrome-first / video-second flow, Pinterest flag, all bugs fixed.
+#
+# ── ONE-TIME VM SETUP ───────────────────────────────────────────────────────
+#  pip install edge-tts                   # free TTS, no API key needed
+#  echo "YOUR_GEMINI_KEY" > ~/geminikey.txt   # free key → aistudio.google.com
+#  (OpenAI key at ~/videokey.txt still works as fallback for both TTS & post text)
+#
+# ── TO RE-ENABLE PINTEREST ──────────────────────────────────────────────────
+#  Set  ENABLE_PINTEREST = True  below (all code is preserved, just gated)
+# ────────────────────────────────────────────────────────────────────────────
+
+import os, time, re, random, glob, tempfile, subprocess, hashlib, shutil, platform
+import urllib.parse
+import asyncio
+from urllib.parse import quote
+import json
+import requests
+import html
+
+import undetected_chromedriver as uc
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import WebDriverException, TimeoutException, StaleElementReferenceException
+from PIL import Image, ImageOps
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from selenium import webdriver
+from selenium.common.exceptions import SessionNotCreatedException
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from gspread.exceptions import APIError
+
+# ════════════════════════════════════════════════════════════════
+#  CONFIG
+# ════════════════════════════════════════════════════════════════
+
+ENABLE_PINTEREST = False   # ← flip to True when you want Pinterest again
+
+AFFILIATE_ID      = "freshdeal00cc-20"
+TAG_REEL          = "manus00-20"
+TAG_IG            = "insinstagram-20"
+TAG_YOUTUBE       = "youtubefdusa-20"
+TAG_TIKTOK        = "tiktoktiktok-20"
+TAG_PINTEREST     = "pinpinterestfd-20"
+GOOGLE_SHEET_NAME = "vipon"
+GOOGLE_CREDS_FILE = "vipon_google_creds.json"
+
+USERNAME = "ayman1elmasry@yahoo.com"
+PASSWORD = "HighVoltage123*"
+
+# ── Video dimensions: 720×1280 is valid for all Reels/Shorts, ~56% fewer pixels → much faster ──
+VIDEO_W = 720
+VIDEO_H = 1280
+
+LOGO_PATH             = os.path.expanduser("~/assets/logo.png")
+IMG_SEG_DURATION_SEC  = 5
+INFO_SEG_DURATION_SEC = 3
+LOGO_SEG_DURATION_SEC = 2
+MAX_AMAZON_IMAGES     = 6
+
+PROMO_URL     = "https://www.myvipon.com"
+PRODUCT_LIMIT = 24
+
+SCROLL_MIN         = 1
+SCROLL_MAX         = 50
+SCROLL_PAUSE_RANGE = (0.7, 1.7)
+MAX_DISCOVERY      = 150
+
+WAIT_SECS        = 10
+PAGELOAD_TIMEOUT = 120
+SCRIPT_TIMEOUT   = 10
+IMPLICIT_WAIT    = 4
+
+MUSIC_DIR = os.path.expanduser("~/assets/music")
+
+CLOUDINARY_CLOUD_NAME   = "diufrf8l7"
+CLOUDINARY_API_KEY      = "278766692116231"
+CLOUDINARY_API_SECRET   = "ZmG521qjt-CNr0EgUWj3pJikScw"
+CLOUDINARY_VIDEO_FOLDER = "vipon_reels"
+
+MAX_TILES_SNAPSHOT = 300
+WORKER_BASE        = "https://amz.ifreshdeals.workers.dev"
+
+MAX_TITLE_LEN = 100
+
+# Fonts for FFmpeg drawtext
+FONT_CANDIDATES = (
+    [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ] if platform.system().lower() != "windows" else [
+        r"C:\Windows\Fonts\arialbd.ttf",
+        r"C:\Windows\Fonts\arial.ttf",
+        r"C:\Windows\Fonts\tahoma.ttf",
+        r"C:\Windows\Fonts\verdana.ttf",
+    ]
+)
+
+# ════════════════════════════════════════════════════════════════
+#  HELPERS
+# ════════════════════════════════════════════════════════════════
+
+BAD_CODES = {"CATEGORIES","CATEGORY","DISCOUNT","PROMOTION","VOUCHER","COUPON","COLLECTION"}
+CODE_RE   = re.compile(r"\b([A-Z0-9]{6,12})\b")
+ASIN_RE   = re.compile(r"\bB0[A-Z0-9]{8}\b", re.I)
+
+AMAZON_HOST_HINTS = (
+    "m.media-amazon.com",
+    "images-na.ssl-images-amazon.com",
+    "images-na",
+)
+
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
+
+def log(m): print(m, flush=True)
+
+def is_plausible_code(code: str, *, strict: bool = False) -> bool:
+    if not code: return False
+    c = code.strip().upper()
+    if c in BAD_CODES: return False
+    if not (6 <= len(c) <= 12): return False
+    if not c.isalnum(): return False
+    if strict and not any(ch.isdigit() for ch in c): return False
+    return True
+
+def expiry_to_date_text(expiry_txt: str) -> str:
+    if not expiry_txt:
+        return ""
+    txt = expiry_txt.lower()
+    m = re.search(r"(\d+)", txt)
+    if not m:
+        return expiry_txt
+    n = int(m.group(1))
+    if "day" in txt:
+        end_date = datetime.now() + timedelta(days=n)
+    elif "hour" in txt:
+        end_date = datetime.now() + timedelta(hours=n)
+    else:
+        return expiry_txt
+    return end_date.strftime("%B %-d")
+
+def _normalize_discount(raw: str) -> str:
+    if not raw:
+        return ""
+    m = re.search(r"(\d{1,3})", raw)
+    if not m:
+        return (raw or "").strip()
+    n = int(m.group(1))
+    return f"{n}% OFF"
+
+def utc_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+def shorten_title(s: str, max_len: int = MAX_TITLE_LEN) -> str:
+    s = (s or "").strip()
+    if len(s) <= max_len:
+        return s
+    cut = s.rfind(" ", 0, max_len - 1)
+    if cut < max_len // 2:
+        cut = max_len - 1
+    return s[:cut].rstrip() + "…"
+
+# ════════════════════════════════════════════════════════════════
+#  BLOCKED KEYWORDS
+# ════════════════════════════════════════════════════════════════
+
+BLOCKED_TITLE_KEYWORDS = [
+    "lingerie",
+    "sleepwear", "sleep ware", "sleep wear", "sleepware",
+    "women's clothes", "womens clothes", "women clothes",
+    "legging", "leggings", "pants", "sex", "neck",
+    "panty", "panties", "underwear", "bra", "Skirt",
+    "sexy", "lace", "wig",
+    "hooka", "hookah", "shisha",
+    "smoking", "tobacco", "tobaco",
+    "Christian","bible", "christian", "nightgown",
+    "dress", "Dress", "dressy", "blouse",
+    "wine", "vodka", "whiskey", "whisky", "beer",
+    "bikini", "swimsuit", "swimwear", "swim wear",
+]
+
+# ════════════════════════════════════════════════════════════════
+#  GOOGLE SHEET — row update with retry
+# ════════════════════════════════════════════════════════════════
+
+def update_row(ws, row_idx: int, values: list, max_retries: int = 6):
+    last_col = chr(ord('A') + len(values) - 1)
+    rng = f"A{row_idx}:{last_col}{row_idx}"
+    delay = 1.5
+    for attempt in range(max_retries):
+        try:
+            ws.update(rng, [values], value_input_option="USER_ENTERED")
+            return
+        except APIError as e:
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            if code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                time.sleep(delay)
+                delay *= 1.8
+                continue
+            raise
+
+def append_rows(ws, rows):
+    if rows:
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+
+# ════════════════════════════════════════════════════════════════
+#  FFMPEG / FFPROBE UTILITIES
+# ════════════════════════════════════════════════════════════════
+
+def _which_ffmpeg()  -> str: return shutil.which("ffmpeg")  or ""
+def _which_ffprobe() -> str: return shutil.which("ffprobe") or ""
+
+def _probe_duration(path: str) -> float:
+    ffprobe = _which_ffprobe()
+    if not ffprobe or not os.path.exists(path):
+        return 0.0
+    try:
+        out = subprocess.check_output(
+            [ffprobe, "-v", "error",
+             "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            timeout=20
+        ).decode().strip()
+        return max(0.0, float(out))
+    except Exception:
+        return 0.0
+
+def _find_fontfile() -> str:
+    for p in FONT_CANDIDATES:
+        if os.path.exists(p):
+            if platform.system().lower() == "windows":
+                return p.replace("\\", "/").replace(":", r"\:")
+            return p
+    return ""
+
+def _detect_chrome_major():
+    candidates = ("google-chrome", "chromium-browser", "chromium", "/usr/bin/google-chrome")
+    for cmd in candidates:
+        if shutil.which(cmd):
+            try:
+                out = subprocess.check_output([cmd, "--version"], text=True).strip()
+                m = re.search(r"(\d+)\.", out)
+                if m: return int(m.group(1))
+            except Exception:
+                continue
+    return None
+
+def _write_textfile(dirpath: str, filename: str, content: str) -> str:
+    p = os.path.join(dirpath, filename)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(content or "")
+    if platform.system().lower() == "windows":
+        return p.replace("\\", "/").replace(":", r"\:")
+    return p
+
+# ════════════════════════════════════════════════════════════════
+#  IMAGE STANDARDISATION  (720×1280)
+# ════════════════════════════════════════════════════════════════
+
+def standardize_image_for_video(src_path: str, out_path: str, size=None) -> bool:
+    if size is None:
+        size = (VIDEO_W, VIDEO_H)
+    try:
+        img = Image.open(src_path)
+        img = ImageOps.exif_transpose(img)
+        img = img.convert("RGB")
+        canvas = Image.new("RGB", size, (0, 0, 0))
+        img.thumbnail(size, Image.Resampling.LANCZOS)
+        x = (size[0] - img.width)  // 2
+        y = (size[1] - img.height) // 2
+        canvas.paste(img, (x, y))
+        canvas.save(out_path, "PNG", optimize=True)
+        return os.path.exists(out_path) and os.path.getsize(out_path) > 1024
+    except Exception as e:
+        log(f"  ⚠️ image standardization failed: {e}")
+        return False
+
+# ════════════════════════════════════════════════════════════════
+#  TTS  — edge-tts (free) with OpenAI fallback
+# ════════════════════════════════════════════════════════════════
+
+def _sanitize_for_tts(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"[@#][\w\-_]+", " ", text)
+    text = re.sub(r"[\"""''«»‹›´`]+", "", text)
+    text = text.replace("&", " and ").replace("+", " plus ")
+    text = re.sub(r"%\s*", " percent ", text)
+    text = re.sub(r"([!?]){2,}", r"\1", text)
+    text = re.sub(r"\.{2,}", ".", text)
+    def strip_emoji(s):
+        out = []
+        for ch in s:
+            cp = ord(ch)
+            if (0x1F1E6 <= cp <= 0x1FAD6) or (0x1F300 <= cp <= 0x1F5FF) or \
+               (0x1F900 <= cp <= 0x1F9FF) or (0x2600 <= cp <= 0x27BF) or (cp == 0xFE0F):
+                continue
+            out.append(ch)
+        return "".join(out)
+    text = strip_emoji(text)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    if len(text) > 350:
+        text = text[:350].rsplit(" ", 1)[0] + "."
+    return text
+
+OPENAI_KEY_PATHS = ["/mnt/data/videokey.txt", os.path.expanduser("~/videokey.txt")]
+
+def _read_openai_key():
+    for path in OPENAI_KEY_PATHS:
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    k = f.read().strip()
+                    if k:
+                        return k
+        except Exception:
+            continue
+    return None
+
+def _tts_openai_to_mp3(text: str, out_mp3: str, voice: str = "nova") -> bool:
+    """OpenAI TTS — kept as fallback."""
+    key = os.environ.get("OPENAI_API_KEY") or _read_openai_key()
+    if not key or not text:
+        return False
+    try:
+        payload = {"model": "gpt-4o-mini-tts", "voice": voice, "input": text}
+        r = requests.post(
+            "https://api.openai.com/v1/audio/speech",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json=payload, timeout=300
+        )
+        if not r.ok:
+            try:    log(f"  ⚠️ TTS {r.status_code}: {r.text[:300]}")
+            except: log(f"  ⚠️ TTS {r.status_code} (no body)")
+            return False
+        with open(out_mp3, "wb") as f:
+            f.write(r.content)
+        return os.path.exists(out_mp3) and os.path.getsize(out_mp3) > 1024
+    except Exception as e:
+        log(f"  ⚠️ OpenAI TTS error: {e}")
+        return False
+
+def _tts_to_mp3(text: str, out_path: str) -> bool:
+    """
+    Primary: edge-tts (free, runs locally, no API key).
+    Fallback: OpenAI TTS.
+    Install edge-tts once:  pip install edge-tts
+    """
+    if not text:
+        return False
+
+    # ── Try edge-tts ──────────────────────────────────────────
+    try:
+        import edge_tts  # noqa
+
+        async def _run():
+            communicate = edge_tts.Communicate(text, "en-US-EmmaNeural", rate="-8%")
+            await communicate.save(out_path)
+
+        asyncio.run(_run())
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 512:
+            log("  ✓ TTS via edge-tts (free)")
+            return True
+    except ImportError:
+        log("  ℹ️ edge-tts not installed — falling back to OpenAI TTS  (run: pip install edge-tts)")
+    except Exception as e:
+        log(f"  ⚠️ edge-tts failed: {e} — falling back to OpenAI TTS")
+
+    # ── Fallback: OpenAI ──────────────────────────────────────
+    return _tts_openai_to_mp3(text, out_path)
+
+# ════════════════════════════════════════════════════════════════
+#  SOCIAL POST  — Gemini free tier with OpenAI fallback
+# ════════════════════════════════════════════════════════════════
+
+GEMINI_KEY_PATHS = ["/mnt/data/geminikey.txt", os.path.expanduser("~/geminikey.txt")]
+
+def _read_gemini_key():
+    for path in GEMINI_KEY_PATHS:
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    k = f.read().strip()
+                    if k:
+                        return k
+        except Exception:
+            continue
+    return None
+
+def _build_post_prompt(link, code, discount_pct, expiry, title, price) -> str:
+    return (
+        "Write a single humorous and engaging Facebook post.\n"
+        f"- Product: {title} (pick 2–4 key words only, not the full title)\n"
+        f"- Discount: {discount_pct} off\n"
+        f"- Expires: {expiry}\n"
+        f"- Price: {price} (highlight if it is a bargain)\n"
+        f"- Discount code: {code} — tell readers to use it at checkout\n"
+        f"- Affiliate link (put on its own last line): {link}\n"
+        "Return only the final post text. No labels, no preamble."
+    )
+
+def generate_social_post(link, code, discount_pct, expiry, title, price):
+    fallback = (f"🔥 {discount_pct} off! Use code {code} before {expiry}. "
+                f"Price: {price}.\n{link}")
+
+    if os.getenv("VIPON_DISABLE_GPT", "0") in ("1","true","TRUE","yes","YES"):
+        return fallback
+
+    prompt = _build_post_prompt(link, code, discount_pct, expiry, title, price)
+
+    # ── Try Gemini 1.5 Flash (free: 1 500 req/day) ────────────
+    gemini_key = _read_gemini_key()
+    if gemini_key:
+        try:
+            url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+                   f"gemini-2.5-flash-lite:generateContent?key={gemini_key}")
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.8, "maxOutputTokens": 300}
+            }
+            resp = requests.post(url, json=payload, timeout=25)
+            if resp.ok:
+                j   = resp.json()
+                txt = (j.get("candidates", [{}])[0]
+                         .get("content", {})
+                         .get("parts", [{}])[0]
+                         .get("text", "")).strip()
+                if txt:
+                    log("  ✓ Post generated via Gemini (free)")
+                    return txt
+            else:
+                log(f"  ⚠️ Gemini {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            log(f"  ⚠️ Gemini post error: {e}")
+
+    # ── Fallback: OpenAI GPT-3.5-turbo ────────────────────────
+    api_key = _read_openai_key()
+    if api_key:
+        try:
+            payload = {
+                "model": "gpt-3.5-turbo",
+                "temperature": 0.8,
+                "messages": [
+                    {"role": "system", "content": "You are a witty social media marketer."},
+                    {"role": "user",   "content": prompt}
+                ]
+            }
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            resp = requests.post("https://api.openai.com/v1/chat/completions",
+                                 headers=headers, json=payload, timeout=25)
+            if resp.ok:
+                j   = resp.json()
+                txt = (j.get("choices", [{}])[0]
+                         .get("message", {})
+                         .get("content", "")).strip()
+                if txt:
+                    log("  ✓ Post generated via OpenAI")
+                    return txt
+        except Exception as e:
+            log(f"  ⚠️ OpenAI post error: {e}")
+
+    return fallback
+
+# ════════════════════════════════════════════════════════════════
+#  CLOUDINARY
+# ════════════════════════════════════════════════════════════════
+
+def cloudinary_url_exact(img_url: str, discount_pct_raw: str, code: str) -> str:
+    pct_txt = (discount_pct_raw or "").strip().upper()
+    if pct_txt and "OFF" not in pct_txt:
+        pct_txt = (pct_txt.split()[0] + " OFF") if "%" in pct_txt else (pct_txt + " OFF")
+    pct_enc  = quote(pct_txt, safe="")
+    code_enc = quote(f"Code: {code}", safe="")
+    img_enc  = quote(img_url or "", safe="")
+    return (f"https://res.cloudinary.com/{CLOUDINARY_CLOUD_NAME}/image/fetch/"
+            f"l_text:Arial_40_bold:{pct_enc},g_north_east,x_35,y_35/"
+            f"l_text:Arial_40_bold:{code_enc},g_north_east,x_35,y_90/{img_enc}")
+
+def _cloudinary_upload_video(mp4_path: str, public_id: str, max_retries: int = 5) -> str:
+    ts       = str(int(time.time()))
+    to_sign  = f"public_id={public_id}&timestamp={ts}{CLOUDINARY_API_SECRET}"
+    signature = hashlib.sha1(to_sign.encode("utf-8")).hexdigest()
+    url  = f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/video/upload"
+    data = {
+        "api_key":   CLOUDINARY_API_KEY,
+        "timestamp": ts,
+        "public_id": public_id,
+        "signature": signature,
+    }
+    headers = {"Connection": "close"}
+    delay = 2.0
+    for attempt in range(max_retries):
+        try:
+            with open(mp4_path, "rb") as f:
+                files = {"file": (os.path.basename(mp4_path), f, "video/mp4")}
+                r = requests.post(url, data=data, files=files, headers=headers, timeout=(30, 600))
+            r.raise_for_status()
+            j = r.json()
+            return j.get("secure_url") or j.get("url") or ""
+        except requests.RequestException as e:
+            if attempt < max_retries - 1:
+                log(f"  ⚠️ Cloudinary upload retry {attempt+1}/{max_retries}: {e}")
+                time.sleep(delay); delay *= 1.8
+            else:
+                raise
+
+# ════════════════════════════════════════════════════════════════
+#  AFFILIATE LINKS
+# ════════════════════════════════════════════════════════════════
+
+def _build_affiliate_dp_link(asin: str, tld: str = "com") -> str:
+    if not asin: return ""
+    base = f"https://www.amazon.{tld}/dp/{asin}"
+    sep  = "&" if "?" in base else "?"
+    return base + f"{sep}tag={AFFILIATE_ID}"
+
+def _worker_smartlink(asin: str, tag: str, tld: str = "com") -> str:
+    dp = _build_affiliate_dp_link(asin, tld)
+    if not WORKER_BASE:
+        return dp
+    qs = urllib.parse.urlencode({"asin": asin.upper(), "tag": tag, "tld": tld})
+    return f"{WORKER_BASE}/a?{qs}"
+
+def get_affiliate_link(asin: str, tld: str = "com") -> str:
+    link = _worker_smartlink(asin, AFFILIATE_ID, tld)
+    if os.getenv("VIPON_SHORT_LINK", "0") in ("1","true","TRUE","yes","YES"):
+        try:
+            resp = requests.get("http://tinyurl.com/api-create.php",
+                                params={"url": link}, timeout=8)
+            if resp.ok and resp.text and resp.text.startswith("http"):
+                return resp.text.strip()
+        except Exception:
+            pass
+    return link
+
+def get_platform_links(asin: str, tld: str = "com") -> dict:
+    if not asin:
+        return {"reel": "", "ig": "", "youtube": "", "tiktok": "", "pinterest": ""}
+    asin = asin.upper()
+    return {
+        "reel":      _worker_smartlink(asin, TAG_REEL,      tld),
+        "ig":        _worker_smartlink(asin, TAG_IG,        tld),
+        "youtube":   _worker_smartlink(asin, TAG_YOUTUBE,   tld),
+        "tiktok":    _worker_smartlink(asin, TAG_TIKTOK,    tld),
+        "pinterest": _worker_smartlink(asin, TAG_PINTEREST, tld),
+    }
+
+# ════════════════════════════════════════════════════════════════
+#  SELENIUM / CHROME
+# ════════════════════════════════════════════════════════════════
+
+def create_driver():
+    log("▶ Launching browser…")
+    common_args = [
+        "--headless=new",
+        "--window-size=1920,1080",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-extensions",
+        "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+        "--lang=en-US,en;q=0.9",
+    ]
+    try:
+        opts_uc = uc.ChromeOptions()
+        for a in common_args: opts_uc.add_argument(a)
+        major = _detect_chrome_major()
+        if major:
+            log(f"  ↳ Detected Chrome major: {major}")
+            driver = uc.Chrome(options=opts_uc, version_main=major)
+        else:
+            driver = uc.Chrome(options=opts_uc)
+        driver.set_page_load_timeout(PAGELOAD_TIMEOUT)
+        driver.set_script_timeout(SCRIPT_TIMEOUT)
+        driver.implicitly_wait(IMPLICIT_WAIT)
+        return driver
+    except (SessionNotCreatedException, WebDriverException, Exception) as e:
+        log(f"  ⚠️ UC failed ({e.__class__.__name__}): {e} — trying Selenium Manager")
+    try:
+        from selenium.webdriver.chrome.options import Options as ChromeOptions
+        opts_sm = ChromeOptions()
+        for a in common_args: opts_sm.add_argument(a)
+        driver = webdriver.Chrome(options=opts_sm)
+        driver.set_page_load_timeout(PAGELOAD_TIMEOUT)
+        driver.set_script_timeout(SCRIPT_TIMEOUT)
+        driver.implicitly_wait(IMPLICIT_WAIT)
+        return driver
+    except Exception as e:
+        raise RuntimeError(f"Failed to start Chrome (UC & Selenium Manager both failed): {e}")
+
+def _dismiss_overlays(driver):
+    xpaths = [
+        "//button[contains(.,'Accept') or contains(.,'I agree') or contains(.,'Got it')]",
+        "//a[contains(.,'Accept') or contains(.,'Agree')]",
+        "//*[@id='onetrust-accept-btn-handler']",
+        "//*[@class='cookie' or contains(@class,'cookie')]//button",
+        "//div[contains(@class,'modal')]//button[contains(.,'Close') or contains(.,'×')]",
+    ]
+    for xp in xpaths:
+        try:
+            el = WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.XPATH, xp)))
+            el.click(); time.sleep(0.3)
+        except Exception:
+            continue
+
+def login(driver, wait):
+    log("▶ Logging in…")
+    driver.get("https://www.myvipon.com/login")
+    wait.until(EC.presence_of_element_located((By.NAME, "LoginForm[email]"))).send_keys(USERNAME)
+    wait.until(EC.presence_of_element_located((By.NAME, "LoginForm[password]"))).send_keys(PASSWORD)
+    for xp in [
+        "//div[contains(@class,'google_test') and normalize-space(text())='Log In']",
+        "//button[@type='submit']",
+        "//button[contains(.,'Login') or contains(.,'Log in') or contains(.,'Sign in')]",
+        "//input[@type='submit']",
+    ]:
+        try:
+            btn = WebDriverWait(driver, 12).until(EC.element_to_be_clickable((By.XPATH, xp)))
+            btn.click(); break
+        except Exception:
+            continue
+    wait.until(EC.presence_of_element_located((By.XPATH, "//a[contains(@href,'logout')]")))
+    _dismiss_overlays(driver)
+    log("✓ Logged in")
+
+# ════════════════════════════════════════════════════════════════
+#  GOOGLE SHEETS
+# ════════════════════════════════════════════════════════════════
+
+HEADER = [
+    "Link", "Reel", "IG", "Youtube", "TikTok",
+    "Discount Code", "Disc", "Expiry", "Product", "Price",
+    "PID", "Image", "Pin Image", "Reel URL", "FB Post", "Posted On"
+]
+
+# ── Pinterest sheet (preserved, gated by ENABLE_PINTEREST) ──────
+PINTEREST_SHEET_NAME       = "Pintrest"
+PINTEREST_BOARD_DEFAULT    = "Daily Coupons and Discounts"
+PINTEREST_KEYWORDS_DEFAULT = "Discount, Code, Coupon, Amazon, Deal"
+PINTEREST_THUMBNAIL_DEFAULT = "2"
+
+def generate_pinterest_description(title, discount_pct, code, expiry, price):
+    parts = []
+    if title:
+        t = title.strip()
+        if len(t) > 80: t = t[:77] + "..."
+        parts.append(f"🎁 {t}")
+    if discount_pct: parts.append(f"Save {discount_pct}")
+    if code:         parts.append(f"Use code {code}")
+    if price:        parts.append(f"Now {price}")
+    if expiry:       parts.append(f"Ends {expiry}")
+    desc = " • ".join(parts) or "Hot deal • Limited time"
+    desc += "  #Amazon #Deal #Coupon"
+    return desc
+
+def open_pinterest_sheet_and_reset():
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDS_FILE, scope)
+    client = gspread.authorize(creds)
+    try:
+        ws = client.open(GOOGLE_SHEET_NAME).worksheet(PINTEREST_SHEET_NAME)
+    except Exception:
+        ss = client.open(GOOGLE_SHEET_NAME)
+        ws = ss.add_worksheet(title=PINTEREST_SHEET_NAME, rows=1000, cols=20)
+    ws.clear()
+    ws.append_row(
+        ["Title", "Media URL", "Pinterest board", "Thumbnail",
+         "Description", "Link", "Publish date", "Keywords"],
+        value_input_option="USER_ENTERED"
+    )
+    return ws
+
+def open_sheet_and_reset():
+    log("▶ Opening Google Sheet and cleaning completed rows…")
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDS_FILE, scope)
+    client = gspread.authorize(creds)
+    ws = client.open(GOOGLE_SHEET_NAME).sheet1
+
+    values = ws.get_all_values()
+    if not values:
+        ws.append_row(HEADER, value_input_option="USER_ENTERED")
+        log("✓ Sheet was empty — header added")
+        return ws
+
+    # Delete rows where BOTH col-P and col-Q are "yes"
+    rows_to_delete = []
+    for idx, row in enumerate(values[1:], start=2):
+        col_p = row[15].strip().lower() if len(row) >= 16 else ""
+        col_q = row[16].strip().lower() if len(row) >= 17 else ""
+        if col_p == "yes" and col_q == "yes":
+            rows_to_delete.append(idx)
+
+    for row_idx in reversed(rows_to_delete):
+        ws.delete_rows(row_idx)
+
+    log(f"✓ Sheet ready — removed {len(rows_to_delete)} completed rows")
+    return ws
+
+# ════════════════════════════════════════════════════════════════
+#  PAGE HELPERS
+# ════════════════════════════════════════════════════════════════
+
+def _attr(el, name: str) -> str:
+    try: return (el.get_attribute(name) or "").strip()
+    except Exception: return ""
+
+def _text(el) -> str:
+    try:
+        t = (el.text or "").strip()
+        if t: return t
+    except Exception: pass
+    try: return (el.get_attribute("textContent") or "").strip()
+    except Exception: return ""
+
+# ════════════════════════════════════════════════════════════════
+#  IMAGE RESOLVER
+# ════════════════════════════════════════════════════════════════
+
+def _looks_like_product_img(url: str) -> bool:
+    if not url or not url.startswith("http"):
+        return False
+    low = url.lower()
+    if any(b in low for b in ("vipon.com", "/favicon", "logo", "/static/", "data:image")):
+        return False
+    return any(h in url for h in AMAZON_HOST_HINTS)
+
+def _extract_amazon_img_from_source(src: str) -> str:
+    if not src: return ""
+    m = re.search(r"(https://m\.media-amazon\.com[^\"'>]+\.(?:jpe?g|png))", src, re.I)
+    return m.group(1) if m else ""
+
+def resolve_cover_image_url(driver) -> str:
+    xps = [
+        "//div[contains(@class,'left-show-img')]//img",
+        "//div[contains(@class,'product') and contains(@class,'img')]//img",
+        "//div[contains(@class,'box-img')]//img",
+        "//img[contains(@src,'m.media-amazon.com') or contains(@data-src,'m.media-amazon.com')]",
+        "//img[contains(@src,'images-na') or contains(@data-src,'images-na')]",
+    ]
+    for xp in xps:
+        try:
+            els = driver.find_elements(By.XPATH, xp)
+            for el in els:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                time.sleep(0.25)
+                for attr in ("src", "data-src", "data-original", "data-lazy"):
+                    url = (el.get_attribute(attr) or "").strip()
+                    if _looks_like_product_img(url):
+                        return url
+        except Exception:
+            pass
+    try:
+        og = driver.find_element(By.XPATH, "//meta[@property='og:image' or @name='og:image']")
+        url = (og.get_attribute("content") or "").strip()
+        if _looks_like_product_img(url):
+            return url
+    except Exception:
+        pass
+    try:
+        return _extract_amazon_img_from_source(driver.page_source or "")
+    except Exception:
+        return ""
+# PA-API client cached at module level — created once, reused across all products
+_PAAPI_CLIENT = None
+
+def _get_paapi_client():
+    global _PAAPI_CLIENT
+    if _PAAPI_CLIENT is not None:
+        return _PAAPI_CLIENT
+    try:
+        import csv
+        from paapi5_python_sdk.api.default_api import DefaultApi
+        csv_path = os.path.expanduser("~/PAAPI.csv")
+        with open(csv_path) as f:
+            row = next(csv.DictReader(f))
+            access = row["Access Key"].strip()
+            secret = row["Secret Key"].strip()
+        _PAAPI_CLIENT = DefaultApi(
+            access_key=access,
+            secret_key=secret,
+            host="webservices.amazon.com",
+            region="us-east-1",
+        )
+        return _PAAPI_CLIENT
+    except Exception as e:
+        log(f"  ⚠️ PA-API client init failed: {e}")
+        return None
+
+
+def fetch_amazon_images(driver, asin: str, tld: str = "com", max_imgs: int = 9) -> list:
+    """
+    Official Amazon Product Advertising API (PA-API 5).
+    No scraping, no IP blocking, no Chrome involved.
+    The 'driver' and 'tld' params are kept for signature compatibility.
+    """
+    if not asin:
+        return []
+    client = _get_paapi_client()
+    if not client:
+        return []
+    try:
+        from paapi5_python_sdk.get_items_request import GetItemsRequest
+        from paapi5_python_sdk.get_items_resource import GetItemsResource
+        from paapi5_python_sdk.partner_type import PartnerType
+
+        log(f"  ↳ Amazon PA-API: {asin}")
+        request = GetItemsRequest(
+            partner_tag=AFFILIATE_ID,
+            partner_type=PartnerType.ASSOCIATES,
+            marketplace="www.amazon.com",
+            item_ids=[asin],
+            resources=[
+                GetItemsResource.IMAGES_PRIMARY_LARGE,
+                GetItemsResource.IMAGES_VARIANTS_LARGE,
+            ],
+        )
+        response = client.get_items(request)
+        if not response or not response.items_result or not response.items_result.items:
+            log(f"  ⚠️ PA-API returned no items for {asin}")
+            return []
+
+        item = response.items_result.items[0]
+        imgs = []
+        try:
+            if item.images and item.images.primary and item.images.primary.large:
+                imgs.append(item.images.primary.large.url)
+        except Exception:
+            pass
+        try:
+            if item.images and item.images.variants:
+                for v in item.images.variants:
+                    if v.large and v.large.url and v.large.url not in imgs:
+                        imgs.append(v.large.url)
+                    if len(imgs) >= max_imgs:
+                        break
+        except Exception:
+            pass
+        log(f"  ↳ PA-API images: {len(imgs)}")
+        return imgs[:max_imgs]
+    except Exception as e:
+        log(f"  ⚠️ PA-API fetch failed for {asin}: {e}")
+        return []
+
+# ════════════════════════════════════════════════════════════════
+#  TILE DISCOVERY
+# ════════════════════════════════════════════════════════════════
+
+def collect_promo_tiles_random(driver, wait):
+    log("▶ Loading promotions (random scroll)…")
+    driver.get(PROMO_URL)
+    _dismiss_overlays(driver)
+
+    def _has_any_products(d):
+        return (d.find_elements(By.XPATH, "//a[contains(@href,'/product')]") or
+                d.find_elements(By.XPATH, "//div[contains(@class,'box') and contains(@class,'solid')]"))
+    try:
+        WebDriverWait(driver, WAIT_SECS).until(_has_any_products)
+    except TimeoutException:
+        pass
+
+    def snapshot_pids():
+        seen, out = set(), []
+        for a in driver.find_elements(By.XPATH, "//a[contains(@href,'/product')]"):
+            try:
+                href = _attr(a, "href")
+                if "/product" not in href: continue
+                pid = href.split("/product")[-1].strip("/").split("?")[0].split("/")[0]
+                pid = re.sub(r"[^0-9A-Za-z_-].*$", "", pid)
+                if pid and pid not in seen:
+                    seen.add(pid); out.append(pid)
+            except StaleElementReferenceException:
+                continue
+        for box in driver.find_elements(By.XPATH, "//div[contains(@class,'box') and contains(@class,'solid')]"):
+            try:
+                pid = _attr(box, "data-id") or _attr(box, "id")
+                if pid and pid not in seen:
+                    seen.add(pid); out.append(pid)
+            except StaleElementReferenceException:
+                continue
+        return out
+
+    total_scrolls = random.randint(SCROLL_MIN, SCROLL_MAX)
+    last_count, stagnant = 0, 0
+    for _ in range(total_scrolls):
+        driver.execute_script("window.scrollBy(0, Math.floor(window.innerHeight*0.9));")
+        time.sleep(random.uniform(*SCROLL_PAUSE_RANGE))
+        now = len(snapshot_pids())
+        if now <= last_count:
+            stagnant += 1
+            if stagnant >= 2: break
+        else:
+            stagnant = 0; last_count = now
+
+    pids = snapshot_pids()
+    if not pids:
+        driver.get(PROMO_URL); _dismiss_overlays(driver); time.sleep(2)
+        pids = snapshot_pids()
+
+    random.shuffle(pids)
+    pids = pids[:min(MAX_DISCOVERY, len(pids))]
+    log(f"✓ Discovered {len(pids)} product IDs")
+    return [(pid, "", "") for pid in pids]
+
+# ════════════════════════════════════════════════════════════════
+#  DISCOUNT CODE EXTRACTION
+# ════════════════════════════════════════════════════════════════
+
+def try_reveal_code(driver):
+    xps = [
+        "//*[@id='PC_239_getCodeInDetail']",
+        "//button[contains(., 'Get Code') or contains(., 'Reveal') or contains(., 'Show Code')]",
+        "//a[contains(., 'Get Code') or contains(., 'Reveal') or contains(., 'Show Code')]",
+        "//*[@data-target='#PC_240_jumpToAmzFromCodeZone']",
+        "//*[@id='PC_241_useCodeOnAmazon']",
+        "//button[contains(@class,'get-coupon-btn')]",
+    ]
+    for xp in xps:
+        try:
+            el = WebDriverWait(driver, 6).until(EC.element_to_be_clickable((By.XPATH, xp)))
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            time.sleep(0.3)
+            try: driver.execute_script("arguments[0].click();", el)
+            except Exception: el.click()
+            time.sleep(0.6)
+        except Exception:
+            continue
+
+def extract_code(driver):
+    for i in ["PC_240_jumpToAmzFromCodeZone", "PC_240_codeInDetail", "coupon_code"]:
+        try:
+            el = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, i)))
+            txt = (_text(el) or "").upper()
+            m = CODE_RE.search(txt)
+            if m and is_plausible_code(m.group(1), strict=False): return m.group(1)
+            if is_plausible_code(txt, strict=False): return txt
+        except Exception:
+            pass
+    try:
+        src = (driver.page_source or "").upper()
+        m = re.search(r"CODE[:\s]*([A-Z0-9]{6,12})", src)
+        if m and is_plausible_code(m.group(1), strict=False): return m.group(1)
+    except Exception:
+        pass
+    try:
+        for el in driver.find_elements(By.XPATH, "//strong|//b|//code|//span")[:250]:
+            txt = (_text(el) or "").upper()
+            m = CODE_RE.search(txt)
+            if m and is_plausible_code(m.group(1), strict=True): return m.group(1)
+    except Exception:
+        pass
+    return ""
+
+# ════════════════════════════════════════════════════════════════
+#  PRODUCT PAGE SCRAPER
+# ════════════════════════════════════════════════════════════════
+
+def scrape_product_page(driver, wait, pid):
+    url = f"https://www.myvipon.com/product/{pid}"
+    log(f"→ PID {pid}: opening product page…")
+    try:
+        driver.get(url)
+    except TimeoutException:
+        log("  ⏱️ page load timeout, retry once…"); driver.get(url)
+    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
+    time.sleep(0.4)
+
+    if "/product/" not in driver.current_url:
+        driver.get(url)
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
+
+    try_reveal_code(driver)
+    code = extract_code(driver)
+    code = (code or "").strip().upper()
+    if not is_plausible_code(code, strict=False):
+        log("  ✗ no valid code — skipping")
+        return None
+
+    def _safe_css(c):
+        try: return (driver.find_element(By.CSS_SELECTOR, c).text or "").strip()
+        except Exception: return ""
+    def _safe_xpath(x):
+        try: return (driver.find_element(By.XPATH, x).text or "").strip()
+        except Exception: return ""
+
+    discount = _safe_css(".product-percent-discount")
+    expiry   = _safe_css(".minutes")
+    title    = _safe_xpath("//p[contains(@class,'product-title')]//span")
+    price    = _safe_css("p.product-price > span")
+
+    # Filter blocked keywords
+    t_low = (title or "").lower()
+    for bad in BLOCKED_TITLE_KEYWORDS:
+        if bad in t_low:
+            log(f"  ✗ blocked keyword '{bad}' — skipping PID {pid}")
+            return None
+
+    image_url = resolve_cover_image_url(driver)
+    log(f"  ↳ cover image: {image_url or 'NONE'}")
+
+    src  = driver.page_source or ""
+    m    = ASIN_RE.search(src)
+    asin = m.group(0).upper() if m else ""
+
+    images = []
+    if asin:
+        images = fetch_amazon_images(driver, asin, "com", max_imgs=MAX_AMAZON_IMAGES)
+        if not images and image_url:
+            images = [image_url]
+
+    link           = get_affiliate_link(asin, "com") if asin else ""
+    platform_links = (get_platform_links(asin, "com") if asin
+                      else {"reel":"","ig":"","youtube":"","tiktok":"","pinterest":""})
+
+    return {
+        "pid":            pid,
+        "link":           link,
+        "link_reel":      platform_links["reel"],
+        "link_ig":        platform_links["ig"],
+        "link_youtube":   platform_links["youtube"],
+        "link_tiktok":    platform_links["tiktok"],
+        "link_pinterest": platform_links.get("pinterest", ""),
+        "code":           code,
+        "discount":       discount,
+        "expiry":         expiry,
+        "title":          title,
+        "price":          price,
+        "image":          image_url,
+        "images":         images,
+    }
+
+# ════════════════════════════════════════════════════════════════
+#  FFMPEG SEGMENT BUILDERS  (720×1280, ultrafast, no yellow lines)
+# ════════════════════════════════════════════════════════════════
+
+# Common FFmpeg flags for all encoding steps
+_FF_ENCODE = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-threads", "1"]
+_FF_LOG    = ["-loglevel", "error", "-hide_banner"]
+
+
+def _ffmpeg_build_segment_from_image(img_path: str, out_seg: str, dur_sec: int = 5,
+                                     overlay_big: str = "", overlay_small: str = ""):
+    ffmpeg_bin = _which_ffmpeg()
+    if not ffmpeg_bin: raise RuntimeError("ffmpeg not found")
+    fontfile = _find_fontfile()
+    if not fontfile: raise RuntimeError("No usable font file found")
+
+    # y positions (proportional, same visual placement at 720×1280)
+    y_big   = "h*0.74"
+    y_small = "h*0.81"
+
+    vf_parts = [
+        f"scale={VIDEO_W}:{VIDEO_H}:force_original_aspect_ratio=decrease",
+        f"pad={VIDEO_W}:{VIDEO_H}:(ow-iw)/2:(oh-ih)/2",
+        "setsar=1",
+    ]
+
+    def _drawline(txtfile, y_expr, fontsize):
+        return (f"drawtext=fontfile='{fontfile}':expansion=none:textfile='{txtfile}':"
+                f"x=(w-text_w)/2:y={y_expr}:fontsize={fontsize}:fontcolor=white:"
+                f"box=1:boxcolor=black@0.55:boxborderw=10:shadowcolor=black@0.7:shadowx=2:shadowy=2:"
+                f"enable='1'")
+
+    with tempfile.TemporaryDirectory(prefix="vipon_imgtxt_") as td:
+        pct_file  = _write_textfile(td, "pct.txt",  (overlay_big   or "").strip())
+        code_file = _write_textfile(td, "code.txt", (overlay_small or "").strip())
+
+        filters = list(vf_parts)
+        filters.append(_drawline(pct_file,  y_big,   56))   # 84 × 0.667 → 56
+        filters.append(_drawline(code_file, y_small, 38))   # 56 × 0.667 → 38
+
+        vf_full = ",".join(filters)
+        cmd = (
+            [ffmpeg_bin, "-y"] + _FF_LOG +
+            ["-loop", "1", "-t", str(dur_sec), "-i", img_path,
+             "-vf", vf_full, "-r", "30", "-pix_fmt", "yuv420p"]
+            + _FF_ENCODE + ["-an", out_seg]
+        )
+        subprocess.run(cmd, check=True)
+
+
+def _ffmpeg_build_black_text_segment(out_seg: str, discount_txt: str, code_txt: str, dur_sec: int = 3):
+    ffmpeg_bin = _which_ffmpeg()
+    if not ffmpeg_bin: raise RuntimeError("ffmpeg not found")
+    fontfile = _find_fontfile()
+    if not fontfile: raise RuntimeError("No usable font file found")
+
+    with tempfile.TemporaryDirectory(prefix="vipon_black_") as td:
+        pct_file  = _write_textfile(td, "pct.txt",  (discount_txt or "").strip())
+        code_file = _write_textfile(td, "code.txt",
+                                    (f"Code: {code_txt}" if code_txt else "").strip())
+
+        draw1 = (f"drawtext=fontfile='{fontfile}':expansion=none:textfile='{pct_file}':"
+                 f"x=(w-text_w)/2:y=(h/2)-80:fontsize=56:fontcolor=white:"
+                 f"box=1:boxcolor=black@0.0:boxborderw=10:shadowcolor=black@0.7:shadowx=2:shadowy=2")
+        draw2 = (f"drawtext=fontfile='{fontfile}':expansion=none:textfile='{code_file}':"
+                 f"x=(w-text_w)/2:y=(h/2)+14:fontsize=48:fontcolor=white:"
+                 f"box=1:boxcolor=black@0.0:boxborderw=10:shadowcolor=black@0.7:shadowx=2:shadowy=2")
+
+        vf  = f"scale={VIDEO_W}:{VIDEO_H},setsar=1,{draw1},{draw2}"
+        cmd = (
+            [ffmpeg_bin, "-y"] + _FF_LOG +
+            ["-f", "lavfi", "-i", f"color=c=black:s={VIDEO_W}x{VIDEO_H}:d={dur_sec}",
+             "-vf", vf, "-r", "30", "-pix_fmt", "yuv420p"]
+            + _FF_ENCODE + ["-an", out_seg]
+        )
+        subprocess.run(cmd, check=True)
+
+
+def _ffmpeg_build_logo_segment(logo_path: str, out_seg: str, dur_sec: int = 2):
+    ffmpeg_bin = _which_ffmpeg()
+    if not ffmpeg_bin: raise RuntimeError("ffmpeg not found")
+    if not os.path.exists(logo_path):
+        raise FileNotFoundError(f"Logo not found at {logo_path}")
+    vf  = (f"scale=540:-1:force_original_aspect_ratio=decrease,"
+           f"pad={VIDEO_W}:{VIDEO_H}:({VIDEO_W}-iw)/2:({VIDEO_H}-ih)/2,setsar=1")
+    cmd = (
+        [ffmpeg_bin, "-y"] + _FF_LOG +
+        ["-loop", "1", "-t", str(dur_sec), "-i", logo_path,
+         "-vf", vf, "-r", "30", "-pix_fmt", "yuv420p"]
+        + _FF_ENCODE + ["-an", out_seg]
+    )
+    subprocess.run(cmd, check=True)
+
+# ════════════════════════════════════════════════════════════════
+#  REEL BUILDER
+# ════════════════════════════════════════════════════════════════
+
+def _pick_music(path=MUSIC_DIR):
+    if not os.path.isdir(path): return ""
+    cand = glob.glob(os.path.join(path, "*.mp3")) + glob.glob(os.path.join(path, "*.wav"))
+    random.shuffle(cand); return cand[0] if cand else ""
+
+
+def make_and_upload_reel_from_images(pid: str, image_urls: list,
+                                     discount_txt: str, code_txt: str,
+                                     title_txt: str, price_txt: str,
+                                     expiry_txt: str = "") -> str:
+    norm_disc = _normalize_discount(discount_txt)
+
+    if not image_urls:
+        log(f"  ⚠️ no images for PID {pid} — skipping reel")
+        return ""
+
+    ffmpeg_bin = _which_ffmpeg()
+    if not ffmpeg_bin:
+        log("  ⚠️ ffmpeg not found — skipping reel")
+        return ""
+
+    # Deduplicate and cap
+    dedup, seen = [], set()
+    for u in image_urls:
+        if u and u not in seen:
+            dedup.append(u); seen.add(u)
+        if len(dedup) >= MAX_AMAZON_IMAGES:
+            break
+    image_urls = dedup
+
+    with tempfile.TemporaryDirectory(prefix="vipon_reel_") as td:
+        local_imgs, segs = [], []
+
+        # 1) Download & standardise images
+        for idx, u in enumerate(image_urls, start=1):
+            img_path = os.path.join(td, f"img{idx}.jpg")
+            try:
+                resp = requests.get(u, timeout=60, stream=True, headers={"User-Agent": UA})
+                resp.raise_for_status()
+                with open(img_path, "wb") as w:
+                    for chunk in resp.iter_content(1 << 15):
+                        if chunk: w.write(chunk)
+            except Exception as e:
+                log(f"  ⚠️ could not download image {idx}: {e}")
+                continue
+
+            fixed_path = os.path.join(td, f"img{idx}_fixed.png")
+            if standardize_image_for_video(img_path, fixed_path):
+                local_imgs.append(fixed_path)
+            else:
+                log(f"  ⚠️ using raw image (standardization failed): {img_path}")
+                local_imgs.append(img_path)
+
+        if not local_imgs:
+            log(f"  ⚠️ no usable images for PID {pid} — skipping reel")
+            return ""
+
+        # 2) Build one segment per image
+        for i, ip in enumerate(local_imgs, start=1):
+            seg = os.path.join(td, f"seg_img_{i}.mp4")
+            try:
+                _ffmpeg_build_segment_from_image(
+                    ip, seg,
+                    dur_sec=IMG_SEG_DURATION_SEC,
+                    overlay_big=norm_disc or "",
+                    overlay_small=f"Code: {code_txt}" if code_txt else "",
+                )
+                segs.append(seg)
+            except Exception as e:
+                log(f"  ⚠️ segment {i} failed: {e}")
+
+        if not segs:
+            log(f"  ⚠️ no segments built for PID {pid}")
+            return ""
+
+        # 3) Optional logo screen
+        if os.path.exists(LOGO_PATH):
+            logo_seg = os.path.join(td, "seg_logo.mp4")
+            try:
+                _ffmpeg_build_logo_segment(LOGO_PATH, logo_seg, dur_sec=LOGO_SEG_DURATION_SEC)
+                segs.append(logo_seg)
+            except Exception as e:
+                log(f"  ⚠️ logo segment failed: {e}")
+        else:
+            log(f"  ℹ️ No logo at {LOGO_PATH}; skipping logo segment")
+
+        # 4) Concat all segments
+        listfile    = os.path.join(td, "list.txt")
+        concat_path = os.path.join(td, "concat.mp4")
+        with open(listfile, "w", encoding="utf-8") as f:
+            for s in segs:
+                f.write(f"file '{Path(s).as_posix()}'\n")
+
+        subprocess.run(
+            [ffmpeg_bin, "-y"] + _FF_LOG +
+            ["-f", "concat", "-safe", "0", "-i", listfile, "-c", "copy", concat_path],
+            check=True
+        )
+
+        # 5) Voiceover (edge-tts free → OpenAI fallback)
+        end_date_txt = expiry_to_date_text(expiry_txt)
+        if norm_disc and end_date_txt:
+            vo_line = (f"{title_txt}. {norm_disc}. "
+                       f"This discount ends on {end_date_txt}. "
+                       f"Price {price_txt}. Product link in description")
+        elif norm_disc:
+            vo_line = f"{title_txt}. {norm_disc}. Limited time. Price {price_txt}. Product link in description"
+        else:
+            vo_line = f"{title_txt}. Limited time offer. Price {price_txt}"
+
+        vo_line    = _sanitize_for_tts(vo_line)
+        voice_file = os.path.join(td, "voice.mp3")
+        have_vo    = _tts_to_mp3(vo_line, voice_file)   # ← single call (bug fixed)
+
+        # 6) Mix audio
+        out_path = os.path.join(td, f"{pid}.mp4")
+        if have_vo:
+            cmd = (
+                [ffmpeg_bin, "-y"] + _FF_LOG +
+                ["-i", concat_path, "-i", voice_file,
+                 "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-shortest", out_path]
+            )
+        else:
+            vid_dur = _probe_duration(concat_path) or 10.0
+            cmd = (
+                [ffmpeg_bin, "-y"] + _FF_LOG +
+                ["-i", concat_path,
+                 "-f", "lavfi", "-t", f"{vid_dur:.2f}",
+                 "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                 "-c:v", "copy", "-c:a", "aac", "-b:a", "96k", "-shortest", out_path]
+            )
+
+        subprocess.run(cmd, check=True)
+
+        # 7) Upload to Cloudinary
+        public_id = f"{CLOUDINARY_VIDEO_FOLDER}/{pid}"
+        vurl = _cloudinary_upload_video(out_path, public_id)
+        if vurl:
+            log(f"  ✓ reel URL: {vurl}")
+        else:
+            log("  ⚠️ Cloudinary returned no URL")
+        return vurl
+
+# ════════════════════════════════════════════════════════════════
+#  MAIN  — Phase 1: scrape all (Chrome alive)
+#          Phase 2: build videos + write sheet (Chrome closed, RAM freed)
+# ════════════════════════════════════════════════════════════════
+
+def main():
+    random.seed(time.time())
+
+    ws     = open_sheet_and_reset()
+    driver = create_driver()
+    wait   = WebDriverWait(driver, WAIT_SECS)
+
+    # ── PHASE 1: Scrape ──────────────────────────────────────────
+    scraped = []
+    try:
+        login(driver, wait)
+        tiles = collect_promo_tiles_random(driver, wait)
+        count = 0
+
+        for pid, _, _ in tiles:
+            if count >= PRODUCT_LIMIT:
+                break
+            try:
+                data = scrape_product_page(driver, wait, pid)
+            except TimeoutException:
+                log(f"  ⏱️ hard timeout on PID {pid} — skip")
+                continue
+            except WebDriverException as e:
+                log(f"  ⚠️ webdriver error on PID {pid}: {e} — skip")
+                continue
+
+            if data is None:
+                continue
+
+            scraped.append(data)
+            count += 1
+            log(f"✓ Scraped {count}/{PRODUCT_LIMIT}: {data['title'][:60]}")
+
+    finally:
+        try:
+            driver.quit()
+            log("✓ Chrome closed — RAM freed, starting video production…")
+        except Exception:
+            pass
+
+    if not scraped:
+        log("✗ No products scraped — exiting")
+        return
+
+    # ── PHASE 2: Videos + Sheet ───────────────────────────────────
+    if ENABLE_PINTEREST:
+        ws_p = open_pinterest_sheet_and_reset()
+
+    for data in scraped:
+        pid       = data["pid"]
+        t_short   = shorten_title(data["title"], MAX_TITLE_LEN)
+        pin_img_url = data["image"]
+
+        try:
+            reel_url = make_and_upload_reel_from_images(
+                pid,
+                data.get("images") or ([data["image"]] if data.get("image") else []),
+                data["discount"],
+                data["code"],
+                data["title"],
+                data["price"],    # ← comma present (bug fixed)
+                data["expiry"],
+            )
+        except Exception as e:
+            log(f"  ⚠️ reel failed for PID {pid}: {e}")
+            reel_url = ""
+
+        # Write main sheet row
+        ws.append_row([
+            data["link"],
+            data["link_reel"],
+            data["link_ig"],
+            data["link_youtube"],
+            data["link_tiktok"],
+            data["code"],
+            data["discount"],
+            data["expiry"],
+            t_short,
+            data["price"],
+            pid,
+            data["image"],
+            pin_img_url,
+            reel_url,
+            generate_social_post(
+                data["link"],
+                data["code"],
+                data["discount"],
+                data["expiry"],
+                t_short,
+                data["price"],
+            ),
+        ], value_input_option="USER_ENTERED")
+
+        # Write Pinterest row (only if enabled)
+        if ENABLE_PINTEREST:
+            ws_p.append_row([
+                t_short,
+                reel_url,
+                PINTEREST_BOARD_DEFAULT,
+                PINTEREST_THUMBNAIL_DEFAULT,
+                generate_pinterest_description(
+                    t_short,
+                    data["discount"],
+                    data["code"],
+                    data["expiry"],
+                    data["price"],
+                ),
+                data["link_pinterest"],
+                "",
+                PINTEREST_KEYWORDS_DEFAULT,
+            ], value_input_option="USER_ENTERED")
+
+        time.sleep(0.3)
+        log(f"✓ Row written for PID {pid}")
+
+    log(f"✅ Done — {len(scraped)} products processed")
+
+
+if __name__ == "__main__":
+    main()

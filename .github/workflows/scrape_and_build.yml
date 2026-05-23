@@ -1,0 +1,46 @@
+name: Scrape & Build Videos
+
+# Runs every day at 6:00 AM CT (11:00 UTC during CDT / 12:00 UTC during CST)
+on:
+  schedule:
+    - cron: '0 11 * * *'
+  workflow_dispatch:  # allow manual trigger from GitHub UI
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Checkout secrets repo
+        uses: actions/checkout@v4
+        with:
+          repository: 1CodeForFun/vipon-secrets
+          token: ${{ secrets.SECRETS_PAT }}
+          path: secrets
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies (FFmpeg + Chrome)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg chromium-browser chromium-chromedriver
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Copy credential files to working directory
+        run: |
+          cp secrets/vipon_google_creds.json .
+          cp secrets/PAAPI.csv .
+          cp secrets/videokey.txt .
+          cp secrets/geminikey.txt .
+
+      - name: Run scrape & build
+        run: python vipon26.py

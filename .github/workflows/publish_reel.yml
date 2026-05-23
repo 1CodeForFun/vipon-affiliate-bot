@@ -1,0 +1,38 @@
+name: Publish Reel (Hourly)
+
+# Runs every hour. Posts ONE reel per run (the first row where col P != "Yes").
+# Starts having reels to post at 11 AM CT (4 PM UTC) after the 6 AM scrape.
+# Exits cleanly when there are no more reels to post — no manual stopping needed.
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Checkout secrets repo
+        uses: actions/checkout@v4
+        with:
+          repository: 1CodeForFun/vipon-secrets
+          token: ${{ secrets.SECRETS_PAT }}
+          path: secrets
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install gspread oauth2client requests google-auth google-auth-oauthlib google-api-python-client
+
+      - name: Publish reel
+        env:
+          SECRETS_DIR: secrets
+        run: python vipon_publisher.py

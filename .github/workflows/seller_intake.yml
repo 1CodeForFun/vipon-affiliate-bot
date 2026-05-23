@@ -1,0 +1,47 @@
+name: Seller Form Intake
+
+# Runs every day at 7:00 AM CT (12:00 UTC during CDT)
+# Processes new Google Form submissions from sellers
+on:
+  schedule:
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+
+jobs:
+  seller:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Checkout secrets repo
+        uses: actions/checkout@v4
+        with:
+          repository: 1CodeForFun/vipon-secrets
+          token: ${{ secrets.SECRETS_PAT }}
+          path: secrets
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies (FFmpeg for video building)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Copy credential files to working directory
+        run: |
+          cp secrets/vipon_google_creds.json .
+          cp secrets/PAAPI.csv .
+          cp secrets/videokey.txt .
+          cp secrets/geminikey.txt .
+
+      - name: Run seller intake
+        run: python seller8.py

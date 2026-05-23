@@ -1,0 +1,40 @@
+name: FB Text Posts
+
+# Runs every day at 10:00 AM CT (15:00 UTC during CDT)
+# Posts all pending FB text posts (col O) and marks col Q = Yes
+on:
+  schedule:
+    - cron: '0 15 * * *'
+  workflow_dispatch:
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Checkout secrets repo
+        uses: actions/checkout@v4
+        with:
+          repository: 1CodeForFun/vipon-secrets
+          token: ${{ secrets.SECRETS_PAT }}
+          path: secrets
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install gspread oauth2client requests
+
+      - name: Copy credential files to working directory
+        run: |
+          cp secrets/vipon_google_creds.json .
+          cp secrets/fb_page_token.json .
+
+      - name: Post FB text
+        run: python FBP_ready.py

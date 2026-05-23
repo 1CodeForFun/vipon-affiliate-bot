@@ -1,0 +1,13 @@
+undetected-chromedriver
+selenium
+Pillow
+gspread
+oauth2client
+requests
+edge-tts
+paapi5-python-sdk
+cloudinary
+google-auth
+google-auth-oauthlib
+google-api-python-client
+openai
