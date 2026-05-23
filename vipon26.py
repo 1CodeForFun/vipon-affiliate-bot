@@ -1364,12 +1364,14 @@ def main():
                 # Auto-rotate account when we hit the daily code limit
                 if consecutive_fails >= ROTATION_THRESHOLD and len(VIPON_ACCOUNTS) > 1:
                     _rotate_account()
+                    # Always reset counter so we don't loop endlessly on failed re-login
+                    consecutive_fails = 0
                     try:
+                        driver.delete_all_cookies()   # clear session before re-login
                         login(driver, wait)
-                        consecutive_fails = 0
                         log(f"  ✓ Account rotated successfully")
                     except Exception as e:
-                        log(f"  ⚠️ Re-login after rotation failed: {e}")
+                        log(f"  ⚠️ Re-login after rotation failed: {e.__class__.__name__} — continuing with current session")
                 continue
 
             consecutive_fails = 0
