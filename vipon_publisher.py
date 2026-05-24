@@ -44,7 +44,8 @@ GOOGLE_SHEET_NAME   = "vipon"
 GOOGLE_CREDS_FILE   = _p("vipon_google_creds.json")
 FB_FRESHDEALS_TOKEN = _p("fb_page_token.json")
 FB_ULTAFIND_TOKEN   = _p("fb_page_token-ultafind.json")
-YT_TOKEN_FILE       = _p("token_youtube.json")
+YT_TOKEN_FILE           = _p("token_youtube.json")           # FreshDeals channel
+YT_ULTAFIND_TOKEN_FILE  = _p("token_youtube_ultafind.json")  # Ultafind channel
 
 IG_FRESHDEALS_USER_ID = "17841462518097134"   # freshdealsus Instagram business account
 IG_ULTAFIND_USER_ID   = "17841465105802629"   # ultafind Instagram business account
@@ -248,8 +249,9 @@ def post_ig_reel(ig_user_id: str, page_token: str, video_url: str,
 
 
 # ─── YOUTUBE SHORTS (download + resumable upload) ────────────────────────────
-def _build_yt_client():
-    with open(YT_TOKEN_FILE, encoding="utf-8") as f:
+def _build_yt_client(token_file=None):
+    token_file = token_file or YT_TOKEN_FILE
+    with open(token_file, encoding="utf-8") as f:
         td = json.load(f)
 
     expiry_str = td.get("expiry")
@@ -277,7 +279,7 @@ def _build_yt_client():
         td["expiry"] = (
             creds.expiry.strftime("%Y-%m-%dT%H:%M:%SZ") if creds.expiry else None
         )
-        with open(YT_TOKEN_FILE, "w", encoding="utf-8") as f:
+        with open(token_file, "w", encoding="utf-8") as f:
             json.dump(td, f, indent=2)
         log("YT: token refreshed and saved")
 
@@ -296,7 +298,7 @@ def _yt_upload(req) -> dict:
 
 
 def post_youtube_short(video_url: str, title: str, description: str,
-                       channel_id: str) -> str:
+                       channel_id: str, yt_token_file: str = None) -> str:
     """Download the Cloudinary video and upload it to YouTube as a Short."""
     video_bytes = _download_video(video_url)
 
@@ -305,7 +307,7 @@ def post_youtube_short(video_url: str, title: str, description: str,
         tmp_path = tmp.name
 
     try:
-        youtube = _build_yt_client()
+        youtube = _build_yt_client(yt_token_file)
 
         body = {
             "snippet": {
@@ -324,26 +326,14 @@ def post_youtube_short(video_url: str, title: str, description: str,
                 tmp_path, chunksize=-1, resumable=True, mimetype="video/mp4"
             )
 
-        # onBehalfOfContentOwnerChannel works for YouTube Partner accounts.
-        # If it raises a 400/403 we fall back to posting on the default channel
-        # for this OAuth token (whichever channel was active when authorised).
-        try:
-            log(f"YT: uploading to channel {channel_id}...")
-            req = youtube.videos().insert(
-                part="snippet,status",
-                body=body,
-                media_body=_make_media(),
-                onBehalfOfContentOwnerChannel=channel_id,
-            )
-            response = _yt_upload(req)
-        except Exception as e:
-            log(f"YT: channel-targeted upload failed ({e}); retrying on default channel...")
-            req = youtube.videos().insert(
-                part="snippet,status",
-                body=body,
-                media_body=_make_media(),
-            )
-            response = _yt_upload(req)
+        # Upload directly — the token already authenticates the correct channel
+        log("YT: uploading...")
+        req = youtube.videos().insert(
+            part="snippet,status",
+            body=body,
+            media_body=_make_media(),
+        )
+        response = _yt_upload(req)
 
         video_id = response.get("id", "")
         log(f"YT: Short uploaded → video_id={video_id}")
@@ -372,8 +362,8 @@ def main() -> None:
     # Odd rows → FreshDeals, Even rows → Ultafind
     is_odd        = (data_idx % 2 == 1)
     platform      = "FreshDeals" if is_odd else "Ultafind"
-    fb_token_file = FB_FRESHDEALS_TOKEN if is_odd else FB_ULTAFIND_TOKEN
-    yt_channel_id = YT_FRESHDEALS_CH    if is_odd else YT_ULTAFIND_CH
+    fb_token_file = FB_FRESHDEALS_TOKEN        if is_odd else FB_ULTAFIND_TOKEN
+    yt_token_file = YT_TOKEN_FILE              if is_odd else YT_ULTAFIND_TOKEN_FILE
 
     log(f"Row {sheet_row} (position {data_idx}): posting to {platform}")
     log(f"  Reel URL : {reel_url[:80]}")
@@ -403,10 +393,15 @@ def main() -> None:
         errors.append(f"IG: {e}")
 
     # ── YouTube Short ──────────────────────────────────────────────────────
-    log("--- YouTube ---")
+    yt_label = "FreshDeals YT" if is_odd else "Ultafind YT"
+    log(f"--- YouTube ({yt_label}) ---")
     yt_desc = f"{post_text}\n\n{yt_link}" if yt_link else post_text
+    # Check token file exists; if Ultafind token not yet created, fall back to FreshDeals
+    if not os.path.exists(yt_token_file):
+        log(f"  ⚠️ {yt_token_file} not found — falling back to FreshDeals YT token")
+        yt_token_file = YT_TOKEN_FILE
     try:
-        post_youtube_short(reel_url, title, yt_desc, yt_channel_id)
+        post_youtube_short(reel_url, title, yt_desc, yt_token_file=yt_token_file)
     except Exception as e:
         log(f"ERROR (YT): {e}")
         errors.append(f"YT: {e}")
