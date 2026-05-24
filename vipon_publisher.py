@@ -55,7 +55,9 @@ GRAPH_API_VERSION   = "v25.0"
 
 TIMEOUT             = 120   # seconds for normal API calls
 UPLOAD_TIMEOUT      = 600   # seconds for video upload/download
-IG_PROCESS_WAIT     = 60    # seconds to wait for Instagram to process the video before publishing
+IG_PROCESS_WAIT     = 60    # seconds — initial wait for Instagram to process
+IG_RETRY_WAIT       = 30    # seconds — additional wait per retry if video not ready
+IG_MAX_RETRIES      = 3     # max publish attempts (total max wait: 60 + 30*2 = 120s)
 
 # Sheet columns (1-based; subtract 1 for Python list index)
 COL_B_REEL_LINK = 2
@@ -206,23 +208,37 @@ def post_ig_reel(ig_user_id: str, page_token: str, video_url: str,
 
     # The Page Access Token cannot read back container status (Graph API returns
     # Authorization Error subcode 33 on GET /{container_id} for IG objects).
-    # Instead, wait a fixed 90 seconds for Instagram to process the video,
-    # then attempt to publish directly — IG rejects the publish call if
-    # the container isn't ready, which we catch and report cleanly.
+    # Wait for processing, then try to publish — retry if video not ready yet.
     log(f"IG: waiting {IG_PROCESS_WAIT}s for Instagram to process video...")
     time.sleep(IG_PROCESS_WAIT)
 
-    # Step 2: publish the container
-    log("IG: publishing reel...")
-    r = requests.post(
-        f"{base}/{ig_user_id}/media_publish",
-        data={"creation_id": container_id, "access_token": page_token},
-        timeout=TIMEOUT,
-    )
-    _check(r, "IG publish")
-    media_id = r.json()["id"]
-    log(f"IG: reel published → media_id={media_id}")
-    return media_id
+    # Step 2: publish the container (with retries for slow processing)
+    for attempt in range(1, IG_MAX_RETRIES + 1):
+        log(f"IG: publishing reel (attempt {attempt}/{IG_MAX_RETRIES})...")
+        r = requests.post(
+            f"{base}/{ig_user_id}/media_publish",
+            data={"creation_id": container_id, "access_token": page_token},
+            timeout=TIMEOUT,
+        )
+        try:
+            resp_data = r.json()
+        except Exception:
+            resp_data = {"raw": r.text[:500]}
+
+        # If "not ready" error and we have retries left, wait and try again
+        if (not r.ok
+                and isinstance(resp_data, dict)
+                and resp_data.get("error", {}).get("error_subcode") == 2207027
+                and attempt < IG_MAX_RETRIES):
+            log(f"IG: video not ready — waiting {IG_RETRY_WAIT}s more...")
+            time.sleep(IG_RETRY_WAIT)
+            continue
+
+        # Final attempt or different error — use normal check
+        _check(r, "IG publish")
+        media_id = resp_data["id"]
+        log(f"IG: reel published → media_id={media_id}")
+        return media_id
 
 
 # ─── YOUTUBE SHORTS (download + resumable upload) ────────────────────────────
