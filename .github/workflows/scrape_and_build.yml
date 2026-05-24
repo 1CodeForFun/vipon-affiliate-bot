@@ -3,7 +3,7 @@ name: Scrape & Build Videos
 # Runs every day at 6:00 AM CT (11:00 UTC during CDT / 12:00 UTC during CST)
 on:
   schedule:
-    - cron: '0 11 * * *'
+    - cron: '30 14 * * *'
   workflow_dispatch:  # allow manual trigger from GitHub UI
 
 jobs:
