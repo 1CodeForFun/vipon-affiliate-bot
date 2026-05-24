@@ -50,7 +50,7 @@ jobs:
           cp secrets/vipon_google_creds.json .
           cp secrets/PAAPI.csv ~/PAAPI.csv
           cp secrets/videokey.txt ~/videokey.txt
-          cp secrets/geminikey.txt ~/geminikey.txt
+          [ -f secrets/geminikey.txt ] && cp secrets/geminikey.txt ~/geminikey.txt || true
           cp secrets/vipon_accounts.json ~/vipon_accounts.json
           cp secrets/cloudinary.json ~/cloudinary.json
           [ -f secrets/geminikeys.txt ] && cp secrets/geminikeys.txt ~/geminikeys.txt || true
