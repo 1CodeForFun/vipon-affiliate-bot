@@ -205,35 +205,14 @@ def post_ig_reel(ig_user_id: str, page_token: str, video_url: str,
     container_id = r.json()["id"]
     log(f"IG: container_id={container_id}, waiting for processing...")
 
-    # Poll until FINISHED or ERROR.
-    # Tolerate up to 3 consecutive HTTP errors (subcode 33 "object not accessible"
-    # is a known transient error while Instagram is still initialising the container).
-    consecutive_http_errors = 0
-    status_code = "UNKNOWN"
-    for attempt in range(1, IG_MAX_POLLS + 1):
-        time.sleep(IG_POLL_INTERVAL)
-        r = requests.get(
-            f"{base}/{container_id}",
-            params={"fields": "status_code,status", "access_token": page_token},
-            timeout=TIMEOUT,
-        )
-        if not r.ok:
-            consecutive_http_errors += 1
-            log(f"IG: poll {attempt}/{IG_MAX_POLLS} → HTTP {r.status_code} "
-                f"(transient error {consecutive_http_errors}/3, retrying...)")
-            if consecutive_http_errors >= 3:
-                _check(r, "IG status poll")   # now raise permanently
-            continue
-        consecutive_http_errors = 0
-        st = r.json()
-        status_code = st.get("status_code", "UNKNOWN")
-        log(f"IG: poll {attempt}/{IG_MAX_POLLS} → {status_code}")
-        if status_code == "FINISHED":
-            break
-        if status_code == "ERROR":
-            raise RuntimeError(f"IG container processing failed: {st}")
-    else:
-        raise RuntimeError(f"IG container timed out after {IG_MAX_POLLS} polls, last status: {status_code}")
+    # The Page Access Token cannot read back container status (Graph API returns
+    # Authorization Error subcode 33 on GET /{container_id} for IG objects).
+    # Instead, wait a fixed 90 seconds for Instagram to process the video,
+    # then attempt to publish directly — IG rejects the publish call if
+    # the container isn't ready, which we catch and report cleanly.
+    IG_PROCESS_WAIT = 90
+    log(f"IG: waiting {IG_PROCESS_WAIT}s for Instagram to process video...")
+    time.sleep(IG_PROCESS_WAIT)
 
     # Step 2: publish the container
     log("IG: publishing reel...")
