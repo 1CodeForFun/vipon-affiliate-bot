@@ -298,7 +298,7 @@ def _yt_upload(req) -> dict:
 
 
 def post_youtube_short(video_url: str, title: str, description: str,
-                       channel_id: str, yt_token_file: str = None) -> str:
+                       yt_token_file: str = None) -> str:
     """Download the Cloudinary video and upload it to YouTube as a Short."""
     video_bytes = _download_video(video_url)
 
