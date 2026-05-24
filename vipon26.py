@@ -409,6 +409,7 @@ def _tts_to_mp3(text: str, out_path: str) -> bool:
 # ════════════════════════════════════════════════════════════════
 
 GEMINI_KEY_PATHS = ["/mnt/data/geminikey.txt", os.path.expanduser("~/geminikey.txt")]
+_GEMINI_DEAD_KEYS: set = set()   # keys that returned 400 (expired) — skip for rest of session
 
 def _read_gemini_keys():
     """Return a list of Gemini API keys.
@@ -456,9 +457,11 @@ def generate_social_post(link, code, discount_pct, expiry, title, price):
 
     prompt = _build_post_prompt(link, code, discount_pct, expiry, title, price)
 
-    # ── Try Gemini keys in order, rotate on 429 rate-limit ───────
+    # ── Try Gemini keys in order, skip dead/rate-limited keys ────
     gemini_keys = _read_gemini_keys()
     for kidx, gemini_key in enumerate(gemini_keys):
+        if gemini_key in _GEMINI_DEAD_KEYS:
+            continue   # expired key — don't waste a round-trip
         try:
             api_url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
                        f"gemini-2.5-flash-lite:generateContent?key={gemini_key}")
@@ -478,6 +481,13 @@ def generate_social_post(link, code, discount_pct, expiry, title, price):
                     return txt
             elif resp.status_code == 429:
                 log(f"  ⚠️ Gemini key {kidx+1}/{len(gemini_keys)} rate-limited — trying next")
+                continue
+            elif resp.status_code == 400:
+                log(f"  ⚠️ Gemini key {kidx+1} expired/invalid — marking dead for this session")
+                _GEMINI_DEAD_KEYS.add(gemini_key)
+                continue
+            elif resp.status_code == 503:
+                log(f"  ⚠️ Gemini key {kidx+1} server busy (503) — trying next")
                 continue
             else:
                 log(f"  ⚠️ Gemini key {kidx+1} error {resp.status_code}: {resp.text[:150]}")
@@ -1342,8 +1352,208 @@ def make_and_upload_reel_from_images(pid: str, image_urls: list,
         return vurl
 
 # ════════════════════════════════════════════════════════════════
+#  SELLER FORM INTAKE — Phase 3 (runs after main scrape + videos)
+#  Reads "Form Responses 2", processes unhandled rows, appends to
+#  Sheet1 (same format as scraped products), marks status in the
+#  form tab directly — no intermediate Seller tab needed.
+# ════════════════════════════════════════════════════════════════
+
+SELLER_FORM_TAB        = "Form Responses 2"
+SELLER_STATUS_HEADER   = "Status"
+
+
+def _open_form_tab():
+    """Open Form Responses 2 in the same Google Sheet."""
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDS_FILE, scope)
+    return gspread.authorize(creds).open(GOOGLE_SHEET_NAME).worksheet(SELLER_FORM_TAB)
+
+
+def _ensure_status_col(form_ws) -> int:
+    """Ensure a 'Status' column exists. Returns its 0-based index."""
+    header = form_ws.row_values(1)
+    for i, h in enumerate(header):
+        if h.strip().lower() == "status":
+            return i
+    new_col = len(header) + 1
+    form_ws.update_cell(1, new_col, SELLER_STATUS_HEADER)
+    return new_col - 1   # 0-based
+
+
+def _find_col(norm_header: list, *names) -> int | None:
+    """Return 0-based index of first header matching any of the given names."""
+    for name in names:
+        key = re.sub(r"[^a-z0-9]+", "", name.lower())
+        for i, h in enumerate(norm_header):
+            hn = re.sub(r"[^a-z0-9]+", "", h)
+            if key == hn or key in hn:
+                return i
+    return None
+
+
+def _fetch_amazon_title_simple(asin: str) -> str:
+    """Best-effort title from Amazon HTML (no Selenium)."""
+    try:
+        import html as _html
+        r = requests.get(
+            f"https://www.amazon.com/dp/{asin}?th=1&psc=1",
+            headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.8"},
+            timeout=20,
+        )
+        if r.ok:
+            m = re.search(r'id="productTitle"[^>]*>\s*([^<]+)\s*<', r.text, re.I)
+            if m:
+                return _html.unescape(m.group(1)).strip()
+    except Exception:
+        pass
+    return ""
+
+
+def process_seller_forms(ws_main) -> None:
+    """Process new Google Form submissions and append rows to Sheet1."""
+    log("\n═══ Phase 3: Seller Form Intake ═══")
+    try:
+        form_ws = _open_form_tab()
+    except Exception as e:
+        log(f"⚠️ Could not open '{SELLER_FORM_TAB}' — skipping seller forms: {e}")
+        return
+
+    all_values = form_ws.get_all_values()
+    if not all_values or len(all_values) < 2:
+        log("ℹ️ No form submissions found.")
+        return
+
+    header      = all_values[0]
+    norm_header = [re.sub(r"[^a-z0-9]+", "", h.lower()) for h in header]
+
+    ts_col     = _find_col(norm_header, "timestamp")
+    asin_col   = _find_col(norm_header, "asin", "amazon link", "product link")
+    code_col   = _find_col(norm_header, "discount code")
+    disc_col   = _find_col(norm_header, "discount %", "discount percent", "discountpercent")
+    expiry_col = _find_col(norm_header, "expiry", "expiration", "expirey")
+    price_col  = _find_col(norm_header, "final price", "priceafterdiscount", "price")
+
+    if ts_col is None or asin_col is None:
+        log("⚠️ Form tab missing Timestamp or ASIN column — skipping.")
+        return
+
+    status_col = _ensure_status_col(form_ws)
+    # Re-read after possible header update
+    all_values = form_ws.get_all_values()
+
+    processed = skipped = 0
+
+    for row_idx, row in enumerate(all_values[1:], start=2):   # 1-based, row 1 = header
+        max_needed = max(i for i in [asin_col, code_col, disc_col, expiry_col, price_col, status_col] if i is not None)
+        while len(row) <= max_needed:
+            row.append("")
+
+        if row[status_col].strip().lower() in ("done", "blocked", "no asin", "invalid code", "no images", "video failed"):
+            continue   # already handled
+
+        # ── Extract fields ────────────────────────────────────────
+        asin_raw = row[asin_col] if asin_col is not None else ""
+        m = ASIN_RE.search(asin_raw)
+        if not m:
+            m = re.search(r"\b([A-Z0-9]{10})\b", asin_raw, re.I)
+        asin = m.group(0).upper() if m else ""
+
+        if not asin:
+            log(f"  ✗ Form row {row_idx}: no ASIN — skipping")
+            form_ws.update_cell(row_idx, status_col + 1, "No ASIN")
+            skipped += 1
+            continue
+
+        code = (row[code_col].strip().upper() if code_col is not None else "")
+        if not is_plausible_code(code, strict=False):
+            log(f"  ✗ Form row {row_idx}: invalid code '{code}' for {asin} — skipping")
+            form_ws.update_cell(row_idx, status_col + 1, "Invalid Code")
+            skipped += 1
+            continue
+
+        pct_raw  = (row[disc_col].strip()  if disc_col   is not None else "")
+        expiry   = (row[expiry_col].strip() if expiry_col is not None else "")
+        price    = (row[price_col].strip()  if price_col  is not None else "")
+
+        m_pct     = re.search(r"(\d{1,3})", pct_raw)
+        disc_txt  = f"{min(int(m_pct.group(1)), 95)}%" if m_pct else pct_raw
+        disc_norm = _normalize_discount(disc_txt or pct_raw or "")
+
+        # ── Title + blocked-keyword check ─────────────────────────
+        log(f"  → Form row {row_idx}: ASIN {asin}…")
+        title = _fetch_amazon_title_simple(asin) or f"Amazon Product {asin}"
+        t_low = title.lower()
+        bad_hit = next(
+            (b for b in BLOCKED_TITLE_KEYWORDS
+             if b and (b in t_low if (" " in b or "-" in b)
+                       else re.search(rf"\b{re.escape(b)}\b", t_low))),
+            None,
+        )
+        if bad_hit:
+            log(f"  ✗ Form row {row_idx}: blocked by '{bad_hit}'")
+            form_ws.update_cell(row_idx, status_col + 1, "Blocked")
+            skipped += 1
+            continue
+
+        # ── Images ────────────────────────────────────────────────
+        images = fetch_amazon_images(asin, "com", max_imgs=10)
+        if not images:
+            log(f"  ✗ Form row {row_idx}: no images for {asin}")
+            form_ws.update_cell(row_idx, status_col + 1, "No Images")
+            skipped += 1
+            continue
+
+        # ── Build reel ────────────────────────────────────────────
+        t_short  = shorten_title(title, MAX_TITLE_LEN)
+        reel_url = ""
+        try:
+            reel_url = make_and_upload_reel_from_images(asin, images, disc_norm, code, title, price)
+        except Exception as e:
+            log(f"  ⚠️ Reel failed for seller {asin}: {e}")
+
+        if not reel_url:
+            log(f"  ✗ Form row {row_idx}: video failed for {asin}")
+            form_ws.update_cell(row_idx, status_col + 1, "Video Failed")
+            skipped += 1
+            continue
+
+        # ── Links + post text ─────────────────────────────────────
+        aff_link       = get_affiliate_link(asin, "com")
+        platform_links = get_platform_links(asin, "com")
+        post_text      = generate_social_post(aff_link, code, disc_txt, expiry, t_short, price)
+
+        # ── Append to Sheet1 (same column order as scraped products) ──
+        ws_main.append_row([
+            aff_link,
+            platform_links.get("reel", ""),
+            platform_links.get("ig", ""),
+            platform_links.get("youtube", ""),
+            platform_links.get("tiktok", ""),
+            code,
+            disc_txt,
+            expiry,
+            t_short,
+            price,
+            asin,
+            images[0],
+            images[0],
+            reel_url,
+            post_text,
+        ], value_input_option="USER_ENTERED")
+
+        # ── Mark done in form tab ─────────────────────────────────
+        form_ws.update_cell(row_idx, status_col + 1, "Done")
+        processed += 1
+        log(f"  ✓ Seller {asin} → Sheet1 row added")
+        time.sleep(0.3)
+
+    log(f"✅ Seller forms done — {processed} added to Sheet1, {skipped} skipped")
+
+
+# ════════════════════════════════════════════════════════════════
 #  MAIN  — Phase 1: scrape all (Chrome alive)
 #          Phase 2: build videos + write sheet (Chrome closed, RAM freed)
+#          Phase 3: seller form intake
 # ════════════════════════════════════════════════════════════════
 
 def main():
@@ -1496,6 +1706,9 @@ def main():
         log(f"✓ Row written for PID {pid}")
 
     log(f"✅ Done — {len(scraped)} products processed")
+
+    # ── PHASE 3: Seller Form Intake ───────────────────────────────
+    process_seller_forms(ws)
 
 
 if __name__ == "__main__":

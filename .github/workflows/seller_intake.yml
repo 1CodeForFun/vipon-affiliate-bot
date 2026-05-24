@@ -1,10 +1,9 @@
 name: Seller Form Intake
 
-# Runs every day at 7:00 AM CT (12:00 UTC during CDT)
-# Processes new Google Form submissions from sellers
+# DISABLED — seller form processing is now integrated into scrape_and_build.yml
+# (vipon26.py Phase 3 runs process_seller_forms() after the main scrape)
+# Keeping this file for emergency manual use only.
 on:
-  schedule:
-    - cron: '0 12 * * *'
   workflow_dispatch:
 
 jobs:
