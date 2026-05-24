@@ -209,7 +209,6 @@ def post_ig_reel(ig_user_id: str, page_token: str, video_url: str,
     # Instead, wait a fixed 90 seconds for Instagram to process the video,
     # then attempt to publish directly — IG rejects the publish call if
     # the container isn't ready, which we catch and report cleanly.
-    IG_PROCESS_WAIT = 90
     log(f"IG: waiting {IG_PROCESS_WAIT}s for Instagram to process video...")
     time.sleep(IG_PROCESS_WAIT)
 
