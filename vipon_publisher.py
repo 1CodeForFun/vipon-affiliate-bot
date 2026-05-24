@@ -55,8 +55,7 @@ GRAPH_API_VERSION   = "v25.0"
 
 TIMEOUT             = 120   # seconds for normal API calls
 UPLOAD_TIMEOUT      = 600   # seconds for video upload/download
-IG_POLL_INTERVAL    = 15    # seconds between Instagram status polls
-IG_MAX_POLLS        = 40    # 40 × 15 s = 10 min max wait
+IG_PROCESS_WAIT     = 90    # seconds to wait for Instagram to process the video before publishing
 
 # Sheet columns (1-based; subtract 1 for Python list index)
 COL_B_REEL_LINK = 2
