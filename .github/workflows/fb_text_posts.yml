@@ -3,9 +3,7 @@ name: FB Text Posts
 # Runs every day at 10:00 AM CT (15:00 UTC during CDT)
 # Posts all pending FB text posts (col O) and marks col Q = Yes
 on:
-  schedule:
-    - cron: '0 15 * * *'
-  workflow_dispatch:
+  workflow_dispatch:  # triggered by cron-job.org daily
 
 jobs:
   post:

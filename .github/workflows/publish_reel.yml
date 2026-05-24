@@ -4,9 +4,7 @@ name: Publish Reel (Hourly)
 # Starts having reels to post at 11 AM CT (4 PM UTC) after the 6 AM scrape.
 # Exits cleanly when there are no more reels to post — no manual stopping needed.
 on:
-  schedule:
-    - cron: '0 * * * *'
-  workflow_dispatch:
+  workflow_dispatch:  # triggered by cron-job.org every hour
 
 jobs:
   publish:
