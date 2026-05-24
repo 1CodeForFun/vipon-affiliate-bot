@@ -46,7 +46,8 @@ FB_FRESHDEALS_TOKEN = _p("fb_page_token.json")
 FB_ULTAFIND_TOKEN   = _p("fb_page_token-ultafind.json")
 YT_TOKEN_FILE       = _p("token_youtube.json")
 
-IG_USER_ID          = "17841462518097134"    # freshdealsus business account
+IG_FRESHDEALS_USER_ID = "17841462518097134"   # freshdealsus Instagram business account
+IG_ULTAFIND_USER_ID   = "17841465105802629"   # ultafind Instagram business account
 YT_FRESHDEALS_CH    = "UCoD24sN6sKc7kxvVsCxgUCg"
 YT_ULTAFIND_CH      = "UCX-OndLQAxZJMDE21Vj_hBA"
 GRAPH_API_VERSION   = "v25.0"
@@ -368,7 +369,8 @@ def main() -> None:
     log(f"  Title    : {title[:70]}")
 
     page_id, page_token, _ = load_fb_token(fb_token_file)
-    _, fd_token, _         = load_fb_token(FB_FRESHDEALS_TOKEN)  # IG uses FreshDeals token
+    # IG uses the same page token as FB — each IG account is linked to its own FB page
+    ig_user_id = IG_FRESHDEALS_USER_ID if is_odd else IG_ULTAFIND_USER_ID
 
     errors = []
 
@@ -380,11 +382,11 @@ def main() -> None:
         log(f"ERROR (FB): {e}")
         errors.append(f"FB: {e}")
 
-    # ── Instagram Reel (always freshdealsus) ──────────────────────────────
-    log("--- Instagram ---")
+    # ── Instagram Reel (alternates: freshdealsus odd / ultafind even) ──────
+    log(f"--- Instagram ({ig_user_id}) ---")
     ig_caption = f"{post_text}\n\n{reel_link}" if reel_link else post_text
     try:
-        post_ig_reel(IG_USER_ID, fd_token, reel_url, ig_caption)
+        post_ig_reel(ig_user_id, page_token, reel_url, ig_caption)
     except Exception as e:
         log(f"ERROR (IG): {e}")
         errors.append(f"IG: {e}")
