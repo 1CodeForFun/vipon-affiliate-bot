@@ -312,6 +312,9 @@ def post_youtube_short(video_url: str, title: str, description: str,
                 "privacyStatus": "public",
                 "selfDeclaredMadeForKids": False,
             },
+            "paidProductPlacementDetails": {
+                "hasPaidProductPlacement": True,
+            },
         }
 
         def _make_media():
@@ -322,7 +325,7 @@ def post_youtube_short(video_url: str, title: str, description: str,
         # Upload directly — the token already authenticates the correct channel
         log("YT: uploading...")
         req = youtube.videos().insert(
-            part="snippet,status",
+            part="snippet,status,paidProductPlacementDetails",
             body=body,
             media_body=_make_media(),
         )
