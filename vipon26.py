@@ -1496,7 +1496,7 @@ def process_seller_forms(ws_main) -> None:
             continue
 
         # ── Images ────────────────────────────────────────────────
-        images = fetch_amazon_images(asin, "com", max_imgs=10)
+        images = fetch_amazon_images(None, asin, "com", max_imgs=10)
         if not images:
             log(f"  ✗ Form row {row_idx}: no images for {asin}")
             form_ws.update_cell(row_idx, status_col + 1, "No Images")

@@ -3,14 +3,14 @@
 
 Per run:
   1. Read Sheet1, find first row where col N (Reel URL) is set and col P != "Yes"
-  2. Determine odd/even row position → select FB page + YT channel
-  3. Post FB Reel  (3-step: init → upload bytes → publish)
-  4. Post IG Reel  (2-step: create container → publish)
+  2. Determine odd/even row position ->select FB page + YT channel
+  3. Post FB Reel  (3-step: init ->upload bytes ->publish)
+  4. Post IG Reel  (2-step: create container ->publish)
   5. Post YouTube Short (download + resumable upload)
   6. Mark col P = "Yes" in the sheet
 
-Odd rows  (1, 3, 5 …) → Fresh Deals FB page + FreshDeals YT channel
-Even rows (2, 4, 6 …) → Ultafind FB page    + Ultafind YT channel
+Odd rows  (1, 3, 5 …) ->Fresh Deals FB page + FreshDeals YT channel
+Even rows (2, 4, 6 …) ->Ultafind FB page    + Ultafind YT channel
 IG always posts to freshdealsus (single IG account).
 
 Environment variable:
@@ -180,7 +180,7 @@ def post_fb_reel(page_id: str, page_token: str, video_url: str,
         timeout=TIMEOUT,
     )
     _check(r, "FB Reel publish")
-    log(f"FB: reel published → video_id={video_id}")
+    log(f"FB: reel published ->video_id={video_id}")
     return video_id
 
 
@@ -237,7 +237,7 @@ def post_ig_reel(ig_user_id: str, page_token: str, video_url: str,
         # Final attempt or different error — use normal check
         _check(r, "IG publish")
         media_id = resp_data["id"]
-        log(f"IG: reel published → media_id={media_id}")
+        log(f"IG: reel published ->media_id={media_id}")
         return media_id
 
 
@@ -332,10 +332,13 @@ def post_youtube_short(video_url: str, title: str, description: str,
         response = _yt_upload(req)
 
         video_id = response.get("id", "")
-        log(f"YT: Short uploaded → video_id={video_id}")
+        log(f"YT: Short uploaded ->video_id={video_id}")
         return video_id
     finally:
-        os.unlink(tmp_path)
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass  # Windows file lock — OS will clean temp file on reboot
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
@@ -355,7 +358,7 @@ def main() -> None:
     reel_link = row[COL_B_REEL_LINK - 1].strip()
     yt_link   = row[COL_D_YT_LINK - 1].strip()
 
-    # Odd rows → FreshDeals, Even rows → Ultafind
+    # Odd rows ->FreshDeals, Even rows ->Ultafind
     is_odd        = (data_idx % 2 == 1)
     platform      = "FreshDeals" if is_odd else "Ultafind"
     fb_token_file = FB_FRESHDEALS_TOKEN        if is_odd else FB_ULTAFIND_TOKEN
@@ -404,7 +407,7 @@ def main() -> None:
 
     # ── Mark as posted regardless of individual platform errors ───────────
     ws.update_acell(f"P{sheet_row}", "Yes")
-    log(f"Sheet row {sheet_row} col P → Yes")
+    log(f"Sheet row {sheet_row} col P ->Yes")
 
     if errors:
         log(f"Done with {len(errors)} error(s): {'; '.join(errors)}")
