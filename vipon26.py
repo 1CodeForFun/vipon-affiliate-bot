@@ -7,7 +7,7 @@
 #  echo "YOUR_GEMINI_KEY" > ~/geminikey.txt   # free key → aistudio.google.com
 #  (OpenAI key at ~/videokey.txt still works as fallback for both TTS & post text)
 #
-# ── TO RE-ENABLE PINTEREST ──────────────────────────────────────────────────
+# ── TO RE-ENABLE PINTEREST ──────────────────────────────────────────────────#
 #  Set  ENABLE_PINTEREST = True  below (all code is preserved, just gated)
 # ────────────────────────────────────────────────────────────────────────────
 
