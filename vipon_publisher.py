@@ -66,7 +66,8 @@ COL_D_YT_LINK   = 4
 COL_I_TITLE     = 9
 COL_N_REEL_URL  = 14
 COL_O_POST_TEXT = 15
-COL_P_POSTED    = 16
+COL_P_POSTED    = 16   # "Yes" = reel was processed (FB + IG attempted)
+COL_Q_YT_POSTED = 17   # "Yes" = YouTube upload succeeded; blank = not posted (Make.com handles retry)
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
 def log(msg: str) -> None:
@@ -392,7 +393,8 @@ def main() -> None:
         errors.append(f"IG: {e}")
 
     # ── YouTube Short ──────────────────────────────────────────────────────
-    yt_label = "FreshDeals YT" if is_odd else "Ultafind YT"
+    yt_label   = "FreshDeals YT" if is_odd else "Ultafind YT"
+    yt_success = False
     log(f"--- YouTube ({yt_label}) ---")
     yt_desc = f"{post_text}\n\n{yt_link}" if yt_link else post_text
     # Check token file exists; if Ultafind token not yet created, fall back to FreshDeals
@@ -401,13 +403,19 @@ def main() -> None:
         yt_token_file = YT_TOKEN_FILE
     try:
         post_youtube_short(reel_url, title, yt_desc, yt_token_file=yt_token_file)
+        yt_success = True
     except Exception as e:
         log(f"ERROR (YT): {e}")
         errors.append(f"YT: {e}")
 
-    # ── Mark as posted regardless of individual platform errors ───────────
+    # ── Mark col P always (prevents re-processing); col Q only if YT succeeded ──
     ws.update_acell(f"P{sheet_row}", "Yes")
     log(f"Sheet row {sheet_row} col P ->Yes")
+    if yt_success:
+        ws.update_acell(f"Q{sheet_row}", "Yes")
+        log(f"Sheet row {sheet_row} col Q ->Yes (YouTube posted)")
+    else:
+        log(f"Sheet row {sheet_row} col Q left blank (YouTube failed — Make.com will retry)")
 
     if errors:
         log(f"Done with {len(errors)} error(s): {'; '.join(errors)}")
