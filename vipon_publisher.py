@@ -2,16 +2,13 @@
 """vipon_publisher.py — Posts ONE reel per run from the vipon Google Sheet.
 
 Per run:
-  1. Read Sheet1, find first row where col N (Reel URL) is set and col P != "Yes"
-  2. Determine odd/even row position ->select FB page + YT channel
-  3. Post FB Reel  (3-step: init ->upload bytes ->publish)
-  4. Post IG Reel  (2-step: create container ->publish)
-  5. Post YouTube Short (download + resumable upload)
-  6. Mark col P = "Yes" in the sheet
+  US  (Sheet1): find first unposted reel -> post to ALL platforms simultaneously:
+                FreshDeals FB + Ultafind FB + freshdealsus IG + ultafind IG
+                + FreshDeals YT + Ultafind YT
+  CA  (Sheet2): find first unposted reel -> post to Fresh Deals Canada FB only
 
-Odd rows  (1, 3, 5 …) ->Fresh Deals FB page + FreshDeals YT channel
-Even rows (2, 4, 6 …) ->Ultafind FB page    + Ultafind YT channel
-IG always posts to freshdealsus (single IG account).
+Col P = "Yes" when the row has been processed (prevents re-picking).
+Col Q = "Yes" only when at least one YouTube upload succeeded (blank = Make.com retries YT).
 
 Environment variable:
   SECRETS_DIR — folder containing credential files (default: current dir)
@@ -40,34 +37,41 @@ def _p(filename: str) -> str:
     return os.path.join(SECRETS_DIR, filename)
 
 
-GOOGLE_SHEET_NAME   = "vipon"
-GOOGLE_CREDS_FILE   = _p("vipon_google_creds.json")
-FB_FRESHDEALS_TOKEN = _p("fb_page_token.json")
-FB_ULTAFIND_TOKEN   = _p("fb_page_token-ultafind.json")
-YT_TOKEN_FILE           = _p("token_youtube.json")           # FreshDeals channel
-YT_ULTAFIND_TOKEN_FILE  = _p("token_youtube_ultafind.json")  # Ultafind channel
+GOOGLE_SHEET_NAME        = "vipon"
+GOOGLE_CREDS_FILE        = _p("vipon_google_creds.json")
 
-IG_FRESHDEALS_USER_ID = "17841462518097134"   # freshdealsus Instagram business account
-IG_ULTAFIND_USER_ID   = "17841465105802629"   # ultafind Instagram business account
-YT_FRESHDEALS_CH    = "UCoD24sN6sKc7kxvVsCxgUCg"
-YT_ULTAFIND_CH      = "UCX-OndLQAxZJMDE21Vj_hBA"
-GRAPH_API_VERSION   = "v25.0"
+# US FB pages
+FB_FRESHDEALS_TOKEN      = _p("fb_page_token.json")
+FB_ULTAFIND_TOKEN        = _p("fb_page_token-ultafind.json")
 
-TIMEOUT             = 120   # seconds for normal API calls
-UPLOAD_TIMEOUT      = 600   # seconds for video upload/download
-IG_PROCESS_WAIT     = 60    # seconds — initial wait for Instagram to process
-IG_RETRY_WAIT       = 30    # seconds — additional wait per retry if video not ready
-IG_MAX_RETRIES      = 3     # max publish attempts (total max wait: 60 + 30*2 = 120s)
+# Canada FB page
+FB_CANADA_TOKEN          = _p("fb_page_token-canada.json")
+FB_CANADA_PAGE_ID        = "100649111740976"   # Fresh Deals Canada
 
-# Sheet columns (1-based; subtract 1 for Python list index)
-COL_B_REEL_LINK = 2
-COL_C_IG_LINK   = 3
-COL_D_YT_LINK   = 4
-COL_I_TITLE     = 9
-COL_N_REEL_URL  = 14
-COL_O_POST_TEXT = 15
-COL_P_POSTED    = 16   # "Yes" = reel was processed (FB + IG attempted)
-COL_Q_YT_POSTED = 17   # "Yes" = YouTube upload succeeded; blank = not posted (Make.com handles retry)
+# YouTube channels
+YT_TOKEN_FILE            = _p("token_youtube.json")           # FreshDeals YT
+YT_ULTAFIND_TOKEN_FILE   = _p("token_youtube_ultafind.json")  # Ultafind YT
+
+# Instagram accounts
+IG_FRESHDEALS_USER_ID    = "17841462518097134"   # freshdealsus
+IG_ULTAFIND_USER_ID      = "17841465105802629"   # ultafind
+
+GRAPH_API_VERSION        = "v25.0"
+TIMEOUT                  = 120
+UPLOAD_TIMEOUT           = 600
+IG_PROCESS_WAIT          = 60
+IG_RETRY_WAIT            = 30
+IG_MAX_RETRIES           = 3
+
+# Sheet columns (1-based)
+COL_B_REEL_LINK  = 2
+COL_C_IG_LINK    = 3
+COL_D_YT_LINK    = 4
+COL_I_TITLE      = 9
+COL_N_REEL_URL   = 14
+COL_O_POST_TEXT  = 15
+COL_P_POSTED     = 16   # "Yes" = row processed (prevents re-pick)
+COL_Q_YT_POSTED  = 17   # "Yes" = YouTube succeeded; blank = Make.com retries
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
 def log(msg: str) -> None:
@@ -75,20 +79,34 @@ def log(msg: str) -> None:
 
 
 # ─── GOOGLE SHEET ────────────────────────────────────────────────────────────
-def open_sheet():
+def _open_worksheet(tab=None):
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDS_FILE, scope)
-    return gspread.authorize(creds).open(GOOGLE_SHEET_NAME).sheet1
+    creds  = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDS_FILE, scope)
+    client = gspread.authorize(creds)
+    ss     = client.open(GOOGLE_SHEET_NAME)
+    if tab is None:
+        return ss.sheet1
+    try:
+        return ss.worksheet(tab)
+    except Exception:
+        return ss.get_worksheet(1)   # fallback: 2nd tab by index
+
+
+def open_sheet():
+    return _open_worksheet()          # Sheet1 — US
+
+
+def open_sheet2():
+    return _open_worksheet("Sheet2")  # Sheet2 — Canada
 
 
 def get_next_reel(ws):
-    """Return (sheet_row_num, row, data_row_index) for the first unposted reel.
-
-    data_row_index is 1-based (1 = first row below the header).
-    Returns (None, None, None) when there is nothing to post.
+    """Return (sheet_row_num, row, data_row_index) for first unposted reel.
+    data_row_index is 1-based (1 = first data row below the header).
+    Returns (None, None, None) when nothing to post.
     """
     rows = ws.get_all_values()
     for data_idx, row in enumerate(rows[1:], start=1):
@@ -97,8 +115,7 @@ def get_next_reel(ws):
         reel_url = row[COL_N_REEL_URL - 1].strip()
         posted   = row[COL_P_POSTED - 1].strip().lower()
         if reel_url and posted != "yes":
-            sheet_row = data_idx + 1  # +1 accounts for header row
-            return sheet_row, row, data_idx
+            return data_idx + 1, row, data_idx   # +1 for header row
     return None, None, None
 
 
@@ -132,12 +149,11 @@ def _download_video(url: str) -> bytes:
     return r.content
 
 
-# ─── FACEBOOK REELS (3-step resumable upload) ────────────────────────────────
+# ─── FACEBOOK REELS ──────────────────────────────────────────────────────────
 def post_fb_reel(page_id: str, page_token: str, video_url: str,
                  title: str, description: str) -> str:
     base = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 
-    # Step 1: initialise upload session
     log("FB: initialising reel upload session...")
     r = requests.post(
         f"{base}/{page_id}/video_reels",
@@ -145,14 +161,13 @@ def post_fb_reel(page_id: str, page_token: str, video_url: str,
         timeout=TIMEOUT,
     )
     _check(r, "FB Reel init")
-    d = r.json()
+    d          = r.json()
     video_id   = d["video_id"]
     upload_url = d["upload_url"]
     log(f"FB: video_id={video_id}")
 
-    # Step 2: upload raw bytes
     video_bytes = _download_video(video_url)
-    log(f"FB: uploading {len(video_bytes):,} bytes to upload URL...")
+    log(f"FB: uploading {len(video_bytes):,} bytes...")
     r = requests.post(
         upload_url,
         headers={
@@ -166,16 +181,15 @@ def post_fb_reel(page_id: str, page_token: str, video_url: str,
     _check(r, "FB Reel upload")
     log("FB: bytes uploaded successfully")
 
-    # Step 3: publish
     log("FB: publishing reel...")
     r = requests.post(
         f"{base}/{page_id}/video_reels",
         data={
             "upload_phase": "finish",
-            "video_id": video_id,
-            "video_state": "PUBLISHED",
-            "title": title[:250],
-            "description": description[:2000],
+            "video_id":     video_id,
+            "video_state":  "PUBLISHED",
+            "title":        title[:250],
+            "description":  description[:2000],
             "access_token": page_token,
         },
         timeout=TIMEOUT,
@@ -185,21 +199,20 @@ def post_fb_reel(page_id: str, page_token: str, video_url: str,
     return video_id
 
 
-# ─── INSTAGRAM REELS (2-step container + publish) ────────────────────────────
+# ─── INSTAGRAM REELS ─────────────────────────────────────────────────────────
 def post_ig_reel(ig_user_id: str, page_token: str, video_url: str,
                  caption: str) -> str:
     base = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 
-    # Step 1: create media container (Instagram downloads from Cloudinary URL)
     log("IG: creating reel container...")
     r = requests.post(
         f"{base}/{ig_user_id}/media",
         data={
-            "media_type": "REELS",
-            "video_url": video_url,
-            "caption": caption[:2200],
+            "media_type":    "REELS",
+            "video_url":     video_url,
+            "caption":       caption[:2200],
             "share_to_feed": "true",
-            "access_token": page_token,
+            "access_token":  page_token,
         },
         timeout=TIMEOUT,
     )
@@ -207,13 +220,9 @@ def post_ig_reel(ig_user_id: str, page_token: str, video_url: str,
     container_id = r.json()["id"]
     log(f"IG: container_id={container_id}, waiting for processing...")
 
-    # The Page Access Token cannot read back container status (Graph API returns
-    # Authorization Error subcode 33 on GET /{container_id} for IG objects).
-    # Wait for processing, then try to publish — retry if video not ready yet.
     log(f"IG: waiting {IG_PROCESS_WAIT}s for Instagram to process video...")
     time.sleep(IG_PROCESS_WAIT)
 
-    # Step 2: publish the container (with retries for slow processing)
     for attempt in range(1, IG_MAX_RETRIES + 1):
         log(f"IG: publishing reel (attempt {attempt}/{IG_MAX_RETRIES})...")
         r = requests.post(
@@ -226,7 +235,6 @@ def post_ig_reel(ig_user_id: str, page_token: str, video_url: str,
         except Exception:
             resp_data = {"raw": r.text[:500]}
 
-        # If "not ready" error and we have retries left, wait and try again
         if (not r.ok
                 and isinstance(resp_data, dict)
                 and resp_data.get("error", {}).get("error_subcode") == 2207027
@@ -235,22 +243,19 @@ def post_ig_reel(ig_user_id: str, page_token: str, video_url: str,
             time.sleep(IG_RETRY_WAIT)
             continue
 
-        # Final attempt or different error — use normal check
         _check(r, "IG publish")
         media_id = resp_data["id"]
         log(f"IG: reel published ->media_id={media_id}")
         return media_id
 
 
-# ─── YOUTUBE SHORTS (download + resumable upload) ────────────────────────────
+# ─── YOUTUBE SHORTS ──────────────────────────────────────────────────────────
 def _build_yt_client(token_file=None):
     token_file = token_file or YT_TOKEN_FILE
     with open(token_file, encoding="utf-8") as f:
         td = json.load(f)
 
     expiry_str = td.get("expiry")
-    # google-auth's creds.expired compares expiry with datetime.utcnow() (naive),
-    # so expiry must also be naive UTC — do NOT attach tzinfo here.
     expiry = (
         datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M:%SZ")
         if expiry_str else None
@@ -269,7 +274,7 @@ def _build_yt_client(token_file=None):
     if creds.expired and creds.refresh_token:
         log("YT: access token expired — refreshing...")
         creds.refresh(Request())
-        td["token"] = creds.token
+        td["token"]  = creds.token
         td["expiry"] = (
             creds.expiry.strftime("%Y-%m-%dT%H:%M:%SZ") if creds.expiry else None
         )
@@ -293,7 +298,6 @@ def _yt_upload(req) -> dict:
 
 def post_youtube_short(video_url: str, title: str, description: str,
                        yt_token_file: str = None) -> str:
-    """Download the Cloudinary video and upload it to YouTube as a Short."""
     video_bytes = _download_video(video_url)
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
@@ -305,12 +309,12 @@ def post_youtube_short(video_url: str, title: str, description: str,
 
         body = {
             "snippet": {
-                "title": title[:100],
+                "title":       title[:100],
                 "description": description[:5000],
-                "categoryId": "26",  # Howto & Style
+                "categoryId":  "26",
             },
             "status": {
-                "privacyStatus": "public",
+                "privacyStatus":          "public",
                 "selfDeclaredMadeForKids": False,
             },
             "paidProductPlacementDetails": {
@@ -323,15 +327,13 @@ def post_youtube_short(video_url: str, title: str, description: str,
                 tmp_path, chunksize=-1, resumable=True, mimetype="video/mp4"
             )
 
-        # Upload directly — the token already authenticates the correct channel
         log("YT: uploading...")
-        req = youtube.videos().insert(
+        req      = youtube.videos().insert(
             part="snippet,status,paidProductPlacementDetails",
             body=body,
             media_body=_make_media(),
         )
         response = _yt_upload(req)
-
         video_id = response.get("id", "")
         log(f"YT: Short uploaded ->video_id={video_id}")
         return video_id
@@ -339,88 +341,124 @@ def post_youtube_short(video_url: str, title: str, description: str,
         try:
             os.unlink(tmp_path)
         except Exception:
-            pass  # Windows file lock — OS will clean temp file on reboot
+            pass
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 def main() -> None:
     log("=== vipon_publisher starting ===")
 
-    ws = open_sheet()
+    # ── US: Sheet1 — post to ALL platforms ───────────────────────────────────
+    ws        = open_sheet()
     sheet_row, row, data_idx = get_next_reel(ws)
 
     if sheet_row is None:
-        log("No unposted reels found — nothing to do.")
-        return
-
-    reel_url  = row[COL_N_REEL_URL - 1].strip()
-    post_text = row[COL_O_POST_TEXT - 1].strip()
-    title     = row[COL_I_TITLE - 1].strip() or "Deal Alert!"
-    reel_link = row[COL_B_REEL_LINK - 1].strip()
-    yt_link   = row[COL_D_YT_LINK - 1].strip()
-
-    # Odd rows ->FreshDeals, Even rows ->Ultafind
-    is_odd        = (data_idx % 2 == 1)
-    platform      = "FreshDeals" if is_odd else "Ultafind"
-    fb_token_file = FB_FRESHDEALS_TOKEN        if is_odd else FB_ULTAFIND_TOKEN
-    yt_token_file = YT_TOKEN_FILE              if is_odd else YT_ULTAFIND_TOKEN_FILE
-
-    log(f"Row {sheet_row} (position {data_idx}): posting to {platform}")
-    log(f"  Reel URL : {reel_url[:80]}")
-    log(f"  Title    : {title[:70]}")
-
-    page_id, page_token, _ = load_fb_token(fb_token_file)
-    # IG uses the same page token as FB — each IG account is linked to its own FB page
-    ig_user_id = IG_FRESHDEALS_USER_ID if is_odd else IG_ULTAFIND_USER_ID
-
-    errors = []
-
-    # ── Facebook Reel ──────────────────────────────────────────────────────
-    log("--- Facebook ---")
-    try:
-        post_fb_reel(page_id, page_token, reel_url, title, post_text)
-    except Exception as e:
-        log(f"ERROR (FB): {e}")
-        errors.append(f"FB: {e}")
-
-    # ── Instagram Reel (alternates: freshdealsus odd / ultafind even) ──────
-    log(f"--- Instagram ({ig_user_id}) ---")
-    ig_caption = f"{post_text}\n\n{reel_link}" if reel_link else post_text
-    try:
-        post_ig_reel(ig_user_id, page_token, reel_url, ig_caption)
-    except Exception as e:
-        log(f"ERROR (IG): {e}")
-        errors.append(f"IG: {e}")
-
-    # ── YouTube Short ──────────────────────────────────────────────────────
-    yt_label   = "FreshDeals YT" if is_odd else "Ultafind YT"
-    yt_success = False
-    log(f"--- YouTube ({yt_label}) ---")
-    yt_desc = f"{post_text}\n\n{yt_link}" if yt_link else post_text
-    # Check token file exists; if Ultafind token not yet created, fall back to FreshDeals
-    if not os.path.exists(yt_token_file):
-        log(f"  ⚠️ {yt_token_file} not found — falling back to FreshDeals YT token")
-        yt_token_file = YT_TOKEN_FILE
-    try:
-        post_youtube_short(reel_url, title, yt_desc, yt_token_file=yt_token_file)
-        yt_success = True
-    except Exception as e:
-        log(f"ERROR (YT): {e}")
-        errors.append(f"YT: {e}")
-
-    # ── Mark col P always (prevents re-processing); col Q only if YT succeeded ──
-    ws.update_acell(f"P{sheet_row}", "Yes")
-    log(f"Sheet row {sheet_row} col P ->Yes")
-    if yt_success:
-        ws.update_acell(f"Q{sheet_row}", "Yes")
-        log(f"Sheet row {sheet_row} col Q ->Yes (YouTube posted)")
+        log("US: No unposted reels — skipping.")
     else:
-        log(f"Sheet row {sheet_row} col Q left blank (YouTube failed — Make.com will retry)")
+        log(f"US: Row {sheet_row} -> FreshDeals + Ultafind (FB, IG, YT)")
 
-    if errors:
-        log(f"Done with {len(errors)} error(s): {'; '.join(errors)}")
+        reel_url   = row[COL_N_REEL_URL  - 1].strip()
+        post_text  = row[COL_O_POST_TEXT - 1].strip()
+        title      = row[COL_I_TITLE     - 1].strip() or "Deal Alert!"
+        reel_link  = row[COL_B_REEL_LINK - 1].strip()
+        yt_link    = row[COL_D_YT_LINK   - 1].strip()
+        ig_caption = f"{post_text}\n\n{reel_link}" if reel_link else post_text
+        yt_desc    = f"{post_text}\n\n{yt_link}"   if yt_link   else post_text
+
+        errors     = []
+        yt_success = False
+
+        # ── Facebook: FreshDeals + Ultafind ──────────────────────────────────
+        for fb_file, fb_label in [
+            (FB_FRESHDEALS_TOKEN, "FreshDeals"),
+            (FB_ULTAFIND_TOKEN,   "Ultafind"),
+        ]:
+            log(f"--- Facebook ({fb_label}) ---")
+            try:
+                pid, tok, _ = load_fb_token(fb_file)
+                post_fb_reel(pid, tok, reel_url, title, post_text)
+            except Exception as e:
+                log(f"ERROR (FB {fb_label}): {e}")
+                errors.append(f"FB-{fb_label}: {e}")
+
+        # ── Instagram: freshdealsus + ultafind ───────────────────────────────
+        for ig_uid, ig_label, fb_file in [
+            (IG_FRESHDEALS_USER_ID, "freshdealsus", FB_FRESHDEALS_TOKEN),
+            (IG_ULTAFIND_USER_ID,   "ultafind",     FB_ULTAFIND_TOKEN),
+        ]:
+            log(f"--- Instagram ({ig_label}) ---")
+            try:
+                _, tok, _ = load_fb_token(fb_file)
+                post_ig_reel(ig_uid, tok, reel_url, ig_caption)
+            except Exception as e:
+                log(f"ERROR (IG {ig_label}): {e}")
+                errors.append(f"IG-{ig_label}: {e}")
+
+        # ── YouTube: FreshDeals YT + Ultafind YT ─────────────────────────────
+        for yt_file, yt_label in [
+            (YT_TOKEN_FILE,         "FreshDeals YT"),
+            (YT_ULTAFIND_TOKEN_FILE,"Ultafind YT"),
+        ]:
+            log(f"--- YouTube ({yt_label}) ---")
+            if not os.path.exists(yt_file):
+                log(f"  warning: {yt_file} not found — skipping")
+                continue
+            try:
+                post_youtube_short(reel_url, title, yt_desc, yt_token_file=yt_file)
+                yt_success = True
+            except Exception as e:
+                log(f"ERROR (YT {yt_label}): {e}")
+                errors.append(f"YT-{yt_label}: {e}")
+
+        # ── Mark sheet ────────────────────────────────────────────────────────
+        ws.update_acell(f"P{sheet_row}", "Yes")
+        log(f"US: row {sheet_row} col P -> Yes")
+        if yt_success:
+            ws.update_acell(f"Q{sheet_row}", "Yes")
+            log(f"US: row {sheet_row} col Q -> Yes (YouTube posted)")
+        else:
+            log(f"US: row {sheet_row} col Q left blank (YouTube failed — Make.com retries)")
+
+        if errors:
+            log(f"US done with {len(errors)} error(s): {'; '.join(str(e) for e in errors)}")
+        else:
+            log("US: All platforms posted successfully.")
+
+    # ── Canada: Sheet2 — FB only ─────────────────────────────────────────────
+    ws2        = open_sheet2()
+    sheet_row2, row2, _ = get_next_reel(ws2)
+
+    if sheet_row2 is None:
+        log("CA: No unposted reels — skipping.")
     else:
-        log("All platforms posted successfully.")
+        log(f"CA: Row {sheet_row2} -> Fresh Deals Canada (FB only)")
+
+        reel_url2  = row2[COL_N_REEL_URL  - 1].strip()
+        post_text2 = row2[COL_O_POST_TEXT - 1].strip()
+        title2     = row2[COL_I_TITLE     - 1].strip() or "Deal Alert!"
+        errors2    = []
+
+        log("--- Facebook (Fresh Deals Canada) ---")
+        try:
+            if os.path.exists(FB_CANADA_TOKEN):
+                pid2, tok2, _ = load_fb_token(FB_CANADA_TOKEN)
+            else:
+                # Token file not yet created — use Canada Page ID with FreshDeals user token
+                log("  warning: fb_page_token-canada.json not found — using FreshDeals token with CA page ID")
+                _, tok2, _ = load_fb_token(FB_FRESHDEALS_TOKEN)
+                pid2 = FB_CANADA_PAGE_ID
+            post_fb_reel(pid2, tok2, reel_url2, title2, post_text2)
+        except Exception as e:
+            log(f"ERROR (FB Canada): {e}")
+            errors2.append(f"FB-CA: {e}")
+
+        ws2.update_acell(f"P{sheet_row2}", "Yes")
+        log(f"CA: row {sheet_row2} col P -> Yes")
+
+        if errors2:
+            log(f"CA done with {len(errors2)} error(s): {'; '.join(str(e) for e in errors2)}")
+        else:
+            log("CA: Facebook posted successfully.")
 
     log("=== vipon_publisher done ===")
 

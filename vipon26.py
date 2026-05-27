@@ -48,6 +48,12 @@ TAG_PINTEREST     = "pinpinterestfd-20"
 GOOGLE_SHEET_NAME = "vipon"
 GOOGLE_CREDS_FILE = "vipon_google_creds.json"
 
+# ── Canada market ────────────────────────────────────────────────
+AFFILIATE_ID_CA    = "fdcanada00-20"   # single tag for all CA platforms
+AMAZON_TLD_CA      = "ca"
+SHEET2_TAB         = "Sheet2"          # Canada products sheet
+SELLER_FORM_TAB_CA = "Response Form 3" # Canada seller form responses
+
 # ── Vipon.com accounts — loaded from ~/vipon_accounts.json ──────
 # Format: [{"username": "...", "password": "..."}, ...]
 def _load_vipon_accounts():
@@ -773,6 +779,59 @@ def open_sheet_and_reset():
     log(f"✓ Sheet ready — removed {len(rows_to_delete)} completed rows")
     return ws
 
+
+def open_sheet2_and_reset():
+    """Open Sheet2 (Canada) and remove rows where col P = 'Yes'."""
+    log("▶ Opening Sheet2 (Canada) and cleaning completed rows…")
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDS_FILE, scope)
+    client = gspread.authorize(creds)
+    ss = client.open(GOOGLE_SHEET_NAME)
+    try:
+        ws2 = ss.worksheet(SHEET2_TAB)
+    except Exception:
+        ws2 = ss.get_worksheet(1)
+
+    values = ws2.get_all_values()
+    if not values:
+        ws2.append_row(HEADER, value_input_option="USER_ENTERED")
+        log("✓ Sheet2 was empty — header added")
+        return ws2
+
+    rows_to_delete = []
+    for idx, row in enumerate(values[1:], start=2):
+        col_p = row[15].strip().lower() if len(row) >= 16 else ""
+        if col_p == "yes":
+            rows_to_delete.append(idx)
+
+    for row_idx in reversed(rows_to_delete):
+        ws2.delete_rows(row_idx)
+
+    log(f"✓ Sheet2 ready — removed {len(rows_to_delete)} completed rows")
+    return ws2
+
+
+def switch_to_canada(driver):
+    """Click the country flag dropdown on myvipon.com and select Canada."""
+    try:
+        dropdown = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.ID, "dropdownMenu2"))
+        )
+        dropdown.click()
+        time.sleep(1)
+        canada = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((
+                By.XPATH,
+                "//ul[contains(@class,'dropdown-menu')]//img[contains(@src,'/ca.svg')]/ancestor::a"
+            ))
+        )
+        canada.click()
+        time.sleep(3)   # wait for page to reload with Canadian products
+        log("✓ Switched myvipon.com to Canada")
+    except Exception as e:
+        log(f"  ⚠️ Could not switch to Canada: {e}")
+
+
 # ════════════════════════════════════════════════════════════════
 #  PAGE HELPERS
 # ════════════════════════════════════════════════════════════════
@@ -882,9 +941,9 @@ def fetch_amazon_images(driver, asin: str, tld: str = "com", max_imgs: int = 9) 
 
         log(f"  ↳ Amazon PA-API: {asin}")
         request = GetItemsRequest(
-            partner_tag=AFFILIATE_ID,
+            partner_tag=AFFILIATE_ID_CA if tld == "ca" else AFFILIATE_ID,
             partner_type=PartnerType.ASSOCIATES,
-            marketplace="www.amazon.com",
+            marketplace=f"www.amazon.{tld}",
             item_ids=[asin],
             resources=[
                 GetItemsResource.IMAGES_PRIMARY_LARGE,
@@ -1031,7 +1090,7 @@ def extract_code(driver):
 #  PRODUCT PAGE SCRAPER
 # ════════════════════════════════════════════════════════════════
 
-def scrape_product_page(driver, wait, pid):
+def scrape_product_page(driver, wait, pid, tld="com"):
     url = f"https://www.myvipon.com/product/{pid}"
     log(f"→ PID {pid}: opening product page…")
     try:
@@ -1086,13 +1145,19 @@ def scrape_product_page(driver, wait, pid):
 
     images = []
     if asin:
-        images = fetch_amazon_images(driver, asin, "com", max_imgs=MAX_AMAZON_IMAGES)
+        images = fetch_amazon_images(driver, asin, tld, max_imgs=MAX_AMAZON_IMAGES)
         if not images and image_url:
             images = [image_url]
 
-    link           = get_affiliate_link(asin, "com") if asin else ""
-    platform_links = (get_platform_links(asin, "com") if asin
-                      else {"reel":"","ig":"","youtube":"","tiktok":"","pinterest":""})
+    if tld == "ca":
+        # Canada: single tag for all platforms
+        link           = _worker_smartlink(asin, AFFILIATE_ID_CA, tld) if asin else ""
+        platform_links = {k: (_worker_smartlink(asin, AFFILIATE_ID_CA, tld) if asin else "")
+                          for k in ["reel", "ig", "youtube", "tiktok", "pinterest"]}
+    else:
+        link           = get_affiliate_link(asin, tld) if asin else ""
+        platform_links = (get_platform_links(asin, tld) if asin
+                          else {"reel":"","ig":"","youtube":"","tiktok":"","pinterest":""})
 
     return {
         "pid":            pid,
@@ -1550,21 +1615,117 @@ def process_seller_forms(ws_main) -> None:
     log(f"✅ Seller forms done — {processed} added to Sheet1, {skipped} skipped")
 
 
+def process_seller_forms_ca(ws2_main) -> None:
+    """Phase 4 — Canada seller form intake from 'Response Form 3' -> Sheet2."""
+    log("\n═══ Phase 4: Canada Seller Form Intake ═══")
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDS_FILE, scope)
+        form_ws = gspread.authorize(creds).open(GOOGLE_SHEET_NAME).worksheet(SELLER_FORM_TAB_CA)
+    except Exception as e:
+        log(f"⚠️ Could not open '{SELLER_FORM_TAB_CA}' — skipping CA seller forms: {e}")
+        return
+
+    # Reuse the same helper logic as process_seller_forms but writing to Sheet2
+    # and using Canada TLD + affiliate tag
+    form_ws2 = form_ws
+    status_col = _ensure_status_col(form_ws2)
+    rows = form_ws2.get_all_values()
+    if len(rows) < 2:
+        log("No CA seller form submissions found.")
+        return
+
+    processed = skipped = 0
+    for row_idx, row in enumerate(rows[1:], start=2):
+        status_val = row[status_col].strip() if len(row) > status_col else ""
+        if status_val:
+            continue  # already processed
+
+        asin = ""
+        code = ""
+        for col_name, *names in [
+            ("asin", "asin", "amazon asin", "product asin"),
+            ("code", "code", "discount code", "promo code", "coupon"),
+        ]:
+            idx = _find_col(rows[0], *names[1:])
+            if idx >= 0 and idx < len(row):
+                val = row[idx].strip().upper()
+                if col_name == "asin":
+                    asin = val
+                else:
+                    code = val
+
+        if not asin:
+            form_ws2.update_cell(row_idx, status_col + 1, "No ASIN")
+            skipped += 1
+            continue
+        if not code:
+            form_ws2.update_cell(row_idx, status_col + 1, "Invalid Code")
+            skipped += 1
+            continue
+
+        images = fetch_amazon_images(None, asin, AMAZON_TLD_CA, max_imgs=10)
+        if not images:
+            form_ws2.update_cell(row_idx, status_col + 1, "No Images")
+            skipped += 1
+            continue
+
+        title = _fetch_amazon_title_simple(asin)
+        t_short = shorten_title(title, MAX_TITLE_LEN)
+        aff_link = _worker_smartlink(asin, AFFILIATE_ID_CA, AMAZON_TLD_CA)
+        platform_links = {k: aff_link for k in ["reel","ig","youtube","tiktok","pinterest"]}
+
+        disc_txt = ""
+        expiry   = ""
+        price    = ""
+
+        post_text = generate_social_post(aff_link, code, disc_txt, expiry, t_short, price)
+
+        try:
+            reel_url = make_and_upload_reel_from_images(
+                asin, images, disc_txt, code, title, price, expiry
+            )
+        except Exception as e:
+            log(f"  ⚠️ Reel failed for CA seller {asin}: {e}")
+            form_ws2.update_cell(row_idx, status_col + 1, "Video Failed")
+            skipped += 1
+            continue
+
+        ws2_main.append_row([
+            aff_link, platform_links.get("reel",""), platform_links.get("ig",""),
+            platform_links.get("youtube",""), platform_links.get("tiktok",""),
+            code, disc_txt, expiry, t_short, price, asin,
+            images[0], images[0], reel_url, post_text,
+        ], value_input_option="USER_ENTERED")
+
+        form_ws2.update_cell(row_idx, status_col + 1, "Done")
+        processed += 1
+        log(f"  ✓ CA Seller {asin} -> Sheet2 row added")
+        time.sleep(0.3)
+
+    log(f"✅ CA seller forms done — {processed} added to Sheet2, {skipped} skipped")
+
+
 # ════════════════════════════════════════════════════════════════
-#  MAIN  — Phase 1: scrape all (Chrome alive)
-#          Phase 2: build videos + write sheet (Chrome closed, RAM freed)
-#          Phase 3: seller form intake
+#  MAIN  — Phase 1: scrape US (Chrome alive)
+#          Phase 1b: scrape Canada (same Chrome session, switched to CA)
+#          Phase 2: build US videos + write Sheet1 (Chrome closed)
+#          Phase 2b: build Canada videos + write Sheet2
+#          Phase 3: US seller form intake (Form Responses 2 -> Sheet1)
+#          Phase 4: CA seller form intake (Response Form 3 -> Sheet2)
 # ════════════════════════════════════════════════════════════════
 
 def main():
     random.seed(time.time())
 
     ws     = open_sheet_and_reset()
+    ws2    = open_sheet2_and_reset()
     driver = create_driver()
     wait   = WebDriverWait(driver, WAIT_SECS)
 
-    # ── PHASE 1: Scrape ──────────────────────────────────────────
-    scraped = []
+    # ── PHASE 1: Scrape US ───────────────────────────────────────
+    scraped    = []
+    scraped_ca = []
     try:
         # Try every account until one logs in successfully
         logged_in = False
@@ -1622,6 +1783,29 @@ def main():
             scraped.append(data)
             count += 1
             log(f"✓ Scraped {count}/{PRODUCT_LIMIT}: {data['title'][:60]}")
+
+        # ── PHASE 1b: Switch to Canada and scrape CA deals ───────
+        log("\n═══ Phase 1b: Canada Scrape ═══")
+        switch_to_canada(driver)
+        ca_tiles = collect_promo_tiles_random(driver, wait)
+        ca_count = 0
+        ca_fails = 0
+        for pid, _, _ in ca_tiles:
+            if ca_count >= PRODUCT_LIMIT:
+                break
+            try:
+                data_ca = scrape_product_page(driver, wait, pid, tld=AMAZON_TLD_CA)
+            except (TimeoutException, WebDriverException) as e:
+                log(f"  ⚠️ CA PID {pid} error: {e.__class__.__name__} — skip")
+                ca_fails += 1
+                data_ca = None
+            if data_ca is None:
+                ca_fails += 1
+                continue
+            ca_fails = 0
+            scraped_ca.append(data_ca)
+            ca_count += 1
+            log(f"✓ CA Scraped {ca_count}/{PRODUCT_LIMIT}: {data_ca['title'][:60]}")
 
     finally:
         try:
@@ -1705,10 +1889,63 @@ def main():
         time.sleep(0.3)
         log(f"✓ Row written for PID {pid}")
 
-    log(f"✅ Done — {len(scraped)} products processed")
+    log(f"✅ US done — {len(scraped)} products processed")
 
-    # ── PHASE 3: Seller Form Intake ───────────────────────────────
+    # ── PHASE 2b: Canada Videos + Sheet2 ─────────────────────────
+    log("\n═══ Phase 2b: Canada Videos + Sheet2 ═══")
+    for data in scraped_ca:
+        pid     = data["pid"]
+        t_short = shorten_title(data["title"], MAX_TITLE_LEN)
+
+        try:
+            reel_url = make_and_upload_reel_from_images(
+                pid,
+                data.get("images") or ([data["image"]] if data.get("image") else []),
+                data["discount"],
+                data["code"],
+                data["title"],
+                data["price"],
+                data["expiry"],
+            )
+        except Exception as e:
+            log(f"  ⚠️ CA reel failed for PID {pid}: {e}")
+            reel_url = ""
+
+        ws2.append_row([
+            data["link"],
+            data["link_reel"],
+            data["link_ig"],
+            data["link_youtube"],
+            data["link_tiktok"],
+            data["code"],
+            data["discount"],
+            data["expiry"],
+            t_short,
+            data["price"],
+            pid,
+            data["image"],
+            data["image"],
+            reel_url,
+            generate_social_post(
+                data["link"],
+                data["code"],
+                data["discount"],
+                data["expiry"],
+                t_short,
+                data["price"],
+            ),
+        ], value_input_option="USER_ENTERED")
+
+        time.sleep(0.3)
+        log(f"✓ CA row written for PID {pid}")
+
+    log(f"✅ CA done — {len(scraped_ca)} products processed")
+
+    # ── PHASE 3: US Seller Form Intake ───────────────────────────
     process_seller_forms(ws)
+
+    # ── PHASE 4: Canada Seller Form Intake ───────────────────────
+    process_seller_forms_ca(ws2)
 
 
 if __name__ == "__main__":
