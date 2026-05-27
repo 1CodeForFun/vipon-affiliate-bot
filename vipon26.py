@@ -89,12 +89,12 @@ LOGO_SEG_DURATION_SEC = 2
 MAX_AMAZON_IMAGES     = 6
 
 PROMO_URL     = "https://www.myvipon.com"
-PRODUCT_LIMIT = 24
+PRODUCT_LIMIT = int(os.getenv("PRODUCT_LIMIT", "24"))
 
-SCROLL_MIN         = 1
-SCROLL_MAX         = 50
+SCROLL_MIN         = int(os.getenv("SCROLL_MIN",    "1"))
+SCROLL_MAX         = int(os.getenv("SCROLL_MAX",    "50"))
 SCROLL_PAUSE_RANGE = (0.7, 1.7)
-MAX_DISCOVERY      = 150
+MAX_DISCOVERY      = int(os.getenv("MAX_DISCOVERY", "150"))
 
 WAIT_SECS        = 10
 PAGELOAD_TIMEOUT = 120
@@ -1025,6 +1025,7 @@ def collect_promo_tiles_random(driver, wait):
         driver.execute_script("window.scrollBy(0, Math.floor(window.innerHeight*0.9));")
         time.sleep(random.uniform(*SCROLL_PAUSE_RANGE))
         now = len(snapshot_pids())
+        if now >= MAX_DISCOVERY: break          # have enough tiles — stop scrolling
         if now <= last_count:
             stagnant += 1
             if stagnant >= 2: break
@@ -1046,41 +1047,90 @@ def collect_promo_tiles_random(driver, wait):
 # ════════════════════════════════════════════════════════════════
 
 def try_reveal_code(driver):
+    # Only match the INITIAL "Get Code" button — never the post-reveal "Use code on Amazon" button.
+    # btn-moved class is added to the button AFTER the code is revealed; exclude it explicitly.
     xps = [
         "//*[@id='PC_239_getCodeInDetail']",
-        "//button[contains(., 'Get Code') or contains(., 'Reveal') or contains(., 'Show Code')]",
+        "//button[not(contains(@class,'btn-moved')) and "
+            "(contains(., 'Get Code') or contains(., 'Reveal') or contains(., 'Show Code'))]",
         "//a[contains(., 'Get Code') or contains(., 'Reveal') or contains(., 'Show Code')]",
-        "//*[@data-target='#PC_240_jumpToAmzFromCodeZone']",
-        "//*[@id='PC_241_useCodeOnAmazon']",
-        "//button[contains(@class,'get-coupon-btn')]",
+        "//*[@data-target='#PC_240_jumpToAmzFromCodeZone' and not(contains(@class,'btn-moved'))]",
+        # NOTE: PC_241_useCodeOnAmazon intentionally excluded — it navigates away to Amazon
+        "//button[contains(@class,'get-coupon-btn') and not(contains(@class,'btn-moved'))]",
     ]
     for xp in xps:
         try:
-            el = WebDriverWait(driver, 6).until(EC.element_to_be_clickable((By.XPATH, xp)))
+            el = WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.XPATH, xp)))
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
             time.sleep(0.5)
             try: driver.execute_script("arguments[0].click();", el)
             except Exception: el.click()
-            time.sleep(2.0)   # wait for AJAX to return the code after click
+            # Wait for the code text to appear in PC_240_jumpToAmzFromCodeZone (AJAX result)
+            try:
+                WebDriverWait(driver, 6).until(
+                    lambda d: (d.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone").text or "").strip()
+                )
+            except Exception:
+                time.sleep(3.0)   # fallback if element not found by ID
+            break   # ← stop after first click — never loop into the post-reveal "Use on Amazon" button
         except Exception:
             continue
 
 def extract_code(driver):
-    for i in ["PC_240_jumpToAmzFromCodeZone", "PC_240_codeInDetail", "coupon_code"]:
+    # 1a) PC_240_jumpToAmzFromCodeZone — wait for NON-EMPTY text (element exists from page load
+    #     but is empty until AJAX populates it after clicking GET CODE)
+    try:
+        WebDriverWait(driver, 5).until(
+            lambda d: (d.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone").text or "").strip()
+        )
+        el  = driver.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone")
+        txt = (_text(el) or "").upper()
+        m   = CODE_RE.search(txt)
+        if m and is_plausible_code(m.group(1), strict=False): return m.group(1)
+        if is_plausible_code(txt, strict=False): return txt
+    except Exception:
+        pass
+    # 1b) Other known IDs (presence check is fine — these only exist when code is ready)
+    for i in ["PC_240_codeInDetail", "coupon_code"]:
         try:
-            el = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, i)))
+            el = WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.ID, i)))
             txt = (_text(el) or "").upper()
             m = CODE_RE.search(txt)
             if m and is_plausible_code(m.group(1), strict=False): return m.group(1)
             if is_plausible_code(txt, strict=False): return txt
         except Exception:
             pass
+    # 2) Input fields — code is often pre-filled for easy copy
+    try:
+        for inp in driver.find_elements(By.XPATH,
+                "//input[@type='text' or not(@type)]")[:20]:
+            val = (inp.get_attribute("value") or "").strip().upper()
+            if is_plausible_code(val, strict=False):
+                return val
+    except Exception:
+        pass
+    # 3) Elements whose class or id contains "coupon" or "code"
+    try:
+        for el in driver.find_elements(By.XPATH,
+                "//*[contains(@class,'coupon') or contains(@class,'code') or "
+                "contains(@id,'coupon') or contains(@id,'code') or "
+                "contains(@class,'Coupon') or contains(@class,'Code')]")[:60]:
+            txt = (_text(el) or "").strip().upper()
+            if not txt or len(txt) > 20:
+                continue   # skip empty or long blocks
+            m = CODE_RE.search(txt)
+            if m and is_plausible_code(m.group(1), strict=False):
+                return m.group(1)
+    except Exception:
+        pass
+    # 4) Page-source keyword scan
     try:
         src = (driver.page_source or "").upper()
         m = re.search(r"CODE[:\s]*([A-Z0-9]{6,12})", src)
         if m and is_plausible_code(m.group(1), strict=False): return m.group(1)
     except Exception:
         pass
+    # 5) Broad text scan (last resort)
     try:
         for el in driver.find_elements(By.XPATH, "//strong|//b|//code|//span")[:250]:
             txt = (_text(el) or "").upper()
@@ -1110,11 +1160,21 @@ def scrape_product_page(driver, wait, pid, tld="com"):
         time.sleep(2.0)
 
     try_reveal_code(driver)
+    # Guard: if a reveal click navigated away from vipon (e.g. clicked "Use on Amazon"), come back
+    if "myvipon.com/product/" not in driver.current_url:
+        log(f"  ↩ navigated away during reveal — returning to product page")
+        driver.get(url)
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
+        time.sleep(2.0)
     code = extract_code(driver)
     # Retry once if code not found — AJAX may still be in flight
     if not code or not is_plausible_code(code, strict=False):
         time.sleep(3.0)
         try_reveal_code(driver)
+        if "myvipon.com/product/" not in driver.current_url:
+            driver.get(url)
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
+            time.sleep(2.0)
         code = extract_code(driver)
     code = (code or "").strip().upper()
     if not is_plausible_code(code, strict=False):
@@ -1760,11 +1820,9 @@ def main():
                 data = scrape_product_page(driver, wait, pid)
             except TimeoutException:
                 log(f"  ⏱️ hard timeout on PID {pid} — skip")
-                consecutive_fails += 1
                 data = None
             except WebDriverException as e:
                 log(f"  ⚠️ webdriver error on PID {pid}: {e} — skip")
-                consecutive_fails += 1
                 data = None
 
             if data is None:
