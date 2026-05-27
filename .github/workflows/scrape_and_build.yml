@@ -3,6 +3,19 @@ name: Scrape & Build Videos
 # Runs every day at 6:00 AM CT (11:00 UTC during CDT / 12:00 UTC during CST)
 on:
   workflow_dispatch:  # triggered by cron-job.org; can also be run manually from GitHub UI
+    inputs:
+      product_limit:
+        description: 'Max products to scrape (default 24)'
+        required: false
+        default: ''
+      max_discovery:
+        description: 'Max tiles to collect (default 150)'
+        required: false
+        default: ''
+      scroll_max:
+        description: 'Max scroll steps (default 50)'
+        required: false
+        default: ''
 
 jobs:
   scrape:
@@ -54,4 +67,8 @@ jobs:
           [ -f secrets/geminikeys.txt ] && cp secrets/geminikeys.txt ~/geminikeys.txt || true
 
       - name: Run scrape & build
+        env:
+          PRODUCT_LIMIT: ${{ github.event.inputs.product_limit }}
+          MAX_DISCOVERY: ${{ github.event.inputs.max_discovery }}
+          SCROLL_MAX:    ${{ github.event.inputs.scroll_max }}
         run: python vipon26.py
