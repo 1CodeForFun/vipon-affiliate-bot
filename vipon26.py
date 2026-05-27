@@ -52,7 +52,7 @@ GOOGLE_CREDS_FILE = "vipon_google_creds.json"
 AFFILIATE_ID_CA    = "fdcanada00-20"   # single tag for all CA platforms
 AMAZON_TLD_CA      = "ca"
 SHEET2_TAB         = "Sheet2"          # Canada products sheet
-SELLER_FORM_TAB_CA = "Response Form 3" # Canada seller form responses
+SELLER_FORM_TAB_CA = "Form Responses 3" # Canada seller form responses
 
 # ── Vipon.com accounts — loaded from ~/vipon_accounts.json ──────
 # Format: [{"username": "...", "password": "..."}, ...]
@@ -1006,6 +1006,10 @@ def collect_promo_tiles_random(driver, wait):
                 if "/product" not in href: continue
                 pid = href.split("/product")[-1].strip("/").split("?")[0].split("/")[0]
                 pid = re.sub(r"[^0-9A-Za-z_-].*$", "", pid)
+                # Keep only the leading numeric ID — strip the SEO slug (e.g. "13102489-Towel-Warmer-...")
+                pid_num = re.match(r'^(\d+)', pid)
+                if pid_num:
+                    pid = pid_num.group(1)
                 if pid and pid not in seen:
                     seen.add(pid); out.append(pid)
             except StaleElementReferenceException:
