@@ -820,17 +820,20 @@ def switch_to_canada(driver):
         )
         dropdown.click()
         time.sleep(1)
+        # Use data-domain attribute — confirmed in DevTools (li data-domain="www.amazon.ca")
         canada = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((
                 By.XPATH,
-                "//ul[contains(@class,'dropdown-menu')]//img[contains(@src,'/ca.svg')]/ancestor::a"
+                "//li[@data-domain='www.amazon.ca']/a"
             ))
         )
         canada.click()
-        time.sleep(3)   # wait for page to reload with Canadian products
+        time.sleep(3)
         log("✓ Switched myvipon.com to Canada")
+        return True
     except Exception as e:
         log(f"  ⚠️ Could not switch to Canada: {e}")
+        return False
 
 
 # ════════════════════════════════════════════════════════════════
