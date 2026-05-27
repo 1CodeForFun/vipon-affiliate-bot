@@ -577,9 +577,10 @@ def _cloudinary_upload_video(mp4_path: str, public_id: str, max_retries: int = 5
 
 def _build_affiliate_dp_link(asin: str, tld: str = "com") -> str:
     if not asin: return ""
+    tag  = AFFILIATE_ID_CA if tld == "ca" else AFFILIATE_ID
     base = f"https://www.amazon.{tld}/dp/{asin}"
     sep  = "&" if "?" in base else "?"
-    return base + f"{sep}tag={AFFILIATE_ID}"
+    return base + f"{sep}tag={tag}"
 
 def _worker_smartlink(asin: str, tag: str, tld: str = "com") -> str:
     dp = _build_affiliate_dp_link(asin, tld)
@@ -1786,8 +1787,10 @@ def main():
 
         # ── PHASE 1b: Switch to Canada and scrape CA deals ───────
         log("\n═══ Phase 1b: Canada Scrape ═══")
-        switch_to_canada(driver)
-        ca_tiles = collect_promo_tiles_random(driver, wait)
+        ca_switched = switch_to_canada(driver)
+        if not ca_switched:
+            log("⚠️  Canada switch failed — skipping CA scrape to avoid writing US products to Sheet2")
+        ca_tiles = collect_promo_tiles_random(driver, wait) if ca_switched else []
         ca_count = 0
         ca_fails = 0
         for pid, _, _ in ca_tiles:
