@@ -713,7 +713,8 @@ def login(driver, wait):
 HEADER = [
     "Link", "Reel", "IG", "Youtube", "TikTok",
     "Discount Code", "Disc", "Expiry", "Product", "Price",
-    "PID", "Image", "Pin Image", "Reel URL", "FB Post", "Posted On"
+    "PID", "Image", "Pin Image", "Reel URL", "FB Post", "Reel Posted",
+    "YT / FBP Posted", "Make YT",
 ]
 
 # ── Pinterest sheet (preserved, gated by ENABLE_PINTEREST) ──────
@@ -766,6 +767,11 @@ def open_sheet_and_reset():
         log("✓ Sheet was empty — header added")
         return ws
 
+    # Repair header row if it is missing or has fewer columns than expected
+    if values[0] != HEADER:
+        ws.update("A1", [HEADER], value_input_option="USER_ENTERED")
+        log(f"✓ Sheet1 header repaired ({len(values[0])} → {len(HEADER)} cols)")
+
     # Delete rows where BOTH col-P and col-Q are "yes"
     rows_to_delete = []
     for idx, row in enumerate(values[1:], start=2):
@@ -795,9 +801,14 @@ def open_sheet2_and_reset():
 
     values = ws2.get_all_values()
     if not values:
-        ws2.append_row(HEADER, value_input_option="USER_ENTERED")
+        ws2.update("A1", [HEADER], value_input_option="USER_ENTERED")
         log("✓ Sheet2 was empty — header added")
         return ws2
+
+    # Repair header row if it is missing or has fewer columns than expected
+    if values[0] != HEADER:
+        ws2.update("A1", [HEADER], value_input_option="USER_ENTERED")
+        log(f"✓ Sheet2 header repaired ({len(values[0])} → {len(HEADER)} cols)")
 
     rows_to_delete = []
     for idx, row in enumerate(values[1:], start=2):
@@ -1762,12 +1773,12 @@ def process_seller_forms_ca(ws2_main) -> None:
             skipped += 1
             continue
 
-        ws2_main.append_row([
+        ws2_main.append_rows([[
             aff_link, platform_links.get("reel",""), platform_links.get("ig",""),
             platform_links.get("youtube",""), platform_links.get("tiktok",""),
             code, disc_txt, expiry, t_short, price, asin,
             images[0], images[0], reel_url, post_text,
-        ], value_input_option="USER_ENTERED")
+        ]], value_input_option="USER_ENTERED", table_range="A1")
 
         form_ws2.update_cell(row_idx, status_col + 1, "Done")
         processed += 1
@@ -1982,7 +1993,7 @@ def main():
             log(f"  ⚠️ CA reel failed for PID {pid}: {e}")
             reel_url = ""
 
-        ws2.append_row([
+        ws2.append_rows([[
             data["link"],
             data["link_reel"],
             data["link_ig"],
@@ -2005,7 +2016,7 @@ def main():
                 t_short,
                 data["price"],
             ),
-        ], value_input_option="USER_ENTERED")
+        ]], value_input_option="USER_ENTERED", table_range="A1")
 
         time.sleep(0.3)
         log(f"✓ CA row written for PID {pid}")
