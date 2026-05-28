@@ -106,9 +106,12 @@ def ensure_row_length(row, min_len):
 
 def publish_link_post_to_facebook(page_id: str, page_token: str, graph_api_version: str, message: str, link: str):
     url = f"https://graph.facebook.com/{graph_api_version}/{page_id}/feed"
+    # Note: the affiliate link is already embedded in `message` (last line of the
+    # AI-generated post text).  Sending `link` as a separate field triggers
+    # Facebook's (#200) Permissions error on many pages due to link-attachment
+    # restrictions, so we post message-only and let FB parse the URL from the text.
     payload = {
         "message": message,
-        "link": link,
         "access_token": page_token,
     }
 
