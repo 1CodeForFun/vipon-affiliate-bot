@@ -33,6 +33,9 @@ jobs:
         run: |
           cp secrets/vipon_google_creds.json .
           cp secrets/fb_page_token.json .
+          cp secrets/fb_page_token-canada.json .
 
       - name: Post FB text
+        env:
+          SECRETS_DIR: .
         run: python FBP_ready.py
