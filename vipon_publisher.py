@@ -441,24 +441,25 @@ def main() -> None:
         log("--- Facebook (Fresh Deals Canada) ---")
         try:
             if os.path.exists(FB_CANADA_TOKEN):
-                pid2, tok2, _ = load_fb_token(FB_CANADA_TOKEN)
+                pid2, tok2, ver2 = load_fb_token(FB_CANADA_TOKEN)
+                log(f"  CA token file found: page_id={pid2}, api_version={ver2}, token_len={len(tok2)}")
             else:
                 # Token file not yet created — use Canada Page ID with FreshDeals user token
                 log("  warning: fb_page_token-canada.json not found — using FreshDeals token with CA page ID")
-                _, tok2, _ = load_fb_token(FB_FRESHDEALS_TOKEN)
+                _, tok2, ver2 = load_fb_token(FB_FRESHDEALS_TOKEN)
                 pid2 = FB_CANADA_PAGE_ID
             post_fb_reel(pid2, tok2, reel_url2, title2, post_text2)
         except Exception as e:
             log(f"ERROR (FB Canada): {e}")
             errors2.append(f"FB-CA: {e}")
 
-        ws2.update_acell(f"P{sheet_row2}", "Yes")
-        log(f"CA: row {sheet_row2} col P -> Yes")
-
         if errors2:
             log(f"CA done with {len(errors2)} error(s): {'; '.join(str(e) for e in errors2)}")
+            log(f"CA: row {sheet_row2} col P NOT marked (FB reel failed — will retry next run)")
         else:
-            log("CA: Facebook posted successfully.")
+            ws2.update_acell(f"P{sheet_row2}", "Yes")
+            log(f"CA: row {sheet_row2} col P -> Yes")
+            log("CA: Facebook reel posted successfully.")
 
     log("=== vipon_publisher done ===")
 

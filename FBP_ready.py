@@ -197,6 +197,7 @@ def main():
     log("\n=== Canada (Sheet2) ===")
     try:
         ca_pid, ca_tok, ca_ver = load_fb_config(TOKEN_FILE_CANADA, FB_CANADA_PAGE_ID)
+        log(f"CA token: page_id={ca_pid}, api_version={ca_ver}, token_len={len(ca_tok)}")
         ws_ca = open_sheet("Sheet2")
         p2, s2, f2 = post_sheet(ws_ca, "CA", ca_pid, ca_tok, ca_ver)
         log(f"CA — Posted: {p2}  Skipped: {s2}  Failed: {f2}")

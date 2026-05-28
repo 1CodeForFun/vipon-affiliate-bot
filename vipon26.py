@@ -802,7 +802,10 @@ def open_sheet2_and_reset():
     rows_to_delete = []
     for idx, row in enumerate(values[1:], start=2):
         col_p = row[15].strip().lower() if len(row) >= 16 else ""
-        if col_p == "yes":
+        col_q = row[16].strip().lower() if len(row) >= 17 else ""
+        # Only delete when BOTH reel (col P) AND text post (col Q) are confirmed done.
+        # This mirrors Sheet1 logic and prevents premature deletion when FB fails.
+        if col_p == "yes" and col_q == "yes":
             rows_to_delete.append(idx)
 
     for row_idx in reversed(rows_to_delete):
