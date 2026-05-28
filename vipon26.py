@@ -89,12 +89,12 @@ LOGO_SEG_DURATION_SEC = 2
 MAX_AMAZON_IMAGES     = 6
 
 PROMO_URL     = "https://www.myvipon.com"
-PRODUCT_LIMIT = int(os.getenv("PRODUCT_LIMIT", "24"))
+PRODUCT_LIMIT = int(os.getenv("PRODUCT_LIMIT") or "24")
 
-SCROLL_MIN         = int(os.getenv("SCROLL_MIN",    "1"))
-SCROLL_MAX         = int(os.getenv("SCROLL_MAX",    "50"))
+SCROLL_MIN         = int(os.getenv("SCROLL_MIN")    or "1")
+SCROLL_MAX         = int(os.getenv("SCROLL_MAX")    or "50")
 SCROLL_PAUSE_RANGE = (0.7, 1.7)
-MAX_DISCOVERY      = int(os.getenv("MAX_DISCOVERY", "150"))
+MAX_DISCOVERY      = int(os.getenv("MAX_DISCOVERY") or "150")
 
 WAIT_SECS        = 10
 PAGELOAD_TIMEOUT = 120
