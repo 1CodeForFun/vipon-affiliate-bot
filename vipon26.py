@@ -714,7 +714,7 @@ HEADER = [
     "Link", "Reel", "IG", "Youtube", "TikTok",
     "Discount Code", "Disc", "Expiry", "Product", "Price",
     "PID", "Image", "Pin Image", "Reel URL", "FB Post", "Reel Posted",
-    "YT Posted", "Make YT",
+    "FB Text Posted", "YT Posted",
 ]
 
 # ── Pinterest sheet (preserved, gated by ENABLE_PINTEREST) ──────
@@ -772,12 +772,13 @@ def open_sheet_and_reset():
         ws.update("A1", [HEADER], value_input_option="USER_ENTERED")
         log(f"✓ Sheet1 header repaired ({len(values[0])} → {len(HEADER)} cols)")
 
-    # Delete rows where BOTH col-P and col-Q are "yes"
+    # Delete rows where P (reel), Q (FB text), AND R (YouTube) are all "yes"
     rows_to_delete = []
     for idx, row in enumerate(values[1:], start=2):
         col_p = row[15].strip().lower() if len(row) >= 16 else ""
         col_q = row[16].strip().lower() if len(row) >= 17 else ""
-        if col_p == "yes" and col_q == "yes":
+        col_r = row[17].strip().lower() if len(row) >= 18 else ""
+        if col_p == "yes" and col_q == "yes" and col_r == "yes":
             rows_to_delete.append(idx)
 
     for row_idx in reversed(rows_to_delete):

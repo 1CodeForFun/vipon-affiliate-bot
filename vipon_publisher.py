@@ -70,8 +70,9 @@ COL_D_YT_LINK    = 4
 COL_I_TITLE      = 9
 COL_N_REEL_URL   = 14
 COL_O_POST_TEXT  = 15
-COL_P_POSTED     = 16   # "Yes" = row processed (prevents re-pick)
-COL_Q_YT_POSTED  = 17   # "Yes" = YouTube succeeded; blank = Make.com retries
+COL_P_POSTED     = 16   # "Yes" = FB + IG reels posted (prevents re-pick)
+COL_Q_FB_TEXT    = 17   # "Yes" = FB text post done (set by FBP_ready.py)
+COL_R_YT_POSTED  = 18   # "Yes" = YouTube posted (set by publisher OR Make.com)
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
 def log(msg: str) -> None:
@@ -414,10 +415,10 @@ def main() -> None:
         ws.update_acell(f"P{sheet_row}", "Yes")
         log(f"US: row {sheet_row} col P -> Yes")
         if yt_success:
-            ws.update_acell(f"Q{sheet_row}", "Yes")
-            log(f"US: row {sheet_row} col Q -> Yes (YouTube posted)")
+            ws.update_acell(f"R{sheet_row}", "Yes")
+            log(f"US: row {sheet_row} col R -> Yes (YouTube posted)")
         else:
-            log(f"US: row {sheet_row} col Q left blank (YouTube failed — Make.com retries)")
+            log(f"US: row {sheet_row} col R left blank (YouTube failed — Make.com retries)")
 
         if errors:
             log(f"US done with {len(errors)} error(s): {'; '.join(str(e) for e in errors)}")
