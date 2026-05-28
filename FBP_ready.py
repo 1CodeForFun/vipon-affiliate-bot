@@ -2,25 +2,22 @@
 """
 Posts Facebook page content from the vipon Google Sheet.
 
-Logic:
-- skip header row
-- if column A has a link
-- and column O has post text
-- and column Q is not Yes
-then:
-    1) post column O as the message
-    2) send column A as the separate Facebook link field
-    3) update column Q to Yes
+US  (Sheet1): post text+link to FreshDeals FB for rows where col Q is not Yes.
+              Mark col Q = Yes when done.
+CA  (Sheet2): post text+link to Fresh Deals Canada FB for rows where col Q is not Yes.
+              Mark col Q = Yes when done.
 
 Requirements:
     pip install gspread oauth2client requests
 
-Required local files in the same folder:
+Required local files (SECRETS_DIR or current folder):
     vipon_google_creds.json
-    fb_page_token.json   <- created by fb_get_long_lived_page_token.py
+    fb_page_token.json          <- FreshDeals US page token
+    fb_page_token-canada.json   <- Fresh Deals Canada page token
 """
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -29,16 +26,22 @@ import requests
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ---------------- CONFIG ----------------
-GOOGLE_SHEET_NAME = "vipon"
-WORKSHEET_NAME = None  # None = first sheet
-GOOGLE_CREDS_FILE = "vipon_google_creds.json"
-TOKEN_FILE = Path("fb_page_token.json")
-POST_DELAY_SECONDS = 3
-TIMEOUT = 60
+SECRETS_DIR = os.environ.get("SECRETS_DIR", ".")
+
+def _p(filename: str) -> str:
+    return os.path.join(SECRETS_DIR, filename)
+
+GOOGLE_SHEET_NAME    = "vipon"
+GOOGLE_CREDS_FILE    = _p("vipon_google_creds.json")
+TOKEN_FILE           = Path(_p("fb_page_token.json"))
+TOKEN_FILE_CANADA    = Path(_p("fb_page_token-canada.json"))
+FB_CANADA_PAGE_ID    = "100649111740976"   # Fresh Deals Canada (fallback if no token file)
+POST_DELAY_SECONDS   = 3
+TIMEOUT              = 60
 
 # Column numbers (1-based)
-COL_A_LINK = 1
-COL_O_POST = 15
+COL_A_LINK       = 1
+COL_O_POST       = 15
 COL_Q_POSTED_FLAG = 17
 
 DONE_VALUE = "Yes"
@@ -49,34 +52,41 @@ def log(msg: str):
     print(msg, flush=True)
 
 
-def load_fb_config():
-    if not TOKEN_FILE.exists():
-        raise RuntimeError(
-            f"Missing {TOKEN_FILE}. Run fb_get_long_lived_page_token.py first."
-        )
+def load_fb_config(token_file: Path, fallback_page_id: str = ""):
+    """Load FB page credentials from a token JSON file."""
+    if not token_file.exists():
+        if fallback_page_id:
+            # No dedicated token — try the US FreshDeals token with the given page ID
+            if not TOKEN_FILE.exists():
+                raise RuntimeError(f"Missing {token_file} and no fallback token at {TOKEN_FILE}.")
+            data = json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
+            page_token = (data.get("page_access_token") or "").strip()
+            graph_api_version = (data.get("graph_api_version") or "v25.0").strip()
+            return fallback_page_id, page_token, graph_api_version
+        raise RuntimeError(f"Missing {token_file}. Run fb_get_long_lived_page_token.py first.")
 
-    data = json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
-    page_id = (data.get("page_id") or "").strip()
+    data = json.loads(token_file.read_text(encoding="utf-8"))
+    page_id = (data.get("page_id") or fallback_page_id or "").strip()
     page_token = (data.get("page_access_token") or "").strip()
     graph_api_version = (data.get("graph_api_version") or "v25.0").strip()
 
     if not page_id or not page_token:
-        raise RuntimeError(f"{TOKEN_FILE} is missing page_id or page_access_token.")
+        raise RuntimeError(f"{token_file} is missing page_id or page_access_token.")
 
     return page_id, page_token, graph_api_version
 
 
-def open_sheet():
+def open_sheet(tab_name: str = None):
+    """Open a worksheet by tab name, or Sheet1 if tab_name is None."""
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
     creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDS_FILE, scope)
     client = gspread.authorize(creds)
-
     ss = client.open(GOOGLE_SHEET_NAME)
-    if WORKSHEET_NAME:
-        return ss.worksheet(WORKSHEET_NAME)
+    if tab_name:
+        return ss.worksheet(tab_name)
     return ss.sheet1
 
 
@@ -116,46 +126,41 @@ def publish_link_post_to_facebook(page_id: str, page_token: str, graph_api_versi
 
 
 # ---------------- MAIN ----------------
-def main():
-    page_id, page_token, graph_api_version = load_fb_config()
-    ws = open_sheet()
+def post_sheet(ws, label: str, page_id: str, page_token: str, graph_api_version: str):
+    """Post text+link for all unposted rows in the given worksheet."""
     rows = ws.get_all_values()
-
     if not rows:
-        log("Sheet is empty.")
-        return
+        log(f"{label}: sheet is empty.")
+        return 0, 0, 0
 
-    log(f"Loaded {len(rows)} total rows including header.")
-
-    posted_count = 0
-    skipped_count = 0
-    failed_count = 0
+    log(f"{label}: loaded {len(rows)} rows (including header).")
+    posted_count = skipped_count = failed_count = 0
 
     for sheet_row_num in range(2, len(rows) + 1):
         row = rows[sheet_row_num - 1]
         row = ensure_row_length(row, COL_Q_POSTED_FLAG)
 
-        link = normalize_text(row[COL_A_LINK - 1])
-        post_text = normalize_text(row[COL_O_POST - 1])
+        link       = normalize_text(row[COL_A_LINK - 1])
+        post_text  = normalize_text(row[COL_O_POST - 1])
         posted_flag = normalize_text(row[COL_Q_POSTED_FLAG - 1])
 
         if not link:
-            log(f"Row {sheet_row_num}: skipped (column A is empty)")
+            log(f"{label} Row {sheet_row_num}: skipped (column A is empty)")
             skipped_count += 1
             continue
 
         if is_done(posted_flag):
-            log(f"Row {sheet_row_num}: skipped (Q already Yes)")
+            log(f"{label} Row {sheet_row_num}: skipped (Q already Yes)")
             skipped_count += 1
             continue
 
         if not post_text:
-            log(f"Row {sheet_row_num}: skipped (column O is empty)")
+            log(f"{label} Row {sheet_row_num}: skipped (column O is empty)")
             skipped_count += 1
             continue
 
         try:
-            log(f"Row {sheet_row_num}: posting to Facebook...")
+            log(f"{label} Row {sheet_row_num}: posting to Facebook...")
             post_id, response_data = publish_link_post_to_facebook(
                 page_id=page_id,
                 page_token=page_token,
@@ -163,23 +168,46 @@ def main():
                 message=post_text,
                 link=link,
             )
-
             ws.update_acell(f"Q{sheet_row_num}", DONE_VALUE)
-
             posted_count += 1
-            log(f"Row {sheet_row_num}: posted successfully (post id: {post_id})")
-            log(f"Row {sheet_row_num}: response -> {response_data}")
-
+            log(f"{label} Row {sheet_row_num}: posted successfully (post id: {post_id})")
+            log(f"{label} Row {sheet_row_num}: response -> {response_data}")
             time.sleep(POST_DELAY_SECONDS)
 
         except Exception as e:
             failed_count += 1
-            log(f"Row {sheet_row_num}: FAILED -> {e}")
+            log(f"{label} Row {sheet_row_num}: FAILED -> {e}")
 
-    log("----- DONE -----")
-    log(f"Posted:  {posted_count}")
-    log(f"Skipped: {skipped_count}")
-    log(f"Failed:  {failed_count}")
+    return posted_count, skipped_count, failed_count
+
+
+def main():
+    # ── US: Sheet1 ───────────────────────────────────────────────────────────
+    log("=== US (Sheet1) ===")
+    try:
+        page_id, page_token, graph_api_version = load_fb_config(TOKEN_FILE)
+        ws_us = open_sheet()
+        p, s, f = post_sheet(ws_us, "US", page_id, page_token, graph_api_version)
+        log(f"US — Posted: {p}  Skipped: {s}  Failed: {f}")
+    except Exception as e:
+        log(f"US section error: {e}")
+        p = s = f = 0
+
+    # ── Canada: Sheet2 ───────────────────────────────────────────────────────
+    log("\n=== Canada (Sheet2) ===")
+    try:
+        ca_pid, ca_tok, ca_ver = load_fb_config(TOKEN_FILE_CANADA, FB_CANADA_PAGE_ID)
+        ws_ca = open_sheet("Sheet2")
+        p2, s2, f2 = post_sheet(ws_ca, "CA", ca_pid, ca_tok, ca_ver)
+        log(f"CA — Posted: {p2}  Skipped: {s2}  Failed: {f2}")
+    except Exception as e:
+        log(f"CA section error: {e}")
+        p2 = s2 = f2 = 0
+
+    log("\n----- DONE -----")
+    log(f"Posted:  {p + p2}")
+    log(f"Skipped: {s + s2}")
+    log(f"Failed:  {f + f2}")
 
 
 if __name__ == "__main__":
