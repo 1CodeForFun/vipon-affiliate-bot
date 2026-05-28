@@ -64,9 +64,12 @@ IG_RETRY_WAIT            = 30
 IG_MAX_RETRIES           = 3
 
 # Sheet columns (1-based)
+COL_A_AFF_LINK   = 1
 COL_B_REEL_LINK  = 2
 COL_C_IG_LINK    = 3
 COL_D_YT_LINK    = 4
+COL_F_CODE       = 6   # discount code
+COL_G_DISC       = 7   # discount %
 COL_I_TITLE      = 9
 COL_N_REEL_URL   = 14
 COL_O_POST_TEXT  = 15
@@ -345,6 +348,18 @@ def post_youtube_short(video_url: str, title: str, description: str,
             pass
 
 
+# ─── YOUTUBE DESCRIPTION ─────────────────────────────────────────────────────
+def _build_yt_description(aff_link: str, code: str, disc: str) -> str:
+    """Short, copy-friendly YouTube description with clickable affiliate link."""
+    parts = []
+    if code:
+        discount_str = f" ({disc} off)" if disc else ""
+        parts.append(f"🏷️ Discount code: {code}{discount_str}")
+    if aff_link:
+        parts.append(f"\n🛒 Get the deal:\n{aff_link}")
+    return "\n".join(parts) if parts else ""
+
+
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 def main() -> None:
     log("=== vipon_publisher starting ===")
@@ -363,8 +378,11 @@ def main() -> None:
         title      = row[COL_I_TITLE     - 1].strip() or "Deal Alert!"
         reel_link  = row[COL_B_REEL_LINK - 1].strip()
         yt_link    = row[COL_D_YT_LINK   - 1].strip()
+        aff_link   = row[COL_A_AFF_LINK  - 1].strip()
+        code       = row[COL_F_CODE      - 1].strip()
+        disc       = row[COL_G_DISC      - 1].strip()
         ig_caption = f"{post_text}\n\n{reel_link}" if reel_link else post_text
-        yt_desc    = f"{post_text}\n\n{yt_link}"   if yt_link   else post_text
+        yt_desc    = _build_yt_description(aff_link, code, disc)
 
         errors     = []
         yt_success = False
