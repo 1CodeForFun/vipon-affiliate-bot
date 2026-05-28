@@ -714,7 +714,7 @@ HEADER = [
     "Link", "Reel", "IG", "Youtube", "TikTok",
     "Discount Code", "Disc", "Expiry", "Product", "Price",
     "PID", "Image", "Pin Image", "Reel URL", "FB Post", "Reel Posted",
-    "YT / FBP Posted", "Make YT",
+    "YT Posted", "Make YT",
 ]
 
 # ── Pinterest sheet (preserved, gated by ENABLE_PINTEREST) ──────
