@@ -164,20 +164,46 @@ def is_plausible_code(code: str, *, strict: bool = False) -> bool:
     return True
 
 def expiry_to_date_text(expiry_txt: str) -> str:
+    """Convert an expiry string to a short readable date like 'May 30'.
+
+    Handles:
+      - Relative: "9 days", "18 hours"
+      - Absolute: "5/30/2026", "5/30/2026 11:59 PM PST", "2026-05-30"
+    Returns "" if unparseable (so the VO branch skips the expiry phrase).
+    """
     if not expiry_txt:
         return ""
-    txt = expiry_txt.lower()
+    txt = expiry_txt.lower().strip()
+
+    # ── Relative: "X days" / "X hours" ───────────────────────────
     m = re.search(r"(\d+)", txt)
-    if not m:
-        return expiry_txt
-    n = int(m.group(1))
-    if "day" in txt:
-        end_date = datetime.now() + timedelta(days=n)
-    elif "hour" in txt:
-        end_date = datetime.now() + timedelta(hours=n)
-    else:
-        return expiry_txt
-    return end_date.strftime("%B %-d")
+    if m:
+        n = int(m.group(1))
+        if "day" in txt:
+            end_date = datetime.now() + timedelta(days=n)
+            return f"{end_date.strftime('%B')} {end_date.day}"
+        if "hour" in txt:
+            end_date = datetime.now() + timedelta(hours=n)
+            return f"{end_date.strftime('%B')} {end_date.day}"
+
+    # ── Absolute date: M/D/YYYY or YYYY-MM-DD ────────────────────
+    dm = re.search(r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})", expiry_txt)
+    if dm:
+        try:
+            a, b, c = int(dm.group(1)), int(dm.group(2)), int(dm.group(3))
+            # Distinguish M/D/YYYY from YYYY/M/D
+            if a > 31:          # first number is a year
+                year, month, day = a, b, c
+            elif c < 100:       # two-digit year
+                year, month, day = 2000 + c, a, b
+            else:
+                year, month, day = c, a, b
+            end_date = datetime(year, month, day)
+            return f"{end_date.strftime('%B')} {end_date.day}"
+        except Exception:
+            pass
+
+    return ""   # unparseable → VO will use "Limited time" fallback
 
 def _normalize_discount(raw: str) -> str:
     if not raw:
@@ -1539,21 +1565,25 @@ def _find_col(norm_header: list, *names) -> int | None:
     return None
 
 
-def _fetch_amazon_title_simple(asin: str) -> str:
-    """Best-effort title from Amazon HTML (no Selenium)."""
-    try:
-        import html as _html
-        r = requests.get(
-            f"https://www.amazon.com/dp/{asin}?th=1&psc=1",
-            headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.8"},
-            timeout=20,
-        )
-        if r.ok:
-            m = re.search(r'id="productTitle"[^>]*>\s*([^<]+)\s*<', r.text, re.I)
-            if m:
-                return _html.unescape(m.group(1)).strip()
-    except Exception:
-        pass
+def _fetch_amazon_title_simple(asin: str, tld: str = "com") -> str:
+    """Best-effort title from Amazon HTML (no Selenium).
+    Tries the given TLD first; falls back to .com if needed.
+    """
+    import html as _html
+    tlds = [tld] if tld == "com" else [tld, "com"]
+    for t in tlds:
+        try:
+            r = requests.get(
+                f"https://www.amazon.{t}/dp/{asin}?th=1&psc=1",
+                headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.8"},
+                timeout=20,
+            )
+            if r.ok:
+                m = re.search(r'id="productTitle"[^>]*>\s*([^<]+)\s*<', r.text, re.I)
+                if m:
+                    return _html.unescape(m.group(1)).strip()
+        except Exception:
+            pass
     return ""
 
 
@@ -1785,7 +1815,7 @@ def process_seller_forms_ca(ws2_main) -> None:
             skipped += 1
             continue
 
-        title = _fetch_amazon_title_simple(asin)
+        title = _fetch_amazon_title_simple(asin, tld=AMAZON_TLD_CA)
         t_short = shorten_title(title, MAX_TITLE_LEN)
         aff_link = _worker_smartlink(asin, AFFILIATE_ID_CA, AMAZON_TLD_CA)
         platform_links = {k: aff_link for k in ["reel","ig","youtube","tiktok","pinterest"]}
@@ -1794,7 +1824,7 @@ def process_seller_forms_ca(ws2_main) -> None:
 
         try:
             reel_url = make_and_upload_reel_from_images(
-                asin, images, disc_txt, code, title, price, expiry
+                asin, images, disc_txt, code, t_short, price, expiry
             )
         except Exception as e:
             log(f"  ⚠️ Reel failed for CA seller {asin}: {e}")
