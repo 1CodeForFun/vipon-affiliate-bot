@@ -1731,7 +1731,7 @@ def process_seller_forms_ca(ws2_main) -> None:
             ("code", "code", "discount code", "promo code", "coupon"),
         ]:
             idx = _find_col(rows[0], *names[1:])
-            if idx >= 0 and idx < len(row):
+            if idx is not None and idx < len(row):
                 val = row[idx].strip().upper()
                 if col_name == "asin":
                     asin = val
