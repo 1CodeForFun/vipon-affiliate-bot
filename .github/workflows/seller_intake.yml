@@ -1,8 +1,8 @@
 name: Seller Form Intake
 
-# DISABLED — seller form processing is now integrated into scrape_and_build.yml
-# (vipon26.py Phase 3 runs process_seller_forms() after the main scrape)
-# Keeping this file for emergency manual use only.
+# Standalone run of Phase 3 (US) + Phase 4 (CA) seller form processing.
+# Trigger manually from GitHub Actions UI to retry stuck rows without
+# running the full daily scrape & build.
 on:
   workflow_dispatch:
 
@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install system dependencies (FFmpeg for video building)
+      - name: Install system dependencies (FFmpeg for reel building)
         run: |
           sudo apt-get update -y
           sudo apt-get install -y ffmpeg
@@ -50,7 +50,10 @@ jobs:
           cp secrets/vipon_google_creds.json .
           cp secrets/PAAPI.csv ~/PAAPI.csv
           cp secrets/videokey.txt ~/videokey.txt
-          cp secrets/geminikey.txt ~/geminikey.txt
+          cp secrets/cloudinary.json ~/cloudinary.json
+          cp secrets/vipon_accounts.json ~/vipon_accounts.json
+          [ -f secrets/geminikey.txt  ] && cp secrets/geminikey.txt  ~/geminikey.txt  || true
+          [ -f secrets/geminikeys.txt ] && cp secrets/geminikeys.txt ~/geminikeys.txt || true
 
       - name: Run seller intake
         run: python seller8.py
