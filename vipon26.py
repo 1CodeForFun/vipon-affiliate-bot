@@ -1718,17 +1718,21 @@ def process_seller_forms_ca(ws2_main) -> None:
         log("No CA seller form submissions found.")
         return
 
-    # Detect all relevant columns dynamically (form columns differ from US form)
-    header_raw = rows[0]
-    asin_col_ca   = _find_col(header_raw, "asin", "amazon asin", "product asin", "amazon link", "product link")
-    code_col_ca   = _find_col(header_raw, "discount code", "promo code", "coupon", "code")
+    # Detect all relevant columns dynamically (form columns differ from US form).
+    # Pre-normalise header to lowercase so _find_col matches regardless of casing
+    # (e.g. "ASIN" header matches search term "asin").
+    header_raw  = rows[0]
+    norm_hdr_ca = [re.sub(r"[^a-z0-9]+", "", h.lower()) for h in header_raw]
+
+    asin_col_ca   = _find_col(norm_hdr_ca, "asin", "amazon asin", "product asin", "amazon link", "product link")
+    code_col_ca   = _find_col(norm_hdr_ca, "discount code", "promo code", "coupon", "code")
     # Disc% column: look for "%" in raw header but NOT "code" — avoids matching "Discount Code"
     disc_col_ca   = next(
         (i for i, h in enumerate(header_raw) if "%" in h and "code" not in h.lower()),
-        _find_col(header_raw, "discount percent", "discountpercent"),
+        _find_col(norm_hdr_ca, "discount percent", "discountpercent"),
     )
-    expiry_col_ca = _find_col(header_raw, "expiry", "expiration", "expirey")
-    price_col_ca  = _find_col(header_raw, "final price", "priceafterdiscount", "price")
+    expiry_col_ca = _find_col(norm_hdr_ca, "expiry", "expiration", "expirey")
+    price_col_ca  = _find_col(norm_hdr_ca, "final price", "priceafterdiscount", "price")
 
     if asin_col_ca is None:
         log("⚠️ CA form: cannot find ASIN column — skipping CA seller forms.")
