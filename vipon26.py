@@ -1596,8 +1596,8 @@ def process_seller_forms(ws_main) -> None:
         while len(row) <= max_needed:
             row.append("")
 
-        if row[status_col].strip().lower() in ("done", "blocked", "no asin", "invalid code", "no images", "video failed"):
-            continue   # already handled
+        if row[status_col].strip().lower() in ("done", "blocked"):
+            continue   # permanent — skip. Transient errors (no images, video failed, no asin) are retried.
 
         # ── Extract fields ────────────────────────────────────────
         asin_raw = row[asin_col] if asin_col is not None else ""
@@ -1718,30 +1718,54 @@ def process_seller_forms_ca(ws2_main) -> None:
         log("No CA seller form submissions found.")
         return
 
+    # Detect all relevant columns dynamically (form columns differ from US form)
+    header_raw = rows[0]
+    asin_col_ca   = _find_col(header_raw, "asin", "amazon asin", "product asin", "amazon link", "product link")
+    code_col_ca   = _find_col(header_raw, "discount code", "promo code", "coupon", "code")
+    # Disc% column: look for "%" in raw header but NOT "code" — avoids matching "Discount Code"
+    disc_col_ca   = next(
+        (i for i, h in enumerate(header_raw) if "%" in h and "code" not in h.lower()),
+        _find_col(header_raw, "discount percent", "discountpercent"),
+    )
+    expiry_col_ca = _find_col(header_raw, "expiry", "expiration", "expirey")
+    price_col_ca  = _find_col(header_raw, "final price", "priceafterdiscount", "price")
+
+    if asin_col_ca is None:
+        log("⚠️ CA form: cannot find ASIN column — skipping CA seller forms.")
+        return
+
+    _NO_CODE_PHRASES = {
+        "NO CODE NEEDED", "NO CODE", "NONE", "N/A", "NA",
+        "NO COUPON", "NO COUPON NEEDED", "NOT REQUIRED", "NOT APPLICABLE",
+    }
+
     processed = skipped = 0
     for row_idx, row in enumerate(rows[1:], start=2):
-        status_val = row[status_col].strip() if len(row) > status_col else ""
-        if status_val:
-            continue  # already processed
+        status_val = row[status_col].strip().lower() if len(row) > status_col else ""
+        if status_val in ("done", "blocked"):
+            continue  # permanent — skip. Transient errors (no images, video failed, no asin) are retried.
 
-        asin = ""
-        code = ""
-        _NO_CODE_PHRASES = {
-            "NO CODE NEEDED", "NO CODE", "NONE", "N/A", "NA",
-            "NO COUPON", "NO COUPON NEEDED", "NOT REQUIRED", "NOT APPLICABLE",
-        }
-        for col_name, *names in [
-            ("asin", "asin", "amazon asin", "product asin"),
-            ("code", "code", "discount code", "promo code", "coupon"),
-        ]:
-            idx = _find_col(rows[0], *names)   # was *names[1:] — fixed to include primary term
-            if idx is not None and idx < len(row):
-                val = row[idx].strip().upper()
-                if col_name == "asin":
-                    asin = val
-                else:
-                    # Normalize "no code needed" variants to empty string
-                    code = "" if val in _NO_CODE_PHRASES else val
+        # Pad row so column accesses are safe
+        max_col = max(c for c in [asin_col_ca, code_col_ca, disc_col_ca, expiry_col_ca, price_col_ca, status_col] if c is not None)
+        while len(row) <= max_col:
+            row.append("")
+
+        asin = row[asin_col_ca].strip().upper() if asin_col_ca is not None else ""
+        # Extract ASIN from a URL if seller pasted a link instead of just the ASIN
+        if asin and not re.match(r"^[A-Z0-9]{10}$", asin):
+            m = ASIN_RE.search(asin) or re.search(r"\b([A-Z0-9]{10})\b", asin, re.I)
+            asin = m.group(0).upper() if m else ""
+
+        code_raw = row[code_col_ca].strip().upper() if code_col_ca is not None else ""
+        code = "" if code_raw in _NO_CODE_PHRASES else code_raw
+
+        pct_raw  = row[disc_col_ca].strip()  if disc_col_ca   is not None else ""
+        expiry   = row[expiry_col_ca].strip() if expiry_col_ca is not None else ""
+        price    = row[price_col_ca].strip()  if price_col_ca  is not None else ""
+
+        # Normalise discount: "30% off" → "30%"
+        m_pct    = re.search(r"(\d{1,3})", pct_raw)
+        disc_txt = f"{min(int(m_pct.group(1)), 95)}%" if m_pct else pct_raw
 
         if not asin:
             form_ws2.update_cell(row_idx, status_col + 1, "No ASIN")
@@ -1759,10 +1783,6 @@ def process_seller_forms_ca(ws2_main) -> None:
         t_short = shorten_title(title, MAX_TITLE_LEN)
         aff_link = _worker_smartlink(asin, AFFILIATE_ID_CA, AMAZON_TLD_CA)
         platform_links = {k: aff_link for k in ["reel","ig","youtube","tiktok","pinterest"]}
-
-        disc_txt = ""
-        expiry   = ""
-        price    = ""
 
         post_text = generate_social_post(aff_link, code, disc_txt, expiry, t_short, price)
 
