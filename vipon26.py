@@ -1724,6 +1724,7 @@ def process_seller_forms_ca(ws2_main) -> None:
     header_raw  = rows[0]
     norm_hdr_ca = [re.sub(r"[^a-z0-9]+", "", h.lower()) for h in header_raw]
 
+    log(f"  CA form headers (normalised): {norm_hdr_ca}")
     asin_col_ca   = _find_col(norm_hdr_ca, "asin", "amazon asin", "product asin", "amazon link", "product link")
     code_col_ca   = _find_col(norm_hdr_ca, "discount code", "promo code", "coupon", "code")
     # Disc% column: look for "%" in raw header but NOT "code" — avoids matching "Discount Code"
@@ -1733,6 +1734,7 @@ def process_seller_forms_ca(ws2_main) -> None:
     )
     expiry_col_ca = _find_col(norm_hdr_ca, "expiry", "expiration", "expirey")
     price_col_ca  = _find_col(norm_hdr_ca, "final price", "priceafterdiscount", "price")
+    log(f"  CA cols — asin:{asin_col_ca} code:{code_col_ca} disc:{disc_col_ca} expiry:{expiry_col_ca} price:{price_col_ca}")
 
     if asin_col_ca is None:
         log("⚠️ CA form: cannot find ASIN column — skipping CA seller forms.")
