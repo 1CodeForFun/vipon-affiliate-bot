@@ -381,7 +381,6 @@ def main() -> None:
         aff_link   = row[COL_A_AFF_LINK  - 1].strip()
         code       = row[COL_F_CODE      - 1].strip()
         disc       = row[COL_G_DISC      - 1].strip()
-        ig_caption = f"{post_text}\n\n{reel_link}" if reel_link else post_text
         yt_desc    = _build_yt_description(aff_link, code, disc)
 
         errors     = []
@@ -395,7 +394,7 @@ def main() -> None:
             log(f"--- Facebook ({fb_label}) ---")
             try:
                 pid, tok, _ = load_fb_token(fb_file)
-                post_fb_reel(pid, tok, reel_url, title, post_text)
+                post_fb_reel(pid, tok, reel_url, title, aff_link)
             except Exception as e:
                 log(f"ERROR (FB {fb_label}): {e}")
                 errors.append(f"FB-{fb_label}: {e}")
@@ -408,7 +407,7 @@ def main() -> None:
             log(f"--- Instagram ({ig_label}) ---")
             try:
                 _, tok, _ = load_fb_token(fb_file)
-                post_ig_reel(ig_uid, tok, reel_url, ig_caption)
+                post_ig_reel(ig_uid, tok, reel_url, aff_link)
             except Exception as e:
                 log(f"ERROR (IG {ig_label}): {e}")
                 errors.append(f"IG-{ig_label}: {e}")
@@ -453,8 +452,8 @@ def main() -> None:
         log(f"CA: Row {sheet_row2} -> Fresh Deals Canada (FB only)")
 
         reel_url2  = row2[COL_N_REEL_URL  - 1].strip()
-        post_text2 = row2[COL_O_POST_TEXT - 1].strip()
         title2     = row2[COL_I_TITLE     - 1].strip() or "Deal Alert!"
+        aff_link2  = row2[COL_A_AFF_LINK  - 1].strip()
         errors2    = []
 
         log("--- Facebook (Fresh Deals Canada) ---")
@@ -467,7 +466,7 @@ def main() -> None:
                 log("  warning: fb_page_token-canada.json not found — using FreshDeals token with CA page ID")
                 _, tok2, ver2 = load_fb_token(FB_FRESHDEALS_TOKEN)
                 pid2 = FB_CANADA_PAGE_ID
-            post_fb_reel(pid2, tok2, reel_url2, title2, post_text2)
+            post_fb_reel(pid2, tok2, reel_url2, title2, aff_link2)
         except Exception as e:
             log(f"ERROR (FB Canada): {e}")
             errors2.append(f"FB-CA: {e}")
