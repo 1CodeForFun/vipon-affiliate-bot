@@ -1726,26 +1726,28 @@ def process_seller_forms_ca(ws2_main) -> None:
 
         asin = ""
         code = ""
+        _NO_CODE_PHRASES = {
+            "NO CODE NEEDED", "NO CODE", "NONE", "N/A", "NA",
+            "NO COUPON", "NO COUPON NEEDED", "NOT REQUIRED", "NOT APPLICABLE",
+        }
         for col_name, *names in [
             ("asin", "asin", "amazon asin", "product asin"),
             ("code", "code", "discount code", "promo code", "coupon"),
         ]:
-            idx = _find_col(rows[0], *names[1:])
+            idx = _find_col(rows[0], *names)   # was *names[1:] — fixed to include primary term
             if idx is not None and idx < len(row):
                 val = row[idx].strip().upper()
                 if col_name == "asin":
                     asin = val
                 else:
-                    code = val
+                    # Normalize "no code needed" variants to empty string
+                    code = "" if val in _NO_CODE_PHRASES else val
 
         if not asin:
             form_ws2.update_cell(row_idx, status_col + 1, "No ASIN")
             skipped += 1
             continue
-        if not code:
-            form_ws2.update_cell(row_idx, status_col + 1, "Invalid Code")
-            skipped += 1
-            continue
+        # No "Invalid Code" gate — allow empty code (seller may have no discount code)
 
         images = fetch_amazon_images(None, asin, AMAZON_TLD_CA, max_imgs=10)
         if not images:
