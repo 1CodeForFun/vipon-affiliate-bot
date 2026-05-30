@@ -89,6 +89,7 @@ LOGO_SEG_DURATION_SEC = 2
 MAX_AMAZON_IMAGES     = 6
 
 PROMO_URL     = "https://www.myvipon.com"
+PROMO_URL_CA  = "https://www.myvipon.com/promotion/index?type=instant"  # CA full deal listing (supports infinite scroll)
 PRODUCT_LIMIT = int(os.getenv("PRODUCT_LIMIT") or "24")
 
 SCROLL_MIN         = int(os.getenv("SCROLL_MIN")    or "1")
@@ -1026,9 +1027,9 @@ def fetch_amazon_images(driver, asin: str, tld: str = "com", max_imgs: int = 9) 
 #  TILE DISCOVERY
 # ════════════════════════════════════════════════════════════════
 
-def collect_promo_tiles_random(driver, wait):
-    log("▶ Loading promotions (random scroll)…")
-    driver.get(PROMO_URL)
+def collect_promo_tiles_random(driver, wait, start_url: str = PROMO_URL):
+    log(f"▶ Loading promotions (random scroll)… {start_url}")
+    driver.get(start_url)
     _dismiss_overlays(driver)
 
     def _has_any_products(d):
@@ -1928,7 +1929,7 @@ def main():
         ca_switched = switch_to_canada(driver)
         if not ca_switched:
             log("⚠️  Canada switch failed — skipping CA scrape to avoid writing US products to Sheet2")
-        ca_tiles = collect_promo_tiles_random(driver, wait) if ca_switched else []
+        ca_tiles = collect_promo_tiles_random(driver, wait, start_url=PROMO_URL_CA) if ca_switched else []
         ca_count = 0
         ca_fails = 0
         for pid, _, _ in ca_tiles:
