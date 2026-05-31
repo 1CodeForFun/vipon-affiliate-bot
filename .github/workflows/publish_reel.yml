@@ -1,6 +1,6 @@
 name: Publish Reel (Hourly)
 
-# Runs every hour. Posts ONE reel per run (the first row where col P != "Yes").
+# Runs every hour. Posts 2 reels per run (REELS_PER_RUN=2 in vipon_publisher.py).
 # Starts having reels to post at 11 AM CT (4 PM UTC) after the 6 AM scrape.
 # Exits cleanly when there are no more reels to post — no manual stopping needed.
 on:
