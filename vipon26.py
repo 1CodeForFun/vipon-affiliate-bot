@@ -781,6 +781,69 @@ def open_pinterest_sheet_and_reset():
     )
     return ws
 
+def _delete_rows_batched(ws, row_indices: list, label: str = "") -> None:
+    """Delete sheet rows in contiguous-range batches to minimise write API calls.
+
+    Deleting each row individually burns one write quota unit per row.  Grouping
+    consecutive rows (e.g. 5-7) into a single delete_rows(5, 7) call uses just
+    one unit per contiguous range, dramatically reducing quota pressure.
+    A 1-second pause is inserted between distinct ranges as a safety buffer.
+    """
+    if not row_indices:
+        return
+
+    # Build contiguous ranges from the sorted index list
+    sorted_rows = sorted(row_indices)
+    ranges: list[tuple[int, int]] = []
+    start = prev = sorted_rows[0]
+    for r in sorted_rows[1:]:
+        if r == prev + 1:
+            prev = r
+        else:
+            ranges.append((start, prev))
+            start = prev = r
+    ranges.append((start, prev))
+
+    log(f"  {label}deleting {len(row_indices)} rows in {len(ranges)} batch(es)…")
+
+    # Delete bottom-to-top so earlier row numbers stay valid after each deletion
+    for start_r, end_r in reversed(ranges):
+        ws.delete_rows(start_r, end_r)
+        time.sleep(1.1)   # 1-second gap between API write calls (quota guard)
+
+
+def _rows_to_delete(values: list, *, col_p: int = 15, col_q: int = 16,
+                    col_r: int | None = None) -> list[int]:
+    """Return 1-based sheet row numbers that should be deleted.
+
+    A row is deleted when:
+      • All required flag columns are "yes"  (fully processed row), OR
+      • Col A (link) is empty AND at least one flag column has any value
+        (orphaned "Yes" left behind after partial cleaning).
+    """
+    to_delete = []
+    for idx, row in enumerate(values[1:], start=2):   # row 1 is header
+        def _flag(col_idx: int) -> str:
+            return row[col_idx].strip().lower() if len(row) > col_idx else ""
+
+        link  = row[0].strip() if row else ""
+        p_val = _flag(col_p)
+        q_val = _flag(col_q)
+        r_val = _flag(col_r) if col_r is not None else ""
+
+        # Fully processed: all required flags are "yes"
+        fully_done = (p_val == "yes" and q_val == "yes" and
+                      (col_r is None or r_val == "yes"))
+
+        # Orphaned: no content in col A but a stale flag exists
+        orphaned = (not link and (p_val or q_val or r_val))
+
+        if fully_done or orphaned:
+            to_delete.append(idx)
+
+    return to_delete
+
+
 def open_sheet_and_reset():
     log("▶ Opening Google Sheet and cleaning completed rows…")
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -794,29 +857,20 @@ def open_sheet_and_reset():
         log("✓ Sheet was empty — header added")
         return ws
 
-    # Repair header row if it is missing or has fewer columns than expected
     if values[0] != HEADER:
         ws.update("A1", [HEADER], value_input_option="USER_ENTERED")
+        time.sleep(1.1)
         log(f"✓ Sheet1 header repaired ({len(values[0])} → {len(HEADER)} cols)")
 
-    # Delete rows where P (reel), Q (FB text), AND R (YouTube) are all "yes"
-    rows_to_delete = []
-    for idx, row in enumerate(values[1:], start=2):
-        col_p = row[15].strip().lower() if len(row) >= 16 else ""
-        col_q = row[16].strip().lower() if len(row) >= 17 else ""
-        col_r = row[17].strip().lower() if len(row) >= 18 else ""
-        if col_p == "yes" and col_q == "yes" and col_r == "yes":
-            rows_to_delete.append(idx)
-
-    for row_idx in reversed(rows_to_delete):
-        ws.delete_rows(row_idx)
-
-    log(f"✓ Sheet ready — removed {len(rows_to_delete)} completed rows")
+    # Delete fully-done rows (P+Q+R all "yes") and orphaned flag rows
+    to_delete = _rows_to_delete(values, col_p=15, col_q=16, col_r=17)
+    _delete_rows_batched(ws, to_delete, label="Sheet1: ")
+    log(f"✓ Sheet ready — removed {len(to_delete)} completed/orphaned rows")
     return ws
 
 
 def open_sheet2_and_reset():
-    """Open Sheet2 (Canada) and remove rows where col P = 'Yes'."""
+    """Open Sheet2 (Canada) and remove completed or orphaned rows."""
     log("▶ Opening Sheet2 (Canada) and cleaning completed rows…")
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDS_FILE, scope)
@@ -833,24 +887,15 @@ def open_sheet2_and_reset():
         log("✓ Sheet2 was empty — header added")
         return ws2
 
-    # Repair header row if it is missing or has fewer columns than expected
     if values[0] != HEADER:
         ws2.update("A1", [HEADER], value_input_option="USER_ENTERED")
+        time.sleep(1.1)
         log(f"✓ Sheet2 header repaired ({len(values[0])} → {len(HEADER)} cols)")
 
-    rows_to_delete = []
-    for idx, row in enumerate(values[1:], start=2):
-        col_p = row[15].strip().lower() if len(row) >= 16 else ""
-        col_q = row[16].strip().lower() if len(row) >= 17 else ""
-        # Only delete when BOTH reel (col P) AND text post (col Q) are confirmed done.
-        # This mirrors Sheet1 logic and prevents premature deletion when FB fails.
-        if col_p == "yes" and col_q == "yes":
-            rows_to_delete.append(idx)
-
-    for row_idx in reversed(rows_to_delete):
-        ws2.delete_rows(row_idx)
-
-    log(f"✓ Sheet2 ready — removed {len(rows_to_delete)} completed rows")
+    # CA has no YouTube column so only P+Q required; also cleans orphaned rows
+    to_delete = _rows_to_delete(values, col_p=15, col_q=16, col_r=None)
+    _delete_rows_batched(ws2, to_delete, label="Sheet2: ")
+    log(f"✓ Sheet2 ready — removed {len(to_delete)} completed/orphaned rows")
     return ws2
 
 
