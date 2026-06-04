@@ -808,7 +808,10 @@ def _delete_rows_batched(ws, row_indices: list, label: str = "") -> None:
 
     # Delete bottom-to-top so earlier row numbers stay valid after each deletion
     for start_r, end_r in reversed(ranges):
-        ws.delete_rows(start_r, end_r)
+        try:
+            ws.delete_rows(start_r, end_r)
+        except Exception as e:
+            log(f"  ⚠️ delete_rows({start_r},{end_r}) failed: {e}")
         time.sleep(1.1)   # 1-second gap between API write calls (quota guard)
 
 
@@ -828,10 +831,8 @@ def _rows_to_delete(values: list, *, col_q: int = 16) -> list[int]:
         # FB text posted = fully promoted, safe to clear
         fully_done = q_val == "yes"
 
-        # Orphaned: no link but a stale flag in P (15), Q (16), or R (17)
-        any_flag = any(
-            row[c].strip() for c in (15, 16, 17) if len(row) > c
-        )
+        # Orphaned: no link in col A but "Yes" appears anywhere in the row
+        any_flag = any(cell.strip().lower() == "yes" for cell in row)
         orphaned = not link and any_flag
 
         if fully_done or orphaned:
