@@ -1,0 +1,45 @@
+name: Hook Video Test
+
+# Run manually to test the Veo 2 hook clip concept on one product from Sheet1.
+# Touches nothing in the existing pipeline — uses hook_test.py only.
+on:
+  workflow_dispatch:
+
+jobs:
+  hook_test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Checkout secrets repo
+        uses: actions/checkout@v4
+        with:
+          repository: 1CodeForFun/vipon-secrets
+          token: ${{ secrets.SECRETS_PAT }}
+          path: secrets
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: pip install gspread oauth2client requests
+
+      - name: Copy credential files
+        run: |
+          cp secrets/vipon_google_creds.json .
+          cp secrets/cloudinary.json ~/cloudinary.json
+          [ -f secrets/geminikey.txt  ] && cp secrets/geminikey.txt  ~/geminikey.txt  || true
+          [ -f secrets/geminikeys.txt ] && cp secrets/geminikeys.txt ~/geminikeys.txt || true
+
+      - name: Run hook test
+        run: python hook_test.py
