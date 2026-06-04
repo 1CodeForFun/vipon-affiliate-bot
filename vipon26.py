@@ -812,31 +812,27 @@ def _delete_rows_batched(ws, row_indices: list, label: str = "") -> None:
         time.sleep(1.1)   # 1-second gap between API write calls (quota guard)
 
 
-def _rows_to_delete(values: list, *, col_p: int = 15, col_q: int = 16,
-                    col_r: int | None = None) -> list[int]:
+def _rows_to_delete(values: list, *, col_q: int = 16) -> list[int]:
     """Return 1-based sheet row numbers that should be deleted.
 
     A row is deleted when:
-      • All required flag columns are "yes"  (fully processed row), OR
-      • Col A (link) is empty AND at least one flag column has any value
+      • Col Q (FB text posted) = "Yes"  — the final step; signals full promotion, OR
+      • Col A (link) is empty AND any flag column (P/Q/R) has a value
         (orphaned "Yes" left behind after partial cleaning).
     """
     to_delete = []
     for idx, row in enumerate(values[1:], start=2):   # row 1 is header
-        def _flag(col_idx: int) -> str:
-            return row[col_idx].strip().lower() if len(row) > col_idx else ""
-
         link  = row[0].strip() if row else ""
-        p_val = _flag(col_p)
-        q_val = _flag(col_q)
-        r_val = _flag(col_r) if col_r is not None else ""
+        q_val = row[col_q].strip().lower() if len(row) > col_q else ""
 
-        # Fully processed: all required flags are "yes"
-        fully_done = (p_val == "yes" and q_val == "yes" and
-                      (col_r is None or r_val == "yes"))
+        # FB text posted = fully promoted, safe to clear
+        fully_done = q_val == "yes"
 
-        # Orphaned: no content in col A but a stale flag exists
-        orphaned = (not link and (p_val or q_val or r_val))
+        # Orphaned: no link but a stale flag in P (15), Q (16), or R (17)
+        any_flag = any(
+            row[c].strip() for c in (15, 16, 17) if len(row) > c
+        )
+        orphaned = not link and any_flag
 
         if fully_done or orphaned:
             to_delete.append(idx)
@@ -862,8 +858,8 @@ def open_sheet_and_reset():
         time.sleep(1.1)
         log(f"✓ Sheet1 header repaired ({len(values[0])} → {len(HEADER)} cols)")
 
-    # Delete fully-done rows (P+Q+R all "yes") and orphaned flag rows
-    to_delete = _rows_to_delete(values, col_p=15, col_q=16, col_r=17)
+    # Delete rows where col Q (FB text posted) = "Yes", plus orphaned flag rows
+    to_delete = _rows_to_delete(values)
     _delete_rows_batched(ws, to_delete, label="Sheet1: ")
     log(f"✓ Sheet ready — removed {len(to_delete)} completed/orphaned rows")
     return ws
@@ -892,8 +888,8 @@ def open_sheet2_and_reset():
         time.sleep(1.1)
         log(f"✓ Sheet2 header repaired ({len(values[0])} → {len(HEADER)} cols)")
 
-    # CA has no YouTube column so only P+Q required; also cleans orphaned rows
-    to_delete = _rows_to_delete(values, col_p=15, col_q=16, col_r=None)
+    # Delete rows where col Q (FB text posted) = "Yes", plus orphaned flag rows
+    to_delete = _rows_to_delete(values)
     _delete_rows_batched(ws2, to_delete, label="Sheet2: ")
     log(f"✓ Sheet2 ready — removed {len(to_delete)} completed/orphaned rows")
     return ws2
