@@ -38,8 +38,10 @@ jobs:
         run: |
           cp secrets/vipon_google_creds.json .
           cp secrets/cloudinary.json ~/cloudinary.json
-          [ -f secrets/geminikey.txt  ] && cp secrets/geminikey.txt  ~/geminikey.txt  || true
-          [ -f secrets/geminikeys.txt ] && cp secrets/geminikeys.txt ~/geminikeys.txt || true
+          [ -f secrets/geminikey.txt   ] && cp secrets/geminikey.txt   ~/geminikey.txt   || true
+          [ -f secrets/geminikeys.txt  ] && cp secrets/geminikeys.txt  ~/geminikeys.txt  || true
+          [ -f secrets/geminipro.txt   ] && cp secrets/geminipro.txt   ~/geminipro.txt   || true
+          [ -f secrets/glabcookie.json ] && cp secrets/glabcookie.json ~/glabcookie.json || true
 
       - name: Run hook test
         run: python hook_test.py

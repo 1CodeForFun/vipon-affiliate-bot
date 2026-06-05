@@ -50,15 +50,28 @@ _FF_ENCODE = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-threads
 def log(msg): print(msg, flush=True)
 
 # ─── CREDENTIALS ─────────────────────────────────────────────────────────────
-def _read_gemini_keys():
+def _read_pro_key() -> str:
+    """Read the Gemini Pro API key — tried first for all API calls."""
+    p = os.path.expanduser("~/geminipro.txt")
+    if os.path.exists(p):
+        k = open(p).read().strip()
+        if k: return k
+    return ""
+
+def _read_gemini_keys() -> list:
+    """Return all available keys — pro key first, then free-tier keys."""
+    keys = []
+    pro = _read_pro_key()
+    if pro:
+        keys.append(pro)
     for path in (os.path.expanduser("~/geminikeys.txt"),):
         if os.path.exists(path):
-            return [l.strip() for l in open(path) if l.strip() and not l.startswith("#")]
+            keys += [l.strip() for l in open(path) if l.strip() and not l.startswith("#")]
     single = os.path.expanduser("~/geminikey.txt")
     if os.path.exists(single):
         k = open(single).read().strip()
-        return [k] if k else []
-    return []
+        if k and k not in keys: keys.append(k)
+    return keys
 
 def _load_cloudinary():
     d = json.load(open(os.path.expanduser("~/cloudinary.json")))
