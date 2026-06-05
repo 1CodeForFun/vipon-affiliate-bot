@@ -279,6 +279,7 @@ def veo_via_browser(prompt: str, td: str) -> bytes | None:
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
@@ -302,7 +303,26 @@ def veo_via_browser(prompt: str, td: str) -> bytes | None:
         "safebrowsing.enabled": True,
     })
 
-    driver = webdriver.Chrome(options=opts)
+    # Locate Chromium binary (Ubuntu installs as chromium-browser, not google-chrome)
+    for chrome_bin in ("/usr/bin/chromium-browser", "/usr/bin/chromium",
+                       "/snap/bin/chromium", "/usr/bin/google-chrome"):
+        if os.path.exists(chrome_bin):
+            opts.binary_location = chrome_bin
+            log(f"  Browser: using binary {chrome_bin}")
+            break
+    else:
+        log("  ⚠️ No Chrome/Chromium binary found"); return None
+
+    # Locate chromedriver
+    driver_bin = None
+    for d in ("/usr/bin/chromedriver", "/usr/lib/chromium-browser/chromedriver",
+              "/usr/bin/chromium-chromedriver", "/snap/bin/chromium.chromedriver"):
+        if os.path.exists(d):
+            driver_bin = d
+            break
+
+    service = Service(executable_path=driver_bin) if driver_bin else Service()
+    driver  = webdriver.Chrome(service=service, options=opts)
     wait   = WebDriverWait(driver, 30)
 
     def screenshot(label: str):
