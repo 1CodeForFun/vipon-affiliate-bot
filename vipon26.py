@@ -469,26 +469,95 @@ def _read_gemini_keys():
             continue
     return []
 
-def _build_post_prompt(link, code, discount_pct, expiry, title, price) -> str:
-    return (
-        "Write a single humorous and engaging Facebook post.\n"
-        f"- Product: {title} (pick 2–4 key words only, not the full title)\n"
-        f"- Discount: {discount_pct} off\n"
-        f"- Expires: {expiry}\n"
-        f"- Price: {price} (highlight if it is a bargain)\n"
-        f"- Discount code: {code} — tell readers to use it at checkout\n"
-        f"- Affiliate link (put on its own last line): {link}\n"
-        "Return only the final post text. No labels, no preamble."
-    )
+# Opening styles — one is randomly chosen per post to break the "every post
+# starts the same" repetition. Each Gemini call is stateless, so without this
+# seed the model defaults to the same handful of openers.
+_POST_OPENING_STYLES = [
+    "a bold, surprising one-liner",
+    "a playful rhetorical question",
+    "a relatable everyday frustration this product fixes",
+    "a witty exaggeration about how good the deal is",
+    "a mock 'news flash' announcement",
+    "a cheeky dare to the reader",
+    "a warm friend-to-friend tip",
+    "a funny 'plot twist' setup",
+    "a tongue-in-cheek confession",
+    "an unexpected comparison or metaphor",
+]
+
+# Overused openers the model must never start with
+_BANNED_OPENERS = (
+    "Calling all', 'Attention', 'Are you tired', 'Looking for', 'Hey there', "
+    "'Tired of', 'Introducing', 'Get ready', 'Say goodbye', 'Stop scrolling"
+)
+
+
+def _build_post_prompt(code, discount_pct, expiry_date, title, price) -> str:
+    style = random.choice(_POST_OPENING_STYLES)
+    lines = [
+        "Write ONE short, witty Facebook post for an Amazon deal.",
+        f"Open with {style}.",
+        f"Never begin with any of these: '{_BANNED_OPENERS}'.",
+        "",
+        f"Product (use only 2-4 key words, not the full name): {title}",
+    ]
+    if discount_pct:
+        lines.append(f"Discount: {discount_pct} off")
+    if price:
+        lines.append(f"Final price after discount: {price}")
+    if expiry_date:
+        lines.append(f"Deal ends: {expiry_date}")
+    if code:
+        lines.append(f"Discount code: {code}")
+    lines += [
+        "",
+        "Strict rules:",
+        "- 40 words MAX. Tight and punchy.",
+        "- Use smooth, natural sentences with commas for breathing, so it reads "
+        "well aloud as a voiceover. No choppy one-word fragments.",
+        f"- You MUST mention the price ({price}) and that the deal ends {expiry_date}.",
+        (f"- Tell readers to use code {code} at checkout."
+         if code else "- No discount code is needed for this deal."),
+        "- Do NOT mention any link, URL, 'link in bio', 'link below', or 'click here'.",
+        "- No hashtags. At most one emoji. No labels, no preamble.",
+        "Return only the post text.",
+    ]
+    return "\n".join(lines)
+
+
+def _clean_post_text(txt: str) -> str:
+    """Strip any URL or link call-to-action the model added, so the prose stays
+    clean and voiceover-ready. The real affiliate link is appended separately."""
+    txt = re.sub(r"https?://\S+", "", txt)
+    txt = re.sub(
+        r"(?i)\b(link in bio|link below|link here|click (the )?link|"
+        r"tap the link|shop now via|grab it (here|via the link)|"
+        r"link\s*[👇⬇️🔗]+)\b[.! ]*", "", txt)
+    # collapse blank lines and trailing whitespace left behind
+    txt = re.sub(r"\n{3,}", "\n\n", txt).strip()
+    return txt
+
+
+def _finalize_post(txt: str, link: str) -> str:
+    """Clean the generated prose and append the affiliate link on its own line."""
+    clean = _clean_post_text(txt)
+    return f"{clean}\n\n{link}" if link else clean
+
 
 def generate_social_post(link, code, discount_pct, expiry, title, price):
-    fallback = (f"🔥 {discount_pct} off! Use code {code} before {expiry}. "
-                f"Price: {price}.\n{link}")
+    # Convert a relative expiry ("7 days") to an absolute date ("June 11") so the
+    # post never says "ends in 2 days" — viewers may see it days later.
+    expiry_date = expiry_to_date_text(expiry) or expiry
+
+    fb_text  = (f"{discount_pct} off — now just {price}, but only until {expiry_date}. "
+                + (f"Use code {code} at checkout. " if code else "")
+                + "Grab yours before it's gone!")
+    fallback = _finalize_post(fb_text, link)
 
     if os.getenv("VIPON_DISABLE_GPT", "0") in ("1","true","TRUE","yes","YES"):
         return fallback
 
-    prompt = _build_post_prompt(link, code, discount_pct, expiry, title, price)
+    prompt = _build_post_prompt(code, discount_pct, expiry_date, title, price)
 
     # ── Try Gemini keys in order, skip dead/rate-limited keys ────
     gemini_keys = _read_gemini_keys()
@@ -497,10 +566,10 @@ def generate_social_post(link, code, discount_pct, expiry, title, price):
             continue   # expired key — don't waste a round-trip
         try:
             api_url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-                       f"gemini-2.5-flash-lite:generateContent?key={gemini_key}")
+                       f"gemini-2.0-flash:generateContent?key={gemini_key}")
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.8, "maxOutputTokens": 300}
+                "generationConfig": {"temperature": 0.95, "maxOutputTokens": 200}
             }
             resp = requests.post(api_url, json=payload, timeout=25)
             if resp.ok:
@@ -511,7 +580,7 @@ def generate_social_post(link, code, discount_pct, expiry, title, price):
                          .get("text", "")).strip()
                 if txt:
                     log(f"  ✓ Post generated via Gemini (key {kidx+1}/{len(gemini_keys)})")
-                    return txt
+                    return _finalize_post(txt, link)
             elif resp.status_code == 429:
                 log(f"  ⚠️ Gemini key {kidx+1}/{len(gemini_keys)} rate-limited — trying next")
                 continue
@@ -549,7 +618,7 @@ def generate_social_post(link, code, discount_pct, expiry, title, price):
                          .get("content", "")).strip()
                 if txt:
                     log("  ✓ Post generated via OpenAI")
-                    return txt
+                    return _finalize_post(txt, link)
         except Exception as e:
             log(f"  ⚠️ OpenAI post error: {e}")
 
