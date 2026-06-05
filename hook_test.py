@@ -533,22 +533,26 @@ def build_carousel_seg(img_url: str, seg_path: str, td: str, ffmpeg_bin: str,
         log(f"  carousel seg {idx} failed: {e}"); return False
 
 def make_ffmpeg_hook_seg(img_path: str, dst: str, ffmpeg_bin: str, font: str) -> bool:
-    """Ken Burns zoom-in hook from the first product image — used when Veo is unavailable."""
+    """Fast zoom-in hook using scale+crop (avoids slow zoompan filter).
+    Upscales image to 130%, then crops from centre — renders in seconds not minutes.
+    """
     try:
-        # zoompan: 1.0 → 1.3 zoom over 8 seconds at 30fps = 240 frames
-        zp = (f"scale=8000:-1,"
-              f"zoompan=z='min(zoom+0.005,1.3)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-              f":d=240:s={VIDEO_W}x{VIDEO_H}:fps={FPS},"
+        # Scale up to 130% of target, then crop window that drifts toward centre
+        # x starts at 0, ends at (1.3*W - W)/2 = 0.15*W over 8 seconds
+        crop_x = f"(iw-{VIDEO_W})*t/8"
+        crop_y = f"(ih-{VIDEO_H})*t/8"
+        vf = (f"scale={int(VIDEO_W*1.3)}:{int(VIDEO_H*1.3)}:force_original_aspect_ratio=increase,"
+              f"crop={VIDEO_W}:{VIDEO_H}:{crop_x}:{crop_y},"
               f"setsar=1")
         if font:
-            zp += (f",drawtext=fontfile='{font}':text='WAIT FOR IT...'"
-                   f":x=(w-text_w)/2:y=h*0.10:fontsize=68:fontcolor=white:"
+            vf += (f",drawtext=fontfile='{font}':text='WAIT FOR IT\\.\\.\\.':"
+                   f"x=(w-text_w)/2:y=h*0.10:fontsize=68:fontcolor=white:"
                    f"box=1:boxcolor=0xFF4500@0.85:boxborderw=16:"
                    f"shadowcolor=black@0.8:shadowx=3:shadowy=3")
         subprocess.run([ffmpeg_bin, "-y"] + _FF_LOG + [
             "-loop", "1", "-t", "8", "-i", img_path,
-            "-vf", zp, "-r", str(FPS), "-pix_fmt", "yuv420p",
-        ] + _FF_ENCODE + ["-an", dst], check=True)
+            "-vf", vf, "-r", str(FPS), "-pix_fmt", "yuv420p",
+        ] + _FF_ENCODE + ["-an", dst], check=True, timeout=60)
         return True
     except Exception as e:
         log(f"  FFmpeg hook failed: {e}"); return False
