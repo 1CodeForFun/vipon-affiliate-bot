@@ -29,10 +29,10 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg chromium-browser chromium-chromedriver
 
       - name: Install Python dependencies
-        run: pip install gspread oauth2client requests
+        run: pip install gspread oauth2client requests selenium
 
       - name: Copy credential files
         run: |

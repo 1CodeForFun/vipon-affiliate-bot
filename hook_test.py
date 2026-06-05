@@ -252,6 +252,214 @@ def veo_generate(prompt: str, key: str, start_image_b64: str = None) -> bytes | 
     log("  Veo: timed out"); return None
 
 
+def _upload_screenshot(img_path: str) -> str:
+    """Upload a debug screenshot to Cloudinary and return the URL."""
+    try:
+        cloud_name, api_key, api_secret = _load_cloudinary()
+        ts  = int(time.time())
+        pid = f"hook_debug/screenshot_{ts}"
+        sig = hashlib.sha1(f"public_id={pid}&timestamp={ts}{api_secret}".encode()).hexdigest()
+        with open(img_path, "rb") as f:
+            r = requests.post(
+                f"https://api.cloudinary.com/v1_1/{cloud_name}/image/upload",
+                data={"public_id": pid, "timestamp": ts, "api_key": api_key, "signature": sig},
+                files={"file": f}, timeout=60,
+            )
+        return r.json().get("secure_url", "") if r.ok else ""
+    except Exception: return ""
+
+
+def veo_via_browser(prompt: str, td: str) -> bytes | None:
+    """Drive Google AI Studio headlessly using saved cookies to generate a Veo 2 clip."""
+    cookie_path = os.path.expanduser("~/glabcookie.json")
+    if not os.path.exists(cookie_path):
+        log("  ⚠️ glabcookie.json not found — skipping browser Veo")
+        return None
+
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+    except ImportError:
+        log("  ⚠️ selenium not installed"); return None
+
+    download_dir = os.path.join(td, "veo_dl")
+    os.makedirs(download_dir, exist_ok=True)
+
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+    opts.add_experimental_option("prefs", {
+        "download.default_directory": download_dir,
+        "download.prompt_for_download": False,
+        "safebrowsing.enabled": True,
+    })
+
+    driver = webdriver.Chrome(options=opts)
+    wait   = WebDriverWait(driver, 30)
+
+    def screenshot(label: str):
+        try:
+            p = os.path.join(td, f"{label}.png")
+            driver.save_screenshot(p)
+            url = _upload_screenshot(p)
+            if url: log(f"  📸 {label}: {url}")
+        except Exception: pass
+
+    try:
+        # ── 1. Load cookies on google.com domain ─────────────────────────────
+        log("  Browser: seeding cookies on google.com…")
+        driver.get("https://google.com")
+        time.sleep(2)
+
+        with open(cookie_path) as f:
+            raw = json.load(f)
+
+        driver.delete_all_cookies()
+        for c in raw:
+            cookie = {
+                "name":   c["name"],
+                "value":  c["value"],
+                "domain": c.get("domain", ".google.com"),
+                "path":   c.get("path", "/"),
+                "secure": c.get("secure", False),
+            }
+            if "expirationDate" in c:
+                cookie["expiry"] = int(c["expirationDate"])
+            try:
+                driver.add_cookie(cookie)
+            except Exception:
+                pass
+
+        # ── 2. Navigate to Veo Studio ─────────────────────────────────────────
+        VEO_URLS = [
+            "https://aistudio.google.com/generate/video",
+            "https://aistudio.google.com/veo",
+        ]
+        for veo_url in VEO_URLS:
+            log(f"  Browser: trying {veo_url} …")
+            driver.get(veo_url)
+            time.sleep(5)
+            screenshot(f"nav_{veo_url.split('/')[-1]}")
+            log(f"  Browser: title = {driver.title[:80]}")
+            if "Sign in" in driver.title or "accounts.google" in driver.current_url:
+                log("  Browser: not authenticated — cookies may be expired"); return None
+            # If we land on a valid page (not a redirect to /prompts), proceed
+            if "video" in driver.current_url or "veo" in driver.current_url.lower():
+                break
+        else:
+            # Try navigating from the main page
+            driver.get("https://aistudio.google.com")
+            time.sleep(4)
+            screenshot("main_page")
+            log(f"  Browser: main page title = {driver.title[:60]}")
+
+        # ── 3. Find the prompt input ──────────────────────────────────────────
+        log("  Browser: looking for prompt input…")
+        prompt_el = None
+        for sel in ["textarea", "[contenteditable='true']", "input[type='text']"]:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in els:
+                if el.is_displayed() and el.is_enabled():
+                    prompt_el = el; break
+            if prompt_el: break
+
+        if not prompt_el:
+            screenshot("no_prompt_input")
+            log("  Browser: prompt input not found"); return None
+
+        log("  Browser: typing prompt…")
+        prompt_el.click()
+        time.sleep(0.5)
+        prompt_el.clear()
+        prompt_el.send_keys(prompt)
+        time.sleep(1)
+        screenshot("prompt_entered")
+
+        # ── 4. Click Generate ─────────────────────────────────────────────────
+        log("  Browser: looking for Generate button…")
+        gen_btn = None
+        for sel in [
+            "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+            "'abcdefghijklmnopqrstuvwxyz'), 'generate')]",
+            "//button[contains(@aria-label, 'enerate')]",
+            "//button[contains(@data-testid, 'enerate')]",
+        ]:
+            els = driver.find_elements(By.XPATH, sel)
+            for e in els:
+                if e.is_displayed() and e.is_enabled():
+                    gen_btn = e; break
+            if gen_btn: break
+
+        if not gen_btn:
+            screenshot("no_generate_btn")
+            log("  Browser: Generate button not found"); return None
+
+        gen_btn.click()
+        log("  Browser: generation started — polling up to 5 min…")
+        screenshot("after_generate_click")
+
+        # ── 5. Wait for video / download button ───────────────────────────────
+        for tick in range(60):
+            time.sleep(5)
+
+            # Check for a video element
+            vids = driver.find_elements(By.CSS_SELECTOR, "video[src]")
+            for v in vids:
+                src = v.get_attribute("src") or ""
+                if src.startswith("http"):
+                    log(f"  Browser: video src found → {src[:60]}…")
+                    screenshot("video_found")
+                    cookies_dict = {c["name"]: c["value"] for c in driver.get_cookies()}
+                    r = requests.get(src, cookies=cookies_dict, timeout=120)
+                    if r.ok and len(r.content) > 10_000:
+                        log(f"  ✓ Veo via browser: {len(r.content):,} bytes")
+                        return r.content
+
+            # Check for download button
+            for dl_sel in [
+                "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+                "'abcdefghijklmnopqrstuvwxyz'), 'download')]",
+                "//button[@aria-label[contains(., 'ownload')]]",
+                "//*[@data-testid[contains(., 'ownload')]]",
+            ]:
+                btns = driver.find_elements(By.XPATH, dl_sel)
+                for b in btns:
+                    if b.is_displayed():
+                        log("  Browser: download button found — clicking…")
+                        b.click()
+                        time.sleep(8)
+                        # Check download dir
+                        files = [f for f in os.listdir(download_dir) if f.endswith(".mp4")]
+                        if files:
+                            with open(os.path.join(download_dir, files[0]), "rb") as f:
+                                data = f.read()
+                            log(f"  ✓ Veo downloaded: {len(data):,} bytes")
+                            return data
+
+            if tick % 6 == 0:  # screenshot every 30s
+                screenshot(f"waiting_{tick * 5}s")
+
+        screenshot("timeout")
+        log("  Browser: timed out waiting for video"); return None
+
+    except Exception as e:
+        log(f"  Browser Veo error: {e}")
+        try: screenshot("exception")
+        except Exception: pass
+        return None
+    finally:
+        try: driver.quit()
+        except Exception: pass
+
+
 def extract_last_frame(video_path: str, td: str, ffmpeg_bin: str) -> str | None:
     frame = os.path.join(td, "last_frame.jpg")
     try:
@@ -455,7 +663,11 @@ def main():
         log("\n[4] Generating Veo hook clip 1…")
         clip1_raw = os.path.join(td, "clip1_raw.mp4")
         clip1_seg = os.path.join(td, "clip1.mp4")
-        clip1_bytes = veo_generate(veo_prompt, keys[0])
+        # Try API first, fall back to browser-based generation
+        clip1_bytes = veo_generate(veo_prompt, keys[0]) if keys else None
+        if not clip1_bytes:
+            log("  API failed — trying browser-based Veo (glabcookie.json)…")
+            clip1_bytes = veo_via_browser(veo_prompt, td)
 
         if clip1_bytes:
             with open(clip1_raw, "wb") as f: f.write(clip1_bytes)
