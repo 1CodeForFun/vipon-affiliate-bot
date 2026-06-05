@@ -49,7 +49,7 @@ GOOGLE_SHEET_NAME = "vipon"
 GOOGLE_CREDS_FILE = "vipon_google_creds.json"
 
 # ── Canada market ────────────────────────────────────────────────
-AFFILIATE_ID_CA    = "onamzfreshdea-20"   # single tag for all CA platforms
+AFFILIATE_ID_CA    = "fdcanada00-20"   # single tag for all CA platforms (amazon.ca)
 AMAZON_TLD_CA      = "ca"
 SHEET2_TAB         = "Sheet2"          # Canada products sheet
 SELLER_FORM_TAB_CA = "Form Responses 3" # Canada seller form responses
