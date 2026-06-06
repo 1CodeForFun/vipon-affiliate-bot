@@ -1,0 +1,55 @@
+name: Reel Concept Test
+
+# Tests the new reel concept: cover → phone price screenshot (was→now) →
+# carousel → reviews/sold zoom → rest, with code/%% overlays, VO from FB-post
+# piece 1 via Gemini TTS. Touches nothing in the production pipeline.
+on:
+  workflow_dispatch:
+    inputs:
+      tts_voice:
+        description: 'Gemini TTS voice (default Achernar)'
+        required: false
+        default: 'Achernar'
+
+jobs:
+  concept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Checkout secrets repo
+        uses: actions/checkout@v4
+        with:
+          repository: 1CodeForFun/vipon-secrets
+          token: ${{ secrets.SECRETS_PAT }}
+          path: secrets
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg chromium-browser chromium-chromedriver
+
+      - name: Install Python dependencies
+        run: pip install gspread oauth2client requests selenium
+
+      - name: Copy credential files
+        run: |
+          cp secrets/vipon_google_creds.json .
+          cp secrets/cloudinary.json ~/cloudinary.json
+          [ -f secrets/geminipro.txt  ] && cp secrets/geminipro.txt  ~/geminipro.txt  || true
+          [ -f secrets/geminikey.txt  ] && cp secrets/geminikey.txt  ~/geminikey.txt  || true
+          [ -f secrets/geminikeys.txt ] && cp secrets/geminikeys.txt ~/geminikeys.txt || true
+
+      - name: Run reel concept test
+        env:
+          SECRETS_DIR: .
+          TTS_VOICE:   ${{ github.event.inputs.tts_voice }}
+        run: python reel_concept_test.py
