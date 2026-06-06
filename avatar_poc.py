@@ -122,9 +122,15 @@ def pick_product():
     best, best_score = None, -1.0
     for row in rows[1:]:
         if len(row) < 14: continue
-        title = row[8].strip()       # I Product
-        asin  = row[10].strip()      # K PID
-        price = row[9].strip()       # J Price
+        title    = row[8].strip()       # I Product
+        price    = row[9].strip()       # J Price
+        aff_link = row[0].strip()       # A Link (carries the real ASIN)
+        # Column K is the vipon PID for scraped rows, NOT the Amazon ASIN.
+        # The reliable ASIN is the asin= param inside the affiliate link.
+        m_asin = re.search(r"asin=([A-Za-z0-9]{10})", aff_link, re.I)
+        if not m_asin:
+            m_asin = re.search(r"\b(B0[A-Z0-9]{8})\b", aff_link, re.I)
+        asin = m_asin.group(1).upper() if m_asin else ""
         if not title or not asin:
             continue
         m = re.search(r"(\d+(?:\.\d+)?)", price.replace(",", ""))
@@ -250,10 +256,12 @@ def record_amazon_page(asin: str, td: str, ffmpeg: str, seconds: float, font: st
         if "robot check" in page_txt or "captchacharacters" in page_txt or "type the characters" in page_txt:
             log("  ⚠️ Amazon served a captcha/robot page — screenshot will show it")
 
-        # Full-page screenshot via CDP
+        # Full-page screenshot via CDP. Cap height to the meaningful product region
+        # (title, price, coupon, images, bullets, top reviews) — skip the long
+        # footer/related-products crawl that made the scroll feel endless.
         metrics = driver.execute_cdp_cmd("Page.getLayoutMetrics", {})
         width  = math.ceil(metrics["cssContentSize"]["width"])
-        height = min(math.ceil(metrics["cssContentSize"]["height"]), 9000)
+        height = min(math.ceil(metrics["cssContentSize"]["height"]), 4200)
         driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
             "mobile": True, "width": width, "height": height,
             "deviceScaleFactor": 2, "screenWidth": width, "screenHeight": height})
@@ -271,14 +279,18 @@ def record_amazon_page(asin: str, td: str, ffmpeg: str, seconds: float, font: st
         try: driver.quit()
         except Exception: pass
 
-    # ffmpeg: scale screenshot to target width, slow zoom-in, pan top→bottom
+    # ffmpeg: scale to target width, then pan top→bottom with a cosine ease so the
+    # scroll starts/settles gently but moves at a brisk, video-like pace.
     page_vid = os.path.join(td, "page_scroll.mp4")
     try:
-        # Scale to a bit wider than target so a slight zoom always has pixels
-        scaled_w = int(VIDEO_W * 1.12)
-        # crop window pans from top to bottom across the scaled-height image
+        scaled_w = VIDEO_W
+        # 1.2s hold at the top (title/price/coupon), then ease-scroll the rest
+        hold = 1.2
+        span = max(0.1, seconds - hold)
+        prog = f"max(0\\,(t-{hold:.2f}))/{span:.2f}"           # 0..1 after the hold
+        ease = f"(1-cos(PI*min(1\\,{prog})))/2"                # cosine ease-in-out
         crop_x = f"(iw-{VIDEO_W})/2"
-        crop_y = f"(ih-{VIDEO_H})*min(1\\,t/{max(0.1, seconds-0.5):.2f})"
+        crop_y = f"(ih-{VIDEO_H})*{ease}"
         vf = (f"scale={scaled_w}:-1,"
               f"crop={VIDEO_W}:{VIDEO_H}:{crop_x}:'{crop_y}',"
               f"setsar=1")
@@ -286,7 +298,7 @@ def record_amazon_page(asin: str, td: str, ffmpeg: str, seconds: float, font: st
             "-loop", "1", "-t", f"{seconds:.2f}", "-i", shot,
             "-vf", vf, "-r", str(FPS), "-pix_fmt", "yuv420p",
         ] + _FF_ENCODE + ["-an", page_vid], check=True, timeout=180)
-        log(f"  ✓ Scrolling page video: {seconds:.1f}s")
+        log(f"  ✓ Scrolling page video: {seconds:.1f}s (1.2s top hold + eased scroll)")
         return page_vid
     except Exception as e:
         log(f"  scroll video build failed: {e}"); return None
@@ -380,11 +392,11 @@ def main():
             try:
                 r = requests.get(AVATAR_CLIP_URL, timeout=180); r.raise_for_status()
                 with open(tmp, "wb") as f: f.write(r.content)
-                seconds = max(8.0, probe_duration(tmp, ffmpeg) or 25.0)
+                seconds = max(8.0, probe_duration(tmp, ffmpeg) or 14.0)
             except Exception:
-                seconds = 25.0
+                seconds = 14.0
         else:
-            seconds = 25.0
+            seconds = 14.0
         log(f"[3] Recording scrolling/zooming Amazon page ({seconds:.0f}s)…")
 
         # 3) Scrolling page video
