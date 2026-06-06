@@ -71,20 +71,54 @@ _FF_ENCODE = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-threads
 def log(m): print(m, flush=True)
 
 # ─── CREDENTIALS / TOOLS ──────────────────────────────────────────────────────
-def _read_gemini_keys():
+def _read_gemini_keys(with_source=False):
+    """Return all keys. If with_source, return (key, source) tuples for diagnostics."""
+    out = []
     pro = os.path.expanduser("~/geminipro.txt")
-    keys = []
     if os.path.exists(pro):
         k = open(pro).read().strip()
-        if k: keys.append(k)
+        if k: out.append((k, "geminipro.txt"))
     multi = os.path.expanduser("~/geminikeys.txt")
     if os.path.exists(multi):
-        keys += [l.strip() for l in open(multi) if l.strip() and not l.startswith("#")]
+        for l in open(multi):
+            l = l.strip()
+            if l and not l.startswith("#"):
+                out.append((l, "geminikeys.txt"))
     single = os.path.expanduser("~/geminikey.txt")
     if os.path.exists(single):
         k = open(single).read().strip()
-        if k and k not in keys: keys.append(k)
-    return keys
+        if k and k not in [x[0] for x in out]:
+            out.append((k, "geminikey.txt"))
+    return out if with_source else [k for k, _ in out]
+
+
+def _mask(k: str) -> str:
+    return f"{k[:6]}…{k[-4:]}" if len(k) > 12 else "short/invalid"
+
+
+def diagnose_keys():
+    """Test every loaded key with a 1-token call and report exactly what it returns.
+    Reveals whether the new keys are even present and which ones carry quota."""
+    pairs = _read_gemini_keys(with_source=True)
+    log(f"\n[key check] {len(pairs)} key(s) loaded from secrets")
+    for i, (k, src) in enumerate(pairs, 1):
+        try:
+            r = requests.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"gemini-2.0-flash:generateContent?key={k}",
+                json={"contents": [{"parts": [{"text": "hi"}]}],
+                      "generationConfig": {"maxOutputTokens": 1}},
+                timeout=20)
+            if r.ok:
+                log(f"  {i}. {_mask(k)} ({src}) → ✅ OK — has quota")
+            else:
+                reason = ""
+                try: reason = r.json().get("error", {}).get("message", "")[:90]
+                except Exception: reason = r.text[:90]
+                log(f"  {i}. {_mask(k)} ({src}) → ❌ {r.status_code}: {reason}")
+        except Exception as e:
+            log(f"  {i}. {_mask(k)} ({src}) → error: {e}")
+    log("")
 
 def _load_cloudinary():
     d = json.load(open(os.path.expanduser("~/cloudinary.json")))
@@ -496,6 +530,9 @@ def main():
     ffmpeg = _which_ffmpeg()
     font   = _find_font()
     log(f"Gemini keys: {len(keys)} | ffmpeg: {ffmpeg} | font: {'yes' if font else 'no'}")
+
+    # Per-key health check — shows which keys are loaded and which carry quota
+    diagnose_keys()
 
     with tempfile.TemporaryDirectory(prefix="avatar_poc_") as td:
         # 1) Pick product
