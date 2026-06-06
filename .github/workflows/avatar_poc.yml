@@ -1,0 +1,60 @@
+name: Avatar POC
+
+# Proof of concept: picks a high-commission product, writes the avatar scenario +
+# VO script, records the real scrolling/zooming Amazon page, and (if you provide a
+# green-screen avatar clip) stitches the final overlay reel.
+on:
+  workflow_dispatch:
+    inputs:
+      avatar_clip_url:
+        description: 'Public URL of a green-screen avatar clip (leave blank for run 1)'
+        required: false
+        default: ''
+      page_seconds:
+        description: 'Scroll duration in seconds (blank = match avatar / default 25)'
+        required: false
+        default: ''
+
+jobs:
+  poc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Checkout secrets repo
+        uses: actions/checkout@v4
+        with:
+          repository: 1CodeForFun/vipon-secrets
+          token: ${{ secrets.SECRETS_PAT }}
+          path: secrets
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg chromium-browser chromium-chromedriver
+
+      - name: Install Python dependencies
+        run: pip install gspread oauth2client requests selenium
+
+      - name: Copy credential files
+        run: |
+          cp secrets/vipon_google_creds.json .
+          cp secrets/cloudinary.json ~/cloudinary.json
+          [ -f secrets/geminipro.txt  ] && cp secrets/geminipro.txt  ~/geminipro.txt  || true
+          [ -f secrets/geminikey.txt  ] && cp secrets/geminikey.txt  ~/geminikey.txt  || true
+          [ -f secrets/geminikeys.txt ] && cp secrets/geminikeys.txt ~/geminikeys.txt || true
+
+      - name: Run avatar POC
+        env:
+          SECRETS_DIR:     .
+          AVATAR_CLIP_URL: ${{ github.event.inputs.avatar_clip_url }}
+          PAGE_SECONDS:    ${{ github.event.inputs.page_seconds }}
+        run: python avatar_poc.py
