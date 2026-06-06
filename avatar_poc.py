@@ -415,7 +415,11 @@ def record_amazon_page(asin: str, td: str, ffmpeg: str, seconds: float, font: st
         subprocess.run([ffmpeg, "-y"] + _FF_LOG +
                        ["-f", "concat", "-safe", "0", "-i", listf,
                         "-c", "copy", page_vid], check=True, timeout=120)
-        log(f"  ✓ Guided-tour video: {probe_duration(page_vid, ffmpeg):.1f}s")
+        dur = probe_duration(page_vid, ffmpeg)
+        log(f"  ✓ Guided-tour video: {dur:.1f}s")
+        if dur > seconds * 3 + 10:   # sanity guard against runaway-length renders
+            log(f"  ⚠️ tour duration {dur:.0f}s is far over target {seconds:.0f}s — "
+                "something is wrong with shot timing")
         return page_vid
     except Exception as e:
         log(f"  tour concat failed: {e}")
@@ -442,9 +446,12 @@ def _build_zoom_shot(shot, td, ffmpeg, idx, a, win_h, secs, img_w, img_h):
           f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={VIDEO_W}x{VIDEO_H}:fps={FPS},"
           f"setsar=1")
     try:
+        # IMPORTANT: single looped input (no input -t). zoompan d= sets the frame
+        # count; -t on the OUTPUT caps the clip. Putting -t on the input limits the
+        # input frames and zoompan then multiplies them → multi-minute clips.
         subprocess.run([ffmpeg, "-y"] + _FF_LOG + [
-            "-loop", "1", "-t", f"{secs:.2f}", "-i", shot,
-            "-vf", vf, "-r", str(FPS), "-pix_fmt", "yuv420p",
+            "-loop", "1", "-i", shot,
+            "-vf", vf, "-r", str(FPS), "-t", f"{secs:.2f}", "-pix_fmt", "yuv420p",
         ] + _FF_ENCODE + ["-an", seg], check=True, timeout=90)
         return seg
     except Exception as e:
