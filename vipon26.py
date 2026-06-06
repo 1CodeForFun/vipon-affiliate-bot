@@ -569,7 +569,13 @@ def generate_social_post(link, code, discount_pct, expiry, title, price):
                        f"gemini-2.5-flash:generateContent?key={gemini_key}")
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.95, "maxOutputTokens": 200}
+                "generationConfig": {
+                    "temperature": 0.95,
+                    "maxOutputTokens": 200,
+                    # 2.5-flash is a thinking model — disable thinking so the token
+                    # budget produces the actual post, not hidden reasoning.
+                    "thinkingConfig": {"thinkingBudget": 0},
+                }
             }
             resp = requests.post(api_url, json=payload, timeout=25)
             if resp.ok:

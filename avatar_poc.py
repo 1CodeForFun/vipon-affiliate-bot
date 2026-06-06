@@ -217,7 +217,13 @@ def gemini_text(prompt: str, keys: list, max_tokens: int = 350) -> str:
                     "https://generativelanguage.googleapis.com/v1beta/models/"
                     f"{model}:generateContent?key={key}",
                     json={"contents": [{"parts": [{"text": prompt}]}],
-                          "generationConfig": {"temperature": 0.9, "maxOutputTokens": max_tokens}},
+                          "generationConfig": {
+                              "temperature": 0.9,
+                              "maxOutputTokens": max_tokens,
+                              # 2.5-flash is a thinking model — without this it burns the
+                              # token budget reasoning and returns a truncated answer.
+                              "thinkingConfig": {"thinkingBudget": 0},
+                          }},
                     timeout=30)
                 if r.ok:
                     return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -553,8 +559,10 @@ def main():
     font   = _find_font()
     log(f"Gemini keys: {len(keys)} | ffmpeg: {ffmpeg} | font: {'yes' if font else 'no'}")
 
-    # Per-key health check — shows which keys are loaded and which carry quota
-    diagnose_keys()
+    # Per-key health check — OFF by default because it spends one request per key
+    # (7 calls) out of your tiny 20/day free quota. Enable with DIAGNOSE_KEYS=1.
+    if os.environ.get("DIAGNOSE_KEYS", "").strip().lower() in ("1", "true", "yes"):
+        diagnose_keys()
 
     with tempfile.TemporaryDirectory(prefix="avatar_poc_") as td:
         # 1) Pick product
