@@ -1813,7 +1813,7 @@ def process_seller_forms(ws_main) -> None:
         post_text      = generate_social_post(aff_link, code, disc_txt, expiry, t_short, price)
 
         # ── Append to Sheet1 (same column order as scraped products) ──
-        ws_main.append_row([
+        ws_main.append_rows([[
             aff_link,
             platform_links.get("reel", ""),
             platform_links.get("ig", ""),
@@ -1829,7 +1829,7 @@ def process_seller_forms(ws_main) -> None:
             images[0],
             reel_url,
             post_text,
-        ], value_input_option="USER_ENTERED")
+        ]], value_input_option="USER_ENTERED", table_range="A1")
 
         # ── Mark done in form tab ─────────────────────────────────
         form_ws.update_cell(row_idx, status_col + 1, "Done")
@@ -2095,7 +2095,7 @@ def main():
             reel_url = ""
 
         # Write main sheet row
-        ws.append_row([
+        ws.append_rows([[
             data["link"],
             data["link_reel"],
             data["link_ig"],
@@ -2118,7 +2118,7 @@ def main():
                 t_short,
                 data["price"],
             ),
-        ], value_input_option="USER_ENTERED")
+        ]], value_input_option="USER_ENTERED", table_range="A1")
 
         # Write Pinterest row (only if enabled)
         if ENABLE_PINTEREST:
