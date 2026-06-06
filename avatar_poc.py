@@ -480,15 +480,28 @@ def probe_duration(path: str, ffmpeg: str) -> float:
     return 0.0
 
 def cloud_upload(path: str, public_id: str, kind: str = "video") -> str:
+    if not path or not os.path.exists(path):
+        log(f"  ⚠️ upload skipped — file missing: {path}")
+        return ""
+    size = os.path.getsize(path)
     cn, ak, asec = _load_cloudinary()
     ts  = int(time.time())
     sig = hashlib.sha1(f"public_id={public_id}&timestamp={ts}{asec}".encode()).hexdigest()
-    with open(path, "rb") as f:
-        r = requests.post(f"https://api.cloudinary.com/v1_1/{cn}/{kind}/upload",
-                          data={"public_id": public_id, "timestamp": ts,
-                                "api_key": ak, "signature": sig},
-                          files={"file": f}, timeout=300)
-    return r.json().get("secure_url", "") if r.ok else ""
+    try:
+        with open(path, "rb") as f:
+            r = requests.post(f"https://api.cloudinary.com/v1_1/{cn}/{kind}/upload",
+                              data={"public_id": public_id, "timestamp": ts,
+                                    "api_key": ak, "signature": sig},
+                              files={"file": f}, timeout=300)
+    except Exception as e:
+        log(f"  ⚠️ upload error ({size:,} bytes): {e}")
+        return ""
+    if r.ok:
+        url = r.json().get("secure_url", "")
+        log(f"  ☁️ uploaded {size:,} bytes → {url}")
+        return url
+    log(f"  ⚠️ Cloudinary {r.status_code}: {r.text[:200]}")
+    return ""
 
 # ─── 4. STITCH ────────────────────────────────────────────────────────────────
 def stitch(page_vid: str, avatar_url: str, td: str, ffmpeg: str, font: str,
@@ -573,8 +586,8 @@ def main():
         page_vid = record_amazon_page(p["asin"], td, ffmpeg, seconds, font)
         if not page_vid:
             raise RuntimeError("Failed to build the scrolling page video")
-        page_url = cloud_upload(page_vid, f"{CLOUD_FOLDER}/page_{p['asin']}_{int(time.time())}")
-        log(f"  📄 Scrolling page video: {page_url}")
+        page_url  = cloud_upload(page_vid, f"{CLOUD_FOLDER}/page_{p['asin']}_{int(time.time())}")
+        final_url = ""
 
         # 4) Stitch (only if an avatar clip was provided)
         deal_text = f"{p['disc']} off · {p['price']} · ends {expd}"
@@ -583,14 +596,23 @@ def main():
             final = stitch(page_vid, AVATAR_CLIP_URL, td, ffmpeg, font, deal_text)
             if final:
                 final_url = cloud_upload(final, f"{CLOUD_FOLDER}/final_{p['asin']}_{int(time.time())}")
-                log(f"\n✅ FINAL STITCHED REEL:\n{final_url}")
             else:
                 log("\n⚠️ Stitch failed — see logs")
         else:
             log("\n[4] No AVATAR_CLIP_URL provided — POC stops at the page video.")
-            log("    Next: make ONE green-screen avatar clip in CapCut/HeyGen using")
-            log("    the VO SCRIPT above, upload it somewhere public, then re-run this")
-            log("    workflow with AVATAR_CLIP_URL set to stitch the final reel.")
+
+        # ── Unmissable summary ────────────────────────────────────────────────
+        log("\n" + "=" * 60)
+        log("  ARTIFACTS")
+        log("=" * 60)
+        log(f"  Product : {p['title'][:60]}")
+        log(f"  PAGE VIDEO : {page_url or '⚠️ UPLOAD FAILED (see log above)'}")
+        if AVATAR_CLIP_URL:
+            log(f"  FINAL REEL : {final_url or '⚠️ stitch/upload failed'}")
+        else:
+            log("  FINAL REEL : (none — make a green-screen avatar clip from the VO")
+            log("               SCRIPT above, then re-run with AVATAR_CLIP_URL set)")
+        log("=" * 60)
 
     log("=== avatar_poc.py done ===")
 
