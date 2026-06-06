@@ -169,21 +169,44 @@ def friendly_date(expiry: str) -> str:
     return expiry
 
 # ─── 2. GEMINI: SCENARIO + SCRIPT ─────────────────────────────────────────────
+# Try several models — each has a separate free-tier quota pool, so a 429 on one
+# may still succeed on another.
+_TEXT_MODELS = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+
 def gemini_text(prompt: str, keys: list, max_tokens: int = 350) -> str:
-    for key in keys:
-        try:
-            r = requests.post(
-                "https://generativelanguage.googleapis.com/v1beta/models/"
-                f"gemini-2.0-flash:generateContent?key={key}",
-                json={"contents": [{"parts": [{"text": prompt}]}],
-                      "generationConfig": {"temperature": 0.9, "maxOutputTokens": max_tokens}},
-                timeout=30)
-            if r.ok:
-                return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            log(f"  Gemini {r.status_code}: {r.text[:120]}")
-        except Exception as e:
-            log(f"  Gemini error: {e}")
+    for model in _TEXT_MODELS:
+        for key in keys:
+            try:
+                r = requests.post(
+                    "https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{model}:generateContent?key={key}",
+                    json={"contents": [{"parts": [{"text": prompt}]}],
+                          "generationConfig": {"temperature": 0.9, "maxOutputTokens": max_tokens}},
+                    timeout=30)
+                if r.ok:
+                    return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                # 429 → try next key/model silently; log other errors once
+                if r.status_code != 429:
+                    log(f"  {model} {r.status_code}: {r.text[:100]}")
+            except Exception as e:
+                log(f"  {model} error: {e}")
+    log("  ⚠️ All Gemini models/keys exhausted — using template fallback")
     return ""
+
+def _fallback_scenario(p):
+    return ("A warm, upbeat female creator, filmed selfie-style, gesturing toward the "
+            "screen behind her. As the page tours each spot she points to it — the rating "
+            "stars, the 'bought last month' badge, the reviews — friendly and trustworthy, "
+            "with a touch of genuine excitement.")
+
+def _fallback_script(p, expd):
+    name = p["title"].split(",")[0].strip()
+    disc = f"{p['disc']} off" if p["disc"] else "a great deal"
+    code = f"Use code {p['code']} at checkout. " if p["code"] else ""
+    return (f"Okay, I did not expect to love this {name} as much as I do. Look at these "
+            f"reviews — people are obsessed, and thousands sold just last month. Right now "
+            f"it is {disc}, down to just {p['price']}. {code}But that price only lasts until "
+            f"{expd}, so do not sit on this one. Go grab it before it is gone.")
 
 def build_scenario(p, keys):
     expd = friendly_date(p["expiry"])
@@ -212,12 +235,61 @@ def build_scenario(p, keys):
         "- Smooth sentences with commas (it will be read aloud). No hashtags, no "
         "'link in bio'. Return only the script.",
         keys, max_tokens=180)
-    return scenario, script, expd
+    return (scenario or _fallback_scenario(p)), (script or _fallback_script(p, expd)), expd
 
-# ─── 3. SCROLLING/ZOOMING AMAZON PAGE ─────────────────────────────────────────
+# ─── 3. GUIDED-TOUR AMAZON PAGE (zoom/hover to key spots) ─────────────────────
+# JS that locates the key elements on a desktop Amazon product page and returns
+# their absolute page coordinates (CSS px). These become the camera's stops.
+_ANCHOR_JS = r"""
+function abs(el){
+  if(!el) return null;
+  const r = el.getBoundingClientRect();
+  if(r.width < 8 || r.height < 4) return null;
+  return {x: r.left + window.scrollX, y: r.top + window.scrollY,
+          w: r.width, h: r.height};
+}
+function firstText(needle){
+  needle = needle.toLowerCase();
+  const els = document.querySelectorAll('span,div,a');
+  for(const e of els){
+    const t = (e.innerText||'').trim().toLowerCase();
+    if(t && t.length < 70 && t.includes(needle)) return e;
+  }
+  return null;
+}
+const out = {};
+out.image   = abs(document.querySelector('#landingImage')
+              || document.querySelector('#imgTagWrapperId img')
+              || document.querySelector('#main-image-container img'));
+out.rating  = abs(document.querySelector('#acrPopover')
+              || document.querySelector('#averageCustomerReviews')
+              || document.querySelector("[data-hook='rating-out-of-text']"));
+out.count   = abs(document.querySelector('#acrCustomerReviewText'));
+out.bought  = abs(firstText('bought in past'));
+out.price   = abs(document.querySelector('.priceToPay')
+              || document.querySelector('#corePriceDisplay_desktop_feature_div')
+              || document.querySelector('#price'));
+out.reviews = abs(document.querySelector('#reviewsMedley')
+              || document.querySelector("[data-hook='review']")
+              || document.querySelector('#cm-cr-dp-review-list'));
+return out;
+"""
+
+# Order the camera visits its stops, with how tall a window to frame each
+# (smaller window = tighter zoom). Height is in source px.
+_SHOT_PLAN = [
+    ("image",   1100),   # the product, generous frame
+    ("price",    520),   # zoom to the deal price
+    ("bought",   360),   # tight zoom on "10K+ bought last month"
+    ("rating",   360),   # tight zoom on the stars
+    ("count",    420),   # "12,394 ratings"
+    ("reviews",  900),   # a written review
+]
+
 def record_amazon_page(asin: str, td: str, ffmpeg: str, seconds: float, font: str):
-    """Headless Chrome full-page screenshot of the mobile Amazon page, then ffmpeg
-    pans/zooms down it to create a vertical scrolling background video."""
+    """Load the desktop Amazon page, find key elements, and build a 'guided tour'
+    video that cuts/zooms from the product image to the price, the bought-count,
+    the star rating, and the reviews — like a camera hovering over each spot."""
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
@@ -227,49 +299,51 @@ def record_amazon_page(asin: str, td: str, ffmpeg: str, seconds: float, font: st
 
     binary, driver_bin = _chrome_bits()
     opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--hide-scrollbars")
-    opts.add_argument("--lang=en-US")
-    # Mobile emulation → narrow, tall page that suits vertical scroll
-    mobile_ua = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                 "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
-                 "Mobile/15E148 Safari/604.1")
-    opts.add_argument(f"--user-agent={mobile_ua}")
-    opts.add_argument("--window-size=440,900")
+    for a in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+              "--disable-gpu", "--hide-scrollbars", "--lang=en-US",
+              "--window-size=1280,1400"):
+        opts.add_argument(a)
+    opts.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
     if binary: opts.binary_location = binary
-
     service = Service(executable_path=driver_bin) if driver_bin else Service()
     driver  = webdriver.Chrome(service=service, options=opts)
 
     shot = os.path.join(td, "page_full.png")
+    anchors, img_w, img_h = {}, VIDEO_W, 4000
     try:
         url = f"https://www.amazon.com/dp/{asin}?th=1&psc=1"
-        log(f"  Loading {url}")
-        driver.set_window_size(440, 900)
+        log(f"  Loading desktop {url}")
+        driver.set_window_size(1280, 1400)
         driver.get(url)
         time.sleep(5)
+        # nudge lazy-loaded sections (reviews) into the DOM
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight*0.6);")
+        time.sleep(1.5)
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(0.8)
 
         page_txt = (driver.page_source or "").lower()
-        if "robot check" in page_txt or "captchacharacters" in page_txt or "type the characters" in page_txt:
-            log("  ⚠️ Amazon served a captcha/robot page — screenshot will show it")
+        if "robot check" in page_txt or "captchacharacters" in page_txt:
+            log("  ⚠️ Amazon served a captcha page — tour anchors will be missing")
 
-        # Full-page screenshot via CDP. Cap height to the meaningful product region
-        # (title, price, coupon, images, bullets, top reviews) — skip the long
-        # footer/related-products crawl that made the scroll feel endless.
+        try:
+            anchors = {k: v for k, v in (driver.execute_script(_ANCHOR_JS) or {}).items() if v}
+        except Exception as e:
+            log(f"  anchor lookup failed: {e}")
+        log(f"  Found anchors: {', '.join(anchors.keys()) or 'none'}")
+
         metrics = driver.execute_cdp_cmd("Page.getLayoutMetrics", {})
-        width  = math.ceil(metrics["cssContentSize"]["width"])
-        height = min(math.ceil(metrics["cssContentSize"]["height"]), 4200)
+        img_w = math.ceil(metrics["cssContentSize"]["width"])
+        img_h = min(math.ceil(metrics["cssContentSize"]["height"]), 7000)
         driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
-            "mobile": True, "width": width, "height": height,
-            "deviceScaleFactor": 2, "screenWidth": width, "screenHeight": height})
+            "mobile": False, "width": img_w, "height": img_h,
+            "deviceScaleFactor": 1, "screenWidth": img_w, "screenHeight": img_h})
         result = driver.execute_cdp_cmd("Page.captureScreenshot", {
             "captureBeyondViewport": True, "fromSurface": True, "format": "png"})
         with open(shot, "wb") as f:
             f.write(base64.b64decode(result["data"]))
-        log(f"  ✓ Full-page screenshot saved ({os.path.getsize(shot):,} bytes)")
+        log(f"  ✓ Desktop screenshot {img_w}x{img_h} ({os.path.getsize(shot):,} bytes)")
     except Exception as e:
         log(f"  page capture failed: {e}")
         try: driver.quit()
@@ -279,29 +353,88 @@ def record_amazon_page(asin: str, td: str, ffmpeg: str, seconds: float, font: st
         try: driver.quit()
         except Exception: pass
 
-    # ffmpeg: scale to target width, then pan top→bottom with a cosine ease so the
-    # scroll starts/settles gently but moves at a brisk, video-like pace.
-    page_vid = os.path.join(td, "page_scroll.mp4")
+    # Decide the camera stops (only those found, in plan order)
+    stops = [(name, anchors[name], win) for name, win in _SHOT_PLAN
+             if name in anchors and anchors[name]["y"] < img_h - 40]
+    if not stops:
+        log("  No anchors found — falling back to a simple eased scroll")
+        return _fallback_scroll(shot, td, ffmpeg, seconds)
+
+    per = max(2.2, seconds / len(stops))
+    log(f"  Guided tour: {len(stops)} stops × {per:.1f}s "
+        f"({', '.join(n for n, _, _ in stops)})")
+
+    seg_paths = []
+    for i, (name, a, win_h) in enumerate(stops):
+        seg = _build_zoom_shot(shot, td, ffmpeg, i, a, win_h, per, img_w, img_h)
+        if seg: seg_paths.append(seg)
+    if not seg_paths:
+        return _fallback_scroll(shot, td, ffmpeg, seconds)
+
+    # concat the shots
+    page_vid = os.path.join(td, "page_tour.mp4")
+    listf = os.path.join(td, "tour_list.txt")
+    with open(listf, "w") as f:
+        for s in seg_paths:
+            f.write(f"file '{Path(s).as_posix()}'\n")
     try:
-        scaled_w = VIDEO_W
-        # 1.2s hold at the top (title/price/coupon), then ease-scroll the rest
-        hold = 1.2
-        span = max(0.1, seconds - hold)
-        prog = f"max(0\\,(t-{hold:.2f}))/{span:.2f}"           # 0..1 after the hold
-        ease = f"(1-cos(PI*min(1\\,{prog})))/2"                # cosine ease-in-out
-        crop_x = f"(iw-{VIDEO_W})/2"
-        crop_y = f"(ih-{VIDEO_H})*{ease}"
-        vf = (f"scale={scaled_w}:-1,"
-              f"crop={VIDEO_W}:{VIDEO_H}:{crop_x}:'{crop_y}',"
-              f"setsar=1")
+        subprocess.run([ffmpeg, "-y"] + _FF_LOG +
+                       ["-f", "concat", "-safe", "0", "-i", listf,
+                        "-c", "copy", page_vid], check=True, timeout=120)
+        log(f"  ✓ Guided-tour video: {probe_duration(page_vid, ffmpeg):.1f}s")
+        return page_vid
+    except Exception as e:
+        log(f"  tour concat failed: {e}")
+        return seg_paths[0]
+
+
+def _build_zoom_shot(shot, td, ffmpeg, idx, a, win_h, secs, img_w, img_h):
+    """One camera stop: frame a 9:16 window around the element, scaled to fill,
+    with a slow push-in (zoom) for life."""
+    cx = a["x"] + a["w"] / 2.0
+    cy = a["y"] + a["h"] / 2.0
+    win_h = float(min(win_h, img_h))
+    win_w = win_h * VIDEO_W / VIDEO_H
+    if win_w > img_w:                      # element wider than a 9:16 slice
+        win_w = float(img_w)
+        win_h = win_w * VIDEO_H / VIDEO_W
+    x = min(max(cx - win_w / 2, 0), img_w - win_w)
+    y = min(max(cy - win_h / 2, 0), img_h - win_h)
+    seg = os.path.join(td, f"shot_{idx}.mp4")
+    # crop the framed window, scale to target, then a gentle 1.0→1.08 push-in
+    vf = (f"crop={int(win_w)}:{int(win_h)}:{int(x)}:{int(y)},"
+          f"scale={VIDEO_W}:{VIDEO_H},"
+          f"zoompan=z='min(zoom+0.0009,1.08)':d={int(secs*FPS)}"
+          f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={VIDEO_W}x{VIDEO_H}:fps={FPS},"
+          f"setsar=1")
+    try:
+        subprocess.run([ffmpeg, "-y"] + _FF_LOG + [
+            "-loop", "1", "-t", f"{secs:.2f}", "-i", shot,
+            "-vf", vf, "-r", str(FPS), "-pix_fmt", "yuv420p",
+        ] + _FF_ENCODE + ["-an", seg], check=True, timeout=90)
+        return seg
+    except Exception as e:
+        log(f"  shot {idx} ({int(win_w)}x{int(win_h)}) failed: {e}")
+        return None
+
+
+def _fallback_scroll(shot, td, ffmpeg, seconds):
+    """Eased top→bottom scroll — used only when no anchors are found."""
+    page_vid = os.path.join(td, "page_scroll.mp4")
+    hold = 1.0
+    span = max(0.1, seconds - hold)
+    prog = f"max(0\\,(t-{hold:.2f}))/{span:.2f}"
+    ease = f"(1-cos(PI*min(1\\,{prog})))/2"
+    vf = (f"scale={VIDEO_W}:-1,"
+          f"crop={VIDEO_W}:{VIDEO_H}:(iw-{VIDEO_W})/2:'(ih-{VIDEO_H})*{ease}',setsar=1")
+    try:
         subprocess.run([ffmpeg, "-y"] + _FF_LOG + [
             "-loop", "1", "-t", f"{seconds:.2f}", "-i", shot,
             "-vf", vf, "-r", str(FPS), "-pix_fmt", "yuv420p",
         ] + _FF_ENCODE + ["-an", page_vid], check=True, timeout=180)
-        log(f"  ✓ Scrolling page video: {seconds:.1f}s (1.2s top hold + eased scroll)")
         return page_vid
     except Exception as e:
-        log(f"  scroll video build failed: {e}"); return None
+        log(f"  fallback scroll failed: {e}"); return None
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
 def probe_duration(path: str, ffmpeg: str) -> float:
@@ -392,12 +525,12 @@ def main():
             try:
                 r = requests.get(AVATAR_CLIP_URL, timeout=180); r.raise_for_status()
                 with open(tmp, "wb") as f: f.write(r.content)
-                seconds = max(8.0, probe_duration(tmp, ffmpeg) or 14.0)
+                seconds = max(8.0, probe_duration(tmp, ffmpeg) or 18.0)
             except Exception:
-                seconds = 14.0
+                seconds = 18.0
         else:
-            seconds = 14.0
-        log(f"[3] Recording scrolling/zooming Amazon page ({seconds:.0f}s)…")
+            seconds = 18.0
+        log(f"[3] Building guided-tour Amazon page video ({seconds:.0f}s)…")
 
         # 3) Scrolling page video
         page_vid = record_amazon_page(p["asin"], td, ffmpeg, seconds, font)
