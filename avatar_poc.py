@@ -318,14 +318,14 @@ return out;
 """
 
 # Order the camera visits its stops, with how tall a window to frame each
-# (smaller window = tighter zoom). Height is in source px.
+# (bigger window = more context, calmer zoom). Height is in source px.
+# None = frame to the element's own height (used for the product image).
 _SHOT_PLAN = [
-    ("image",   1100),   # the product, generous frame
-    ("price",    520),   # zoom to the deal price
-    ("bought",   360),   # tight zoom on "10K+ bought last month"
-    ("rating",   360),   # tight zoom on the stars
-    ("count",    420),   # "12,394 ratings"
-    ("reviews",  900),   # a written review
+    ("image",   None),   # the product image, framed to its real size
+    ("price",    680),   # the deal price + coupon, with context
+    ("bought",   560),   # "10K+ bought last month" with surrounding text
+    ("rating",   560),   # the stars + rating, with context
+    ("reviews", 1000),   # a written review
 ]
 
 def record_amazon_page(asin: str, td: str, ffmpeg: str, seconds: float, font: str):
@@ -403,8 +403,9 @@ def record_amazon_page(asin: str, td: str, ffmpeg: str, seconds: float, font: st
         return _fallback_scroll(shot, td, ffmpeg, seconds)
 
     per = max(2.2, seconds / len(stops))
-    log(f"  Guided tour: {len(stops)} stops × {per:.1f}s "
-        f"({', '.join(n for n, _, _ in stops)})")
+    log(f"  Guided tour: {len(stops)} stops × {per:.1f}s")
+    for n, a, _ in stops:
+        log(f"    • {n:8s} at y={int(a['y'])}  ({int(a['w'])}x{int(a['h'])})")
 
     seg_paths = []
     for i, (name, a, win_h) in enumerate(stops):
@@ -435,8 +436,16 @@ def record_amazon_page(asin: str, td: str, ffmpeg: str, seconds: float, font: st
 
 
 def _build_zoom_shot(shot, td, ffmpeg, idx, a, win_h, secs, img_w, img_h):
-    """One camera stop: frame a 9:16 window around the element, scaled to fill,
-    with a slow push-in (zoom) for life."""
+    """One camera stop: frame a 9:16 window around the element and push in smoothly.
+
+    Jitter fix: zoompan positions its camera at whole pixels, so on a small image
+    the sub-pixel drift rounds back and forth = the left/right shake. We upscale
+    the cropped region 2× BEFORE zoompan, so that rounding is half a pixel on the
+    final 720×1280 output — invisible. The zoom is driven by output-frame number
+    ('on') for a perfectly linear, calm push-in.
+    """
+    if win_h is None:                      # frame the product image to its own size
+        win_h = a["h"] * 1.15
     cx = a["x"] + a["w"] / 2.0
     cy = a["y"] + a["h"] / 2.0
     win_h = float(min(win_h, img_h))
@@ -446,21 +455,21 @@ def _build_zoom_shot(shot, td, ffmpeg, idx, a, win_h, secs, img_w, img_h):
         win_h = win_w * VIDEO_H / VIDEO_W
     x = min(max(cx - win_w / 2, 0), img_w - win_w)
     y = min(max(cy - win_h / 2, 0), img_h - win_h)
-    seg = os.path.join(td, f"shot_{idx}.mp4")
-    # crop the framed window, scale to target, then a gentle 1.0→1.08 push-in
+    seg    = os.path.join(td, f"shot_{idx}.mp4")
+    frames = max(2, int(secs * FPS))
+    up_w, up_h = VIDEO_W * 2, VIDEO_H * 2  # 2× working canvas → smooth, no jitter
     vf = (f"crop={int(win_w)}:{int(win_h)}:{int(x)}:{int(y)},"
-          f"scale={VIDEO_W}:{VIDEO_H},"
-          f"zoompan=z='min(zoom+0.0009,1.08)':d={int(secs*FPS)}"
-          f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={VIDEO_W}x{VIDEO_H}:fps={FPS},"
+          f"scale={up_w}:{up_h}:flags=bicubic,"
+          f"zoompan=z='min(1+0.05*on/{frames},1.05)':d={frames}"
+          f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+          f":s={VIDEO_W}x{VIDEO_H}:fps={FPS},"
           f"setsar=1")
     try:
-        # IMPORTANT: single looped input (no input -t). zoompan d= sets the frame
-        # count; -t on the OUTPUT caps the clip. Putting -t on the input limits the
-        # input frames and zoompan then multiplies them → multi-minute clips.
+        # single looped input; zoompan d= sets the frame count; -t caps the OUTPUT.
         subprocess.run([ffmpeg, "-y"] + _FF_LOG + [
             "-loop", "1", "-i", shot,
             "-vf", vf, "-r", str(FPS), "-t", f"{secs:.2f}", "-pix_fmt", "yuv420p",
-        ] + _FF_ENCODE + ["-an", seg], check=True, timeout=90)
+        ] + _FF_ENCODE + ["-an", seg], check=True, timeout=120)
         return seg
     except Exception as e:
         log(f"  shot {idx} ({int(win_w)}x{int(win_h)}) failed: {e}")
