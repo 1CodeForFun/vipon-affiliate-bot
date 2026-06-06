@@ -566,7 +566,7 @@ def generate_social_post(link, code, discount_pct, expiry, title, price):
             continue   # expired key — don't waste a round-trip
         try:
             api_url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-                       f"gemini-2.0-flash:generateContent?key={gemini_key}")
+                       f"gemini-2.5-flash:generateContent?key={gemini_key}")
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"temperature": 0.95, "maxOutputTokens": 200}

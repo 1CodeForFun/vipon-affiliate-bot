@@ -105,7 +105,7 @@ def diagnose_keys():
         try:
             r = requests.post(
                 "https://generativelanguage.googleapis.com/v1beta/models/"
-                f"gemini-2.0-flash:generateContent?key={k}",
+                f"gemini-2.5-flash:generateContent?key={k}",
                 json={"contents": [{"parts": [{"text": "hi"}]}],
                       "generationConfig": {"maxOutputTokens": 1}},
                 timeout=20)
@@ -205,7 +205,9 @@ def friendly_date(expiry: str) -> str:
 # ─── 2. GEMINI: SCENARIO + SCRIPT ─────────────────────────────────────────────
 # Try several models — each has a separate free-tier quota pool, so a 429 on one
 # may still succeed on another.
-_TEXT_MODELS = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+# 2.5-flash first — it's the model with a confirmed free-tier allowance in 2026.
+# 2.0-flash has no free quota on new accounts, so leading with it 429s every call.
+_TEXT_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash-8b"]
 
 def gemini_text(prompt: str, keys: list, max_tokens: int = 350) -> str:
     for model in _TEXT_MODELS:
