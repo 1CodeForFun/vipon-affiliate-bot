@@ -140,7 +140,27 @@ FONT_CANDIDATES = (
 #  HELPERS
 # ════════════════════════════════════════════════════════════════
 
-BAD_CODES = {"CATEGORIES","CATEGORY","DISCOUNT","PROMOTION","VOUCHER","COUPON","COLLECTION"}
+# Words that are NEVER a real coupon code — Vipon category names + page UI words.
+# When the "Get Code" reveal fails (daily limit), the fallback scan can grab one of
+# these (e.g. "ELECTRONICS" from the category nav). Blocking them makes the product
+# skip instead of being saved with a wrong code — which also lets the account-
+# rotation trigger and recover with a fresh account.
+BAD_CODES = {
+    # generic UI / promo words
+    "CATEGORIES", "CATEGORY", "DISCOUNT", "DISCOUNTS", "PROMOTION", "PROMOTIONS",
+    "VOUCHER", "VOUCHERS", "COUPON", "COUPONS", "COLLECTION", "COLLECTIONS",
+    "FEATURED", "TRENDING", "CLEARANCE", "INSTANT", "GIVEAWAY", "NEWSLETTER",
+    "SUBSCRIBE", "DELIVERY", "SHIPPING", "AMAZON", "VERIFIED", "DEALS", "BRANDS",
+    "DAILY", "SELLER", "PRODUCTS", "PRODUCT", "REVEAL", "GETCODE", "USECODE",
+    # Vipon / Amazon category names
+    "ELECTRONICS", "ELECTRONIC", "BEAUTY", "PERSONAL", "CLOTHING", "APPAREL",
+    "FASHION", "KITCHEN", "HOME", "GARDEN", "OUTDOORS", "OUTDOOR", "SPORTS",
+    "TOOLS", "AUTOMOTIVE", "OFFICE", "HEALTH", "HOUSEHOLD", "TOYS", "GAMES",
+    "BABY", "JEWELRY", "GROCERY", "FURNITURE", "ACCESSORIES", "SUPPLIES",
+    "IMPROVEMENT", "INDUSTRIAL", "SCIENTIFIC", "MUSICAL", "INSTRUMENTS",
+    "HANDMADE", "CAMERA", "PHOTO", "COMPUTERS", "SOFTWARE", "VIDEO", "MOVIES",
+    "MUSIC", "BOOKS", "PETSUPPLIES", "WELLNESS",
+}
 CODE_RE   = re.compile(r"\b([A-Z0-9]{6,12})\b")
 ASIN_RE   = re.compile(r"\bB0[A-Z0-9]{8}\b", re.I)
 
@@ -234,49 +254,86 @@ def _social_score(units_sold: int, stars: float, rating_count: int) -> float:
     base    = units_sold if units_sold else 1
     return round(base * quality * volume, 1)
 
-# Circuit breaker: if Amazon blocks the social fetch (captcha on CI IPs) a few
-# times in a row, stop trying for the rest of the run so it can't slow the scrape.
-_SOCIAL_FAILS = 0
-_SOCIAL_OFF   = False
+# Social proof needs a real browser — Amazon blocks plain requests from CI/datacenter
+# IPs (that's why scores were all zero). A single cached headless Chrome handles all
+# products; circuit-breaks after repeated blocks so it can't stall the scrape.
+_SOCIAL_FAILS  = 0
+_SOCIAL_OFF    = False
+_SOCIAL_DRIVER = None
+
+_SOCIAL_JS = r"""
+function txt(el){ return el ? (el.innerText||el.textContent||'').trim() : ''; }
+const out = {bought:'', rating:'', count:''};
+{ const els = document.querySelectorAll('span,div,a');
+  for (const e of els){ const t=(e.innerText||'').trim();
+    if(/bought in past/i.test(t) && t.length<60){ out.bought=t; break; } } }
+out.rating = txt(document.querySelector("[data-hook='rating-out-of-text']")
+           || document.querySelector('#acrPopover')
+           || document.querySelector('#averageCustomerReviews'));
+out.count  = txt(document.querySelector('#acrCustomerReviewText'));
+return out;
+"""
+
+def _get_social_driver():
+    global _SOCIAL_DRIVER
+    if _SOCIAL_DRIVER is not None:
+        return _SOCIAL_DRIVER
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        binary = next((b for b in ("/usr/bin/chromium-browser", "/usr/bin/chromium",
+                                   "/usr/bin/google-chrome") if os.path.exists(b)), "")
+        drv = next((d for d in ("/usr/bin/chromedriver",
+                                "/usr/lib/chromium-browser/chromedriver",
+                                "/usr/bin/chromium-chromedriver") if os.path.exists(d)), "")
+        opts = Options()
+        for a in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+                  "--disable-gpu", "--hide-scrollbars", "--lang=en-US", "--window-size=440,900"):
+            opts.add_argument(a)
+        opts.add_argument("--user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                          "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
+        if binary: opts.binary_location = binary
+        _SOCIAL_DRIVER = webdriver.Chrome(service=(Service(executable_path=drv) if drv else Service()), options=opts)
+        return _SOCIAL_DRIVER
+    except Exception as e:
+        log(f"  ⚠️ social driver init failed: {e}")
+        return None
 
 def fetch_social_proof(asin: str, tld: str = "com") -> dict:
-    """Best-effort social proof from the Amazon page HTML (no Selenium).
-    Returns {'units': int, 'stars': float, 'ratings': int, 'score': float}.
-    Self-disables after repeated blocks so a captcha-walled Amazon can't bloat
-    the scrape."""
+    """Social proof via a cached headless Chrome (units sold + stars + ratings) →
+    compounded score. Best-effort; self-disables after repeated blocks/errors."""
     global _SOCIAL_FAILS, _SOCIAL_OFF
     out = {"units": 0, "stars": 0.0, "ratings": 0, "score": 0.0}
     if _SOCIAL_OFF or not asin:
         return out
+    driver = _get_social_driver()
+    if driver is None:
+        _SOCIAL_OFF = True
+        return out
     try:
-        r = requests.get(
-            f"https://www.amazon.{tld}/dp/{asin}?th=1&psc=1",
-            headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.8"},
-            timeout=12,
-        )
-        body = r.text or ""
-        blocked = (not r.ok) or ("captcha" in body[:5000].lower()) or ("robot check" in body[:5000].lower())
-        if blocked:
+        driver.get(f"https://www.amazon.{tld}/dp/{asin}?th=1&psc=1")
+        time.sleep(2.0)
+        page = (driver.page_source or "")[:5000].lower()
+        if "captcha" in page or "robot check" in page:
             _SOCIAL_FAILS += 1
             if _SOCIAL_FAILS >= 3:
                 _SOCIAL_OFF = True
-                log("  ⚠️ social proof: Amazon blocking — disabled for the rest of this run")
+                log("  ⚠️ social proof: Amazon blocking — disabled for this run")
             return out
+        data = driver.execute_script(_SOCIAL_JS) or {}
         _SOCIAL_FAILS = 0
-        m_bought = re.search(r"([\d.,]+\+?\s*[KkMm]?)\+?\s*bought in past month", body)
-        m_stars  = re.search(r"(\d(?:\.\d)?)\s*out of\s*5\s*stars", body)
-        m_count  = re.search(r"([\d,]+)\s*(?:global\s*)?ratings?", body)
-        out["units"]   = _parse_units_sold(m_bought.group(1)) if m_bought else 0
-        out["stars"]   = _parse_stars(m_stars.group(1)) if m_stars else 0.0
-        out["ratings"] = _parse_rating_count(m_count.group(1)) if m_count else 0
+        out["units"]   = _parse_units_sold(data.get("bought", ""))
+        out["stars"]   = _parse_stars(data.get("rating", ""))
+        out["ratings"] = _parse_rating_count(data.get("count", ""))
         out["score"]   = _social_score(out["units"], out["stars"], out["ratings"])
     except Exception as e:
         _SOCIAL_FAILS += 1
         if _SOCIAL_FAILS >= 3:
             _SOCIAL_OFF = True
-            log("  ⚠️ social proof: repeated errors — disabled for the rest of this run")
+            log("  ⚠️ social proof: repeated errors — disabled for this run")
         else:
-            log(f"  ⚠️ social proof fetch failed for {asin}: {e}")
+            log(f"  ⚠️ social proof failed for {asin}: {e}")
     return out
 
 def _normalize_discount(raw: str) -> str:
@@ -2248,6 +2305,13 @@ def main():
         log(f"✓ CA row written for PID {pid} (social score {_sp.get('score',0)})")
 
     log(f"✅ CA done — {len(scraped_ca)} products processed")
+
+    # Free the social-proof Chrome before the seller-form phases
+    global _SOCIAL_DRIVER
+    if _SOCIAL_DRIVER is not None:
+        try: _SOCIAL_DRIVER.quit()
+        except Exception: pass
+        _SOCIAL_DRIVER = None
 
     # ── PHASE 3: US Seller Form Intake ───────────────────────────
     process_seller_forms(ws)

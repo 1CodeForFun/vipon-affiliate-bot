@@ -462,6 +462,7 @@ def main() -> None:
             except Exception as e:
                 log(f"ERROR (YT {yt_label}): {e}"); errors.append(f"YT-{yt_label}: {e}")
 
+        ws.update_acell(f"N{sheet_row}", video_url)   # save the Cloudinary reel link
         ws.update_acell(f"P{sheet_row}", "Yes")
         if yt_success:
             ws.update_acell(f"R{sheet_row}", "Yes")
@@ -490,6 +491,7 @@ def main() -> None:
             else:
                 _, tok2, _ = load_fb_token(FB_FRESHDEALS_TOKEN); pid2 = FB_CANADA_PAGE_ID
             post_fb_reel(pid2, tok2, video_url2, product2["title"] or "Deal Alert!", product2["aff_link"])
+            ws2.update_acell(f"N{sheet_row2}", video_url2)   # save Cloudinary reel link
             ws2.update_acell(f"P{sheet_row2}", "Yes")
             log(f"CA row {sheet_row2}: Facebook reel posted.")
         except Exception as e:
