@@ -324,7 +324,7 @@ out.rating_count = txt(document.querySelector('#acrCustomerReviewText'));
 return out;
 """
 
-def capture_page(asin, td, ffmpeg):
+def capture_page(asin, td, ffmpeg, tld="com"):
     """Return (gallery_image_urls, screenshot_path, img_w, img_h, price_box, reviews_box)."""
     try:
         from selenium import webdriver
@@ -346,7 +346,7 @@ def capture_page(asin, td, ffmpeg):
     social = {"bought": "", "rating": "", "rating_count": ""}
     try:
         driver.set_window_size(440, 950)
-        driver.get(f"https://www.amazon.com/dp/{asin}?th=1&psc=1")
+        driver.get(f"https://www.amazon.{tld}/dp/{asin}?th=1&psc=1")
         time.sleep(5)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight*0.55);"); time.sleep(1.3)
         driver.execute_script("window.scrollTo(0,0);"); time.sleep(0.7)
@@ -515,144 +515,123 @@ def gen_beats(duration, td, ffmpeg):
             "-t", str(duration), "-c:a", "aac", out], check=True, capture_output=True)
         return out
 
-# ─── MAIN ────────────────────────────────────────────────────────────────────────
+# ─── REUSABLE BUILDER ──────────────────────────────────────────────────────────
+def build_concept_video(p, keys, ffmpeg, font, td, vo_text=None, tld="com"):
+    """Build the v4 concept reel and return the LOCAL mp4 path (no upload).
+
+    p: dict with title, asin, price, code, disc, expiry, cover, and either
+       'aff_link' or 'link'. vo_text = the VO script (Col O / piece 1); if None,
+       it's generated. Used by both this test and the production publisher.
+    """
+    new_v = _num(p["price"]); pct = _num(p["disc"])
+    old_v = (new_v / (1 - pct/100)) if (new_v and pct and pct < 100) else None
+
+    if not vo_text:
+        vo_text, _piece2, _expd = build_fb_pieces(p, keys)
+    log(f"  VO text: {vo_text[:90]}…")
+
+    imgs, shot, pw, ph, price_box, rev_box, title_box, _social = capture_page(
+        p["asin"], td, ffmpeg, tld=tld)
+    if p.get("cover"):
+        imgs = [p["cover"]] + [u for u in imgs if u != p["cover"]]
+    if not imgs:
+        log("  ⚠️ no product images"); return None
+
+    # VO FIRST so frames are sized to it (no freezing)
+    vo_wav = os.path.join(td, "vo.wav"); vo_aac = os.path.join(td, "vo.aac")
+    wav = gemini_tts(vo_text, keys)
+    have_vo, vo_dur = False, 0.0
+    if wav:
+        open(vo_wav, "wb").write(wav)
+        try:
+            subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-i", vo_wav, "-c:a", "aac", "-b:a", "128k", vo_aac],
+                           check=True, timeout=60)
+            vo_dur = probe_duration(vo_aac, ffmpeg); have_vo = vo_dur > 0
+            log(f"  ✓ VO {vo_dur:.1f}s")
+        except Exception as e:
+            log(f"  VO convert failed: {e}")
+    else:
+        log("  ⚠️ Gemini TTS unavailable — beats only")
+
+    plan = [("image", imgs[0], 1.5)]
+    if len(imgs) > 1:      plan.append(("image", imgs[1], 1.0))
+    if shot and price_box: plan.append(("price", None, 2.6))
+    if shot and rev_box:   plan.append(("reviews", None, 1.5))
+    for u in imgs[2:6]:    plan.append(("image", u, 1.0))
+
+    target = (vo_dur + 0.4) if have_vo else 16.0
+    PRICE_CAP, MIN_SECS = 6.5, 1.8
+    tw = sum(w for _, _, w in plan) or 1
+    durs = [target * w / tw for _, _, w in plan]
+    for i, (kind, _, _) in enumerate(plan):
+        if kind == "price" and durs[i] > PRICE_CAP:
+            excess = durs[i] - PRICE_CAP; durs[i] = PRICE_CAP
+            others = [j for j in range(len(plan)) if j != i]
+            ow = sum(plan[j][2] for j in others) or 1
+            for j in others: durs[j] += excess * plan[j][2] / ow
+    durs = [max(d, MIN_SECS) for d in durs]
+
+    segs = []
+    for i, (kind, payload, _) in enumerate(plan):
+        s = os.path.join(td, f"f{i}.mp4"); secs = durs[i]; ok = False
+        if kind == "image":
+            ok = seg_from_image(payload, s, td, ffmpeg, p["disc"], p["code"], font, i, secs)
+        elif kind == "price":
+            old_txt = f"${old_v:.2f}" if old_v else ""
+            new_txt = f"${new_v:.2f}" if new_v else (p["price"] or "")
+            ok = seg_price(shot, price_box, s, td, ffmpeg, pw, ph, p["disc"], p["code"],
+                           font, old_txt, new_txt, secs, title_box=title_box)
+        elif kind == "reviews":
+            ok = seg_from_crop(shot, rev_box, s, td, ffmpeg, pw, ph, p["disc"], p["code"],
+                               font, "LOVED BY REAL BUYERS", i, secs,
+                               zoom_mult=6.0, win_min=950, win_max=1500)
+        if ok: segs.append(s); log(f"  ✓ {kind} ({secs:.1f}s)")
+    if not segs:
+        log("  ⚠️ no frames built"); return None
+
+    listf = os.path.join(td, "list.txt"); concat = os.path.join(td, "concat.mp4")
+    with open(listf, "w") as f:
+        for s in segs: f.write(f"file '{Path(s).as_posix()}'\n")
+    subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-f", "concat", "-safe", "0", "-i", listf,
+                    "-c", "copy", concat], check=True, timeout=120)
+    vid_dur = probe_duration(concat, ffmpeg)
+
+    out = os.path.join(td, "final.mp4")
+    if have_vo:
+        tail = max(0.0, vid_dur - vo_dur)
+        if tail < 1.0:
+            subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-i", concat, "-i", vo_aac,
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-shortest", out], check=True, timeout=120)
+        else:
+            beats = gen_beats(tail, td, ffmpeg)
+            mixed = os.path.join(td, "mix.aac"); dly = int(vo_dur*1000)
+            subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-i", vo_aac, "-i", beats,
+                "-filter_complex", f"[1]adelay={dly}|{dly}[b];[0][b]amix=inputs=2:duration=longest[a]",
+                "-map", "[a]", "-c:a", "aac", "-b:a", "128k", mixed], check=True, timeout=120)
+            subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-i", concat, "-i", mixed,
+                "-c:v", "copy", "-c:a", "aac", "-shortest", out], check=True, timeout=120)
+    else:
+        beats = gen_beats(vid_dur, td, ffmpeg)
+        subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-i", concat, "-i", beats,
+            "-c:v", "copy", "-c:a", "aac", "-shortest", out], check=True, timeout=120)
+    log(f"  ✓ final {probe_duration(out, ffmpeg):.1f}s ({os.path.getsize(out):,} bytes)")
+    return out
+
+
+# ─── MAIN (test harness) ───────────────────────────────────────────────────────
 def main():
     log("=== reel_concept_test.py starting ===")
     keys, ffmpeg, font = _read_gemini_keys(), _which_ffmpeg(), _find_font()
     log(f"Gemini keys: {len(keys)} | ffmpeg: {ffmpeg} | font: {'yes' if font else 'no'}")
-
     with tempfile.TemporaryDirectory(prefix="reel_concept_") as td:
         log("\n[1] Picking product…")
         p = pick_product()
         if not p: raise RuntimeError("No product found in Sheet1")
         log(f"  {p['title'][:70]} | ASIN {p['asin']} | {p['disc']} off | {p['price']}")
-
-        # discount banner: was → now
-        new_v = _num(p["price"]); pct = _num(p["disc"])
-        old_v = (new_v / (1 - pct/100)) if (new_v and pct and pct < 100) else None
-        banner = (f"WAS ${old_v:.2f}   NOW ${new_v:.2f}" if (old_v and new_v)
-                  else (f"NOW {p['price']}" if p["price"] else ""))
-
-        log("\n[2] Generating FB post (2 pieces)…")
-        piece1, piece2, expd = build_fb_pieces(p, keys)
-        log("\n--- FB POST PIECE 1 (spoken VO + body) ---\n" + piece1)
-        log("\n--- FB POST PIECE 2 (link + code, text only) ---\n" + piece2)
-        log("\n--- FULL FB POST (piece1 + piece2) ---\n" + piece1 + "\n\n" + piece2 + "\n")
-
-        log("[3] Capturing Amazon phone page (gallery + price + reviews + social)…")
-        imgs, shot, pw, ph, price_box, rev_box, title_box, social = capture_page(p["asin"], td, ffmpeg)
-        if p["cover"]:
-            imgs = [p["cover"]] + [u for u in imgs if u != p["cover"]]
-        if not imgs:
-            raise RuntimeError("No product images available")
-
-        # Social-proof score (this is what product SELECTION will rank on)
-        units = parse_units_sold(social["bought"])
-        stars = parse_stars(social["rating"])
-        rcnt  = parse_count(social["rating_count"])
-        sscore = social_score(units, stars, rcnt)
-        log(f"\n[3b] Social proof → units sold/mo: {units} | stars: {stars} | "
-            f"ratings: {rcnt} | SOCIAL SCORE: {sscore}")
-
-        # VO FIRST — so we can size the frames to the voiceover (no freezing)
-        log("\n[4] Generating VO (Gemini TTS, piece 1)…")
-        vo_wav = os.path.join(td, "vo.wav"); vo_aac = os.path.join(td, "vo.aac")
-        wav = gemini_tts(piece1, keys)
-        have_vo, vo_dur = False, 0.0
-        if wav:
-            open(vo_wav, "wb").write(wav)
-            try:
-                subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-i", vo_wav, "-c:a", "aac", "-b:a", "128k", vo_aac],
-                               check=True, timeout=60)
-                vo_dur = probe_duration(vo_aac, ffmpeg); have_vo = vo_dur > 0
-                log(f"  ✓ VO {vo_dur:.1f}s")
-            except Exception as e:
-                log(f"  VO convert failed: {e}")
-        else:
-            log("  ⚠️ Gemini TTS unavailable — beats only")
-
-        # ── Plan the frames (only those available), with relative weights ──
-        plan = [("image", imgs[0], 1.5)]                       # cover (held longer)
-        if len(imgs) > 1:        plan.append(("image", imgs[1], 1.0))   # 2nd image
-        if shot and price_box:   plan.append(("price", None, 2.6))      # price (capped)
-        if shot and rev_box:     plan.append(("reviews", None, 1.5))    # reviews/sold
-        for u in imgs[2:6]:      plan.append(("image", u, 1.0))         # rest of gallery
-
-        # Distribute the VO length across frames; cap the price frame so it doesn't
-        # dominate, and push the slack onto the carousel frames (never freeze one).
-        target = (vo_dur + 0.4) if have_vo else 16.0
-        PRICE_CAP, MIN_SECS = 6.5, 1.8
-        tw = sum(w for _, _, w in plan) or 1
-        durs = [target * w / tw for _, _, w in plan]
-        for i, (kind, _, _) in enumerate(plan):
-            if kind == "price" and durs[i] > PRICE_CAP:
-                excess = durs[i] - PRICE_CAP; durs[i] = PRICE_CAP
-                others = [j for j in range(len(plan)) if j != i]
-                ow = sum(plan[j][2] for j in others) or 1
-                for j in others: durs[j] += excess * plan[j][2] / ow
-        durs = [max(d, MIN_SECS) for d in durs]
-
-        log("\n[5] Building frames (sized to VO)…")
-        segs = []
-        for i, (kind, payload, _) in enumerate(plan):
-            s = os.path.join(td, f"f{i}.mp4"); secs = durs[i]; ok = False
-            if kind == "image":
-                ok = seg_from_image(payload, s, td, ffmpeg, p["disc"], p["code"], font, i, secs)
-            elif kind == "price":
-                old_txt = f"${old_v:.2f}" if old_v else ""
-                new_txt = f"${new_v:.2f}" if new_v else (p["price"] or "")
-                ok = seg_price(shot, price_box, s, td, ffmpeg, pw, ph, p["disc"], p["code"],
-                               font, old_txt, new_txt, secs, title_box=title_box)
-            elif kind == "reviews":
-                ok = seg_from_crop(shot, rev_box, s, td, ffmpeg, pw, ph, p["disc"], p["code"],
-                                   font, "LOVED BY REAL BUYERS", i, secs,
-                                   zoom_mult=6.0, win_min=950, win_max=1500)
-            if ok: segs.append(s); log(f"  ✓ {kind} ({secs:.1f}s)")
-
-        if not segs:
-            raise RuntimeError("No frames built")
-
-        # concat
-        log("\n[6] Concatenating frames…")
-        listf = os.path.join(td, "list.txt")
-        concat = os.path.join(td, "concat.mp4")
-        with open(listf, "w") as f:
-            for s in segs: f.write(f"file '{Path(s).as_posix()}'\n")
-        subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-f", "concat", "-safe", "0", "-i", listf,
-                        "-c", "copy", concat], check=True, timeout=120)
-        vid_dur = probe_duration(concat, ffmpeg)
-        log(f"  video: {vid_dur:.1f}s ({len(segs)} frames)")
-
-        # mix audio
-        log("\n[7] Mixing audio…")
-        out = os.path.join(td, "final.mp4")
-        if have_vo:
-            tail = max(0.0, vid_dur - vo_dur)
-            if tail < 1.0:
-                subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-i", concat, "-i", vo_aac,
-                    "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-shortest", out], check=True, timeout=120)
-            else:
-                beats = gen_beats(tail, td, ffmpeg)
-                mixed = os.path.join(td, "mix.aac")
-                dly = int(vo_dur*1000)
-                subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-i", vo_aac, "-i", beats,
-                    "-filter_complex", f"[1]adelay={dly}|{dly}[b];[0][b]amix=inputs=2:duration=longest[a]",
-                    "-map", "[a]", "-c:a", "aac", "-b:a", "128k", mixed], check=True, timeout=120)
-                subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-i", concat, "-i", mixed,
-                    "-c:v", "copy", "-c:a", "aac", "-shortest", out], check=True, timeout=120)
-        else:
-            beats = gen_beats(vid_dur, td, ffmpeg)
-            subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-i", concat, "-i", beats,
-                "-c:v", "copy", "-c:a", "aac", "-shortest", out], check=True, timeout=120)
-
-        log(f"  ✓ final {probe_duration(out, ffmpeg):.1f}s ({os.path.getsize(out):,} bytes)")
-
+        out = build_concept_video(p, keys, ffmpeg, font, td)
+        if not out: raise RuntimeError("build failed")
         url = cloud_upload(out, f"{CLOUD_FOLDER}/reel_{p['asin']}_{int(time.time())}")
-        log("\n" + "=" * 60)
-        log("  ARTIFACTS")
-        log("=" * 60)
-        log(f"  REEL : {url or '⚠️ upload failed (see log)'}")
-        log("=" * 60)
+        log("\n" + "=" * 60 + f"\n  REEL : {url or '⚠️ upload failed'}\n" + "=" * 60)
     log("=== reel_concept_test.py done ===")
 
 

@@ -41,7 +41,8 @@ TIMEOUT              = 60
 
 # Column numbers (1-based)
 COL_A_LINK       = 1
-COL_O_POST       = 15
+COL_F_CODE       = 6    # discount code — appended to the post body
+COL_O_POST       = 15   # VO/body copy (piece 1) — no link, no spelled code
 COL_Q_POSTED_FLAG = 17
 
 DONE_VALUE = "Yes"
@@ -142,6 +143,7 @@ def post_sheet(ws, label: str, page_id: str, page_token: str, graph_api_version:
 
         link       = normalize_text(row[COL_A_LINK - 1])
         post_text  = normalize_text(row[COL_O_POST - 1])
+        code       = normalize_text(row[COL_F_CODE - 1])
         posted_flag = normalize_text(row[COL_Q_POSTED_FLAG - 1])
 
         if not link:
@@ -159,13 +161,19 @@ def post_sheet(ws, label: str, page_id: str, page_token: str, graph_api_version:
             skipped_count += 1
             continue
 
+        # Col O is the VO/body copy (no code, no link). Append the discount code
+        # here so the FB text post shows it; the link goes in the link field.
+        message = post_text
+        if code:
+            message = f"{post_text}\n\n🏷️ Use code {code} at checkout"
+
         try:
             log(f"{label} Row {sheet_row_num}: posting to Facebook...")
             post_id, response_data = publish_link_post_to_facebook(
                 page_id=page_id,
                 page_token=page_token,
                 graph_api_version=graph_api_version,
-                message=post_text,
+                message=message,
                 link=link,
             )
             ws.update_acell(f"Q{sheet_row_num}", DONE_VALUE)

@@ -1,10 +1,10 @@
-name: Publish Reel (Hourly)
+name: Publish Reel
 
-# Runs every hour. Posts 2 reels per run (REELS_PER_RUN=2 in vipon_publisher.py).
-# Starts having reels to post at 11 AM CT (4 PM UTC) after the 6 AM scrape.
-# Exits cleanly when there are no more reels to post — no manual stopping needed.
+# Build-on-publish: each run selects the highest social-score unposted product,
+# builds the v4 concept video, and posts ONE reel (US to FB+IG+YT, CA to FB).
+# Triggered by cron-job.org on the 6 CT peak slots (8a/12p/2p/6p/8p/9p).
 on:
-  workflow_dispatch:  # triggered by cron-job.org every hour
+  workflow_dispatch:
 
 jobs:
   publish:
@@ -27,8 +27,20 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install system dependencies (FFmpeg + Chromium for the video builder)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg chromium-browser chromium-chromedriver
+
       - name: Install Python dependencies
-        run: pip install gspread oauth2client requests google-auth google-auth-oauthlib google-api-python-client
+        run: pip install gspread oauth2client requests selenium google-auth google-auth-oauthlib google-api-python-client
+
+      - name: Copy credential files for the video builder
+        run: |
+          cp secrets/cloudinary.json ~/cloudinary.json
+          [ -f secrets/geminipro.txt  ] && cp secrets/geminipro.txt  ~/geminipro.txt  || true
+          [ -f secrets/geminikey.txt  ] && cp secrets/geminikey.txt  ~/geminikey.txt  || true
+          [ -f secrets/geminikeys.txt ] && cp secrets/geminikeys.txt ~/geminikeys.txt || true
 
       - name: Publish reel
         env:

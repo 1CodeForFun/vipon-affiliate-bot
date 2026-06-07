@@ -589,10 +589,12 @@ def _build_post_prompt(code, discount_pct, expiry_date, title, price) -> str:
         "- Use smooth, natural sentences with commas for breathing, so it reads "
         "well aloud as a voiceover. No choppy one-word fragments.",
         f"- You MUST mention the price ({price}) and that the deal ends {expiry_date}.",
-        (f"- Tell readers to use code {code} at checkout."
+        ("- Refer to the discount code generically (e.g. 'use the code at checkout') "
+         "— do NOT spell out the actual code letters."
          if code else "- No discount code is needed for this deal."),
         "- Do NOT mention any link, URL, 'link in bio', 'link below', or 'click here'.",
         "- No hashtags. At most one emoji. No labels, no preamble.",
+        "This text is BOTH the post body and a spoken voiceover, so keep it clean.",
         "Return only the post text.",
     ]
     return "\n".join(lines)
@@ -622,10 +624,12 @@ def generate_social_post(link, code, discount_pct, expiry, title, price):
     # post never says "ends in 2 days" — viewers may see it days later.
     expiry_date = expiry_to_date_text(expiry) or expiry
 
+    # Col O is the VO/body copy ONLY — no link, no spelled-out code (FBP_ready
+    # appends the code; the link goes in the FB link field).
     fb_text  = (f"{discount_pct} off — now just {price}, but only until {expiry_date}. "
-                + (f"Use code {code} at checkout. " if code else "")
+                + ("Use the code at checkout. " if code else "")
                 + "Grab yours before it's gone!")
-    fallback = _finalize_post(fb_text, link)
+    fallback = _clean_post_text(fb_text)
 
     if os.getenv("VIPON_DISABLE_GPT", "0") in ("1","true","TRUE","yes","YES"):
         return fallback
@@ -659,7 +663,7 @@ def generate_social_post(link, code, discount_pct, expiry, title, price):
                          .get("text", "")).strip()
                 if txt:
                     log(f"  ✓ Post generated via Gemini (key {kidx+1}/{len(gemini_keys)})")
-                    return _finalize_post(txt, link)
+                    return _clean_post_text(txt)
             elif resp.status_code == 429:
                 log(f"  ⚠️ Gemini key {kidx+1}/{len(gemini_keys)} rate-limited — trying next")
                 continue
@@ -697,7 +701,7 @@ def generate_social_post(link, code, discount_pct, expiry, title, price):
                          .get("content", "")).strip()
                 if txt:
                     log("  ✓ Post generated via OpenAI")
-                    return _finalize_post(txt, link)
+                    return _clean_post_text(txt)
         except Exception as e:
             log(f"  ⚠️ OpenAI post error: {e}")
 
@@ -1873,19 +1877,9 @@ def process_seller_forms(ws_main) -> None:
             skipped += 1
             continue
 
-        # ── Build reel ────────────────────────────────────────────
+        # Build-on-publish: no video here; the publisher builds it at post time.
         t_short  = shorten_title(title, MAX_TITLE_LEN)
         reel_url = ""
-        try:
-            reel_url = make_and_upload_reel_from_images(asin, images, disc_norm, code, title, price)
-        except Exception as e:
-            log(f"  ⚠️ Reel failed for seller {asin}: {e}")
-
-        if not reel_url:
-            log(f"  ✗ Form row {row_idx}: video failed for {asin}")
-            form_ws.update_cell(row_idx, status_col + 1, "Video Failed")
-            skipped += 1
-            continue
 
         # ── Links + post text ─────────────────────────────────────
         aff_link       = get_affiliate_link(asin, "com")
@@ -2013,16 +2007,7 @@ def process_seller_forms_ca(ws2_main) -> None:
         platform_links = {k: aff_link for k in ["reel","ig","youtube","tiktok","pinterest"]}
 
         post_text = generate_social_post(aff_link, code, disc_txt, expiry, t_short, price)
-
-        try:
-            reel_url = make_and_upload_reel_from_images(
-                asin, images, disc_txt, code, t_short, price, expiry
-            )
-        except Exception as e:
-            log(f"  ⚠️ Reel failed for CA seller {asin}: {e}")
-            form_ws2.update_cell(row_idx, status_col + 1, "Video Failed")
-            skipped += 1
-            continue
+        reel_url = ""   # build-on-publish
 
         ws2_main.append_rows([[
             aff_link, platform_links.get("reel",""), platform_links.get("ig",""),
@@ -2160,19 +2145,9 @@ def main():
         t_short   = shorten_title(data["title"], MAX_TITLE_LEN)
         pin_img_url = data["image"]
 
-        try:
-            reel_url = make_and_upload_reel_from_images(
-                pid,
-                data.get("images") or ([data["image"]] if data.get("image") else []),
-                data["discount"],
-                data["code"],
-                data["title"],
-                data["price"],    # ← comma present (bug fixed)
-                data["expiry"],
-            )
-        except Exception as e:
-            log(f"  ⚠️ reel failed for PID {pid}: {e}")
-            reel_url = ""
+        # Build-on-publish: the video is built by the reel publisher at post time,
+        # not during the scrape. Leave the Reel URL blank here.
+        reel_url = ""
 
         # Social proof → score (for the reel publisher to rank which products
         # get a video). Best-effort; 0 on failure.
@@ -2237,19 +2212,8 @@ def main():
         pid     = data["pid"]
         t_short = shorten_title(data["title"], MAX_TITLE_LEN)
 
-        try:
-            reel_url = make_and_upload_reel_from_images(
-                pid,
-                data.get("images") or ([data["image"]] if data.get("image") else []),
-                data["discount"],
-                data["code"],
-                data["title"],
-                data["price"],
-                data["expiry"],
-            )
-        except Exception as e:
-            log(f"  ⚠️ CA reel failed for PID {pid}: {e}")
-            reel_url = ""
+        # Build-on-publish: video built by the reel publisher, not in the scrape.
+        reel_url = ""
 
         _m_asin = re.search(r"asin=([A-Za-z0-9]{10})", data["link"], re.I)
         _sp = fetch_social_proof(_m_asin.group(1).upper(), AMAZON_TLD_CA) if _m_asin else {"score": 0.0}

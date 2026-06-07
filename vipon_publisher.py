@@ -16,6 +16,7 @@ Environment variable:
 
 import json
 import os
+import re
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -28,6 +29,11 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 import googleapiclient.discovery
 import googleapiclient.http
+
+# Reuse the PROVEN v4 concept builder (callable; importing runs no side effects)
+from reel_concept_test import (
+    build_concept_video, cloud_upload, _which_ffmpeg, _find_font, _read_gemini_keys,
+)
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 SECRETS_DIR = os.environ.get("SECRETS_DIR", ".")
@@ -57,7 +63,7 @@ IG_FRESHDEALS_USER_ID    = "17841462518097134"   # freshdealsus
 IG_ULTAFIND_USER_ID      = "17841465105802629"   # ultafind
 
 GRAPH_API_VERSION        = "v25.0"
-REELS_PER_RUN            = 2      # how many reels to post per publisher run
+REELS_PER_RUN            = 1      # one video per run (6 cron slots/day)
 TIMEOUT                  = 120
 UPLOAD_TIMEOUT           = 600
 IG_PROCESS_WAIT          = 60
@@ -71,12 +77,16 @@ COL_C_IG_LINK    = 3
 COL_D_YT_LINK    = 4
 COL_F_CODE       = 6   # discount code
 COL_G_DISC       = 7   # discount %
+COL_H_EXPIRY     = 8
 COL_I_TITLE      = 9
+COL_J_PRICE      = 10
+COL_L_IMAGE      = 12   # cover image
 COL_N_REEL_URL   = 14
-COL_O_POST_TEXT  = 15
-COL_P_POSTED     = 16   # "Yes" = FB + IG reels posted (prevents re-pick)
+COL_O_VO         = 15   # VO script (piece 1) — now feeds the video voiceover
+COL_P_POSTED     = 16   # "Yes" = reel posted (prevents re-pick)
 COL_Q_FB_TEXT    = 17   # "Yes" = FB text post done (set by FBP_ready.py)
-COL_R_YT_POSTED  = 18   # "Yes" = YouTube posted (set by publisher OR Make.com)
+COL_R_YT_POSTED  = 18   # "Yes" = YouTube posted
+COL_S_SOCIAL     = 19   # Social Score (set by scrape) — used to rank selection
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
 def log(msg: str) -> None:
@@ -108,23 +118,56 @@ def open_sheet2():
     return _open_worksheet("Sheet2")  # Sheet2 — Canada
 
 
-def get_next_reels(ws, count: int = REELS_PER_RUN):
-    """Return list of (sheet_row_num, row) for the next `count` unposted reels.
-    sheet_row_num is 1-based (row 1 = header, row 2 = first data row).
-    Returns an empty list when nothing to post.
-    """
+def _asin_from_link(link: str) -> str:
+    m = re.search(r"asin=([A-Za-z0-9]{10})", link, re.I) or re.search(r"\b(B0[A-Z0-9]{8})\b", link, re.I)
+    return m.group(1).upper() if m else ""
+
+
+def select_candidates(ws):
+    """Return unposted rows ranked by Social Score (Col S), highest first.
+    Each item: (sheet_row_num, row, product_dict). Only rows with a link, title
+    and a valid ASIN qualify."""
     rows = ws.get_all_values()
-    results = []
-    for data_idx, row in enumerate(rows[1:], start=1):
-        if len(results) >= count:
-            break
-        while len(row) < COL_P_POSTED:
+    cands = []
+    for data_idx, row in enumerate(rows[1:], start=2):
+        while len(row) < COL_S_SOCIAL:
             row.append("")
-        reel_url = row[COL_N_REEL_URL - 1].strip()
-        posted   = row[COL_P_POSTED - 1].strip().lower()
-        if reel_url and posted != "yes":
-            results.append((data_idx + 1, row))   # +1 for header row
-    return results
+        link   = row[COL_A_AFF_LINK - 1].strip()
+        title  = row[COL_I_TITLE   - 1].strip()
+        posted = row[COL_P_POSTED  - 1].strip().lower()
+        if not link or not title or posted == "yes":
+            continue
+        asin = _asin_from_link(link)
+        if not asin:
+            continue
+        try:    score = float(row[COL_S_SOCIAL - 1] or 0)
+        except Exception: score = 0.0
+        product = {
+            "title":   title,
+            "asin":    asin,
+            "price":   row[COL_J_PRICE  - 1].strip(),
+            "code":    row[COL_F_CODE   - 1].strip(),
+            "disc":    row[COL_G_DISC   - 1].strip(),
+            "expiry":  row[COL_H_EXPIRY - 1].strip(),
+            "aff_link": link,
+            "cover":   row[COL_L_IMAGE  - 1].strip(),
+            "vo_text": row[COL_O_VO     - 1].strip(),   # piece 1 (VO script)
+        }
+        cands.append((score, data_idx, row, product))
+    cands.sort(key=lambda c: c[0], reverse=True)
+    return [(idx, row, p) for _, idx, row, p in cands]
+
+
+def build_and_upload(product, keys, ffmpeg, font, tld="com"):
+    """Build the v4 concept video for a product and upload it to Cloudinary.
+    Returns the public video URL, or '' on failure."""
+    with tempfile.TemporaryDirectory(prefix="reel_build_") as td:
+        path = build_concept_video(product, keys, ffmpeg, font, td,
+                                   vo_text=product.get("vo_text") or None, tld=tld)
+        if not path:
+            return ""
+        pub = f"vipon_reels/{product['asin']}_{int(time.time())}"
+        return cloud_upload(path, pub)
 
 
 # ─── FACEBOOK TOKEN ──────────────────────────────────────────────────────────
@@ -366,120 +409,92 @@ def _build_yt_description(aff_link: str, code: str, disc: str) -> str:
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 def main() -> None:
-    log(f"=== vipon_publisher starting (REELS_PER_RUN={REELS_PER_RUN}) ===")
+    log("=== vipon_publisher starting (build-on-publish, 1 video/run) ===")
+    keys   = _read_gemini_keys()
+    ffmpeg = _which_ffmpeg()
+    font   = _find_font()
+    log(f"Gemini keys: {len(keys)} | ffmpeg: {ffmpeg} | font: {'yes' if font else 'no'}")
 
-    # ── US: Sheet1 — post to ALL platforms ───────────────────────────────────
-    ws      = open_sheet()
-    us_rows = get_next_reels(ws)
+    # ── US: Sheet1 — build the top-ranked product, post to all platforms ─────
+    ws    = open_sheet()
+    cands = select_candidates(ws)
+    log(f"\nUS: {len(cands)} candidate(s); selecting highest social score…")
 
-    if not us_rows:
-        log("US: No unposted reels — skipping.")
-    else:
-        for sheet_row, row in us_rows:
-            log(f"\nUS: Row {sheet_row} -> FreshDeals + Ultafind (FB, IG, YT)")
+    posted_us = False
+    for sheet_row, row, product in cands[:4]:   # try up to 4 until one builds
+        log(f"US: building reel for row {sheet_row} — {product['title'][:55]}")
+        video_url = build_and_upload(product, keys, ffmpeg, font, tld="com")
+        if not video_url:
+            log(f"US: build failed for row {sheet_row} — trying next candidate")
+            continue
 
-            reel_url   = row[COL_N_REEL_URL  - 1].strip()
-            title      = row[COL_I_TITLE     - 1].strip() or "Deal Alert!"
-            aff_link   = row[COL_A_AFF_LINK  - 1].strip()
-            code       = row[COL_F_CODE      - 1].strip()
-            disc       = row[COL_G_DISC      - 1].strip()
-            yt_desc    = _build_yt_description(aff_link, code, disc)
+        title    = product["title"] or "Deal Alert!"
+        aff_link = product["aff_link"]
+        yt_desc  = _build_yt_description(aff_link, product["code"], product["disc"])
+        errors, yt_success = [], False
 
-            errors     = []
-            yt_success = False
-
-            # ── Facebook: FreshDeals + Ultafind ──────────────────────────────
-            for fb_file, fb_label in [
-                (FB_FRESHDEALS_TOKEN, "FreshDeals"),
-                (FB_ULTAFIND_TOKEN,   "Ultafind"),
-            ]:
-                log(f"--- Facebook ({fb_label}) ---")
-                try:
-                    pid, tok, _ = load_fb_token(fb_file)
-                    post_fb_reel(pid, tok, reel_url, title, aff_link)
-                except Exception as e:
-                    log(f"ERROR (FB {fb_label}): {e}")
-                    errors.append(f"FB-{fb_label}: {e}")
-
-            # ── Instagram: freshdealsus + ultafind ───────────────────────────
-            for ig_uid, ig_label, fb_file in [
-                (IG_FRESHDEALS_USER_ID, "freshdealsus", FB_FRESHDEALS_TOKEN),
-                (IG_ULTAFIND_USER_ID,   "ultafind",     FB_ULTAFIND_TOKEN),
-            ]:
-                log(f"--- Instagram ({ig_label}) ---")
-                try:
-                    _, tok, _ = load_fb_token(fb_file)
-                    post_ig_reel(ig_uid, tok, reel_url, aff_link)
-                except Exception as e:
-                    log(f"ERROR (IG {ig_label}): {e}")
-                    errors.append(f"IG-{ig_label}: {e}")
-
-            # ── YouTube: FreshDeals YT + Ultafind YT ─────────────────────────
-            for yt_file, yt_label in [
-                (YT_TOKEN_FILE,          "FreshDeals YT"),
-                (YT_ULTAFIND_TOKEN_FILE, "Ultafind YT"),
-            ]:
-                log(f"--- YouTube ({yt_label}) ---")
-                if not os.path.exists(yt_file):
-                    log(f"  warning: {yt_file} not found — skipping")
-                    continue
-                try:
-                    post_youtube_short(reel_url, title, yt_desc, yt_token_file=yt_file)
-                    yt_success = True
-                except Exception as e:
-                    log(f"ERROR (YT {yt_label}): {e}")
-                    errors.append(f"YT-{yt_label}: {e}")
-
-            # ── Mark sheet ────────────────────────────────────────────────────
-            ws.update_acell(f"P{sheet_row}", "Yes")
-            log(f"US: row {sheet_row} col P -> Yes")
-            if yt_success:
-                ws.update_acell(f"R{sheet_row}", "Yes")
-                log(f"US: row {sheet_row} col R -> Yes (YouTube posted)")
-            else:
-                log(f"US: row {sheet_row} col R left blank (YouTube failed — Make.com retries)")
-
-            if errors:
-                log(f"US row {sheet_row} done with {len(errors)} error(s): {'; '.join(str(e) for e in errors)}")
-            else:
-                log(f"US row {sheet_row}: All platforms posted successfully.")
-
-    # ── Canada: Sheet2 — FB only ─────────────────────────────────────────────
-    ws2      = open_sheet2()
-    ca_rows  = get_next_reels(ws2)
-
-    if not ca_rows:
-        log("CA: No unposted reels — skipping.")
-    else:
-        for sheet_row2, row2 in ca_rows:
-            log(f"\nCA: Row {sheet_row2} -> Fresh Deals Canada (FB only)")
-
-            reel_url2 = row2[COL_N_REEL_URL - 1].strip()
-            title2    = row2[COL_I_TITLE    - 1].strip() or "Deal Alert!"
-            aff_link2 = row2[COL_A_AFF_LINK - 1].strip()
-            errors2   = []
-
-            log("--- Facebook (Fresh Deals Canada) ---")
+        for fb_file, fb_label in [(FB_FRESHDEALS_TOKEN, "FreshDeals"), (FB_ULTAFIND_TOKEN, "Ultafind")]:
+            log(f"--- Facebook ({fb_label}) ---")
             try:
-                if os.path.exists(FB_CANADA_TOKEN):
-                    pid2, tok2, ver2 = load_fb_token(FB_CANADA_TOKEN)
-                    log(f"  CA token file found: page_id={pid2}, api_version={ver2}, token_len={len(tok2)}")
-                else:
-                    log("  warning: fb_page_token-canada.json not found — using FreshDeals token with CA page ID")
-                    _, tok2, ver2 = load_fb_token(FB_FRESHDEALS_TOKEN)
-                    pid2 = FB_CANADA_PAGE_ID
-                post_fb_reel(pid2, tok2, reel_url2, title2, aff_link2)
+                pid, tok, _ = load_fb_token(fb_file)
+                post_fb_reel(pid, tok, video_url, title, aff_link)
             except Exception as e:
-                log(f"ERROR (FB Canada): {e}")
-                errors2.append(f"FB-CA: {e}")
+                log(f"ERROR (FB {fb_label}): {e}"); errors.append(f"FB-{fb_label}: {e}")
 
-            if errors2:
-                log(f"CA row {sheet_row2} done with {len(errors2)} error(s): {'; '.join(str(e) for e in errors2)}")
-                log(f"CA: row {sheet_row2} col P NOT marked (FB reel failed — will retry next run)")
+        for ig_uid, ig_label, fb_file in [
+            (IG_FRESHDEALS_USER_ID, "freshdealsus", FB_FRESHDEALS_TOKEN),
+            (IG_ULTAFIND_USER_ID,   "ultafind",     FB_ULTAFIND_TOKEN),
+        ]:
+            log(f"--- Instagram ({ig_label}) ---")
+            try:
+                _, tok, _ = load_fb_token(fb_file)
+                post_ig_reel(ig_uid, tok, video_url, aff_link)
+            except Exception as e:
+                log(f"ERROR (IG {ig_label}): {e}"); errors.append(f"IG-{ig_label}: {e}")
+
+        for yt_file, yt_label in [(YT_TOKEN_FILE, "FreshDeals YT"), (YT_ULTAFIND_TOKEN_FILE, "Ultafind YT")]:
+            log(f"--- YouTube ({yt_label}) ---")
+            if not os.path.exists(yt_file):
+                log(f"  warning: {yt_file} not found — skipping"); continue
+            try:
+                post_youtube_short(video_url, title, yt_desc, yt_token_file=yt_file)
+                yt_success = True
+            except Exception as e:
+                log(f"ERROR (YT {yt_label}): {e}"); errors.append(f"YT-{yt_label}: {e}")
+
+        ws.update_acell(f"P{sheet_row}", "Yes")
+        if yt_success:
+            ws.update_acell(f"R{sheet_row}", "Yes")
+        log(f"US row {sheet_row}: posted ({len(errors)} error(s))" +
+            (f": {'; '.join(map(str, errors))}" if errors else " — all platforms OK"))
+        posted_us = True
+        break
+
+    if not posted_us:
+        log("US: nothing posted (no candidates or all builds failed).")
+
+    # ── Canada: Sheet2 — build top product, FB only ──────────────────────────
+    ws2    = open_sheet2()
+    cands2 = select_candidates(ws2)
+    log(f"\nCA: {len(cands2)} candidate(s); selecting highest social score…")
+
+    for sheet_row2, row2, product2 in cands2[:4]:
+        log(f"CA: building reel for row {sheet_row2} — {product2['title'][:55]}")
+        video_url2 = build_and_upload(product2, keys, ffmpeg, font, tld="ca")
+        if not video_url2:
+            log(f"CA: build failed for row {sheet_row2} — trying next candidate")
+            continue
+        try:
+            if os.path.exists(FB_CANADA_TOKEN):
+                pid2, tok2, _ = load_fb_token(FB_CANADA_TOKEN)
             else:
-                ws2.update_acell(f"P{sheet_row2}", "Yes")
-                log(f"CA: row {sheet_row2} col P -> Yes")
-                log(f"CA row {sheet_row2}: Facebook reel posted successfully.")
+                _, tok2, _ = load_fb_token(FB_FRESHDEALS_TOKEN); pid2 = FB_CANADA_PAGE_ID
+            post_fb_reel(pid2, tok2, video_url2, product2["title"] or "Deal Alert!", product2["aff_link"])
+            ws2.update_acell(f"P{sheet_row2}", "Yes")
+            log(f"CA row {sheet_row2}: Facebook reel posted.")
+        except Exception as e:
+            log(f"ERROR (FB Canada) row {sheet_row2}: {e} — P not marked, will retry")
+        break
 
     log("=== vipon_publisher done ===")
 
