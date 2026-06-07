@@ -253,16 +253,26 @@ const out = {images: [], price: null, reviews: null};
 function abs(el){ if(!el) return null; const r=el.getBoundingClientRect();
   if(r.width<8||r.height<4) return null;
   return {x:r.left+window.scrollX, y:r.top+window.scrollY, w:r.width, h:r.height}; }
-// gallery image URLs (hi-res), de-duplicated by the /I/<id> path
+// gallery image URLs — ONLY from the product image gallery, to avoid ad/sponsor
+// banners (e.g. "Fanka") that live elsewhere on the page.
+const GAL = ['#main-image-container', '#imageBlock', '#altImages',
+             '#ivThumbViewport', '#imageBlockThumbs', '#imgTagWrapperId'];
+let imgEls = [];
+for (const sel of GAL){ const c = document.querySelector(sel);
+  if (c) imgEls = imgEls.concat([...c.querySelectorAll('img')]); }
+if (imgEls.length === 0)
+  imgEls = [...document.querySelectorAll('#landingImage, #imgTagWrapperId img')];
 const seen = new Set();
-document.querySelectorAll('img').forEach(im=>{
+imgEls.forEach(im=>{
   let s = im.getAttribute('data-old-hires') || im.src || '';
   const m = s.match(/images\/I\/([A-Za-z0-9%+._-]+)\./);
   if(m && s.includes('media-amazon') && !seen.has(m[1])){ seen.add(m[1]); out.images.push(s); }
 });
-out.price   = abs(document.querySelector('#corePrice_feature_div')
-            || document.querySelector('#corePriceDisplay_desktop_feature_div')
-            || document.querySelector('.priceToPay') || document.querySelector('#price'));
+// Tight price element (the actual price number) so the zoom + the strike align.
+out.price   = abs(document.querySelector('.priceToPay')
+            || document.querySelector('.a-price')
+            || document.querySelector('#corePrice_feature_div')
+            || document.querySelector('#price'));
 out.reviews = abs(document.querySelector('#averageCustomerReviews')
             || document.querySelector('#acrPopover')
             || document.querySelector("[data-hook='review']"));
@@ -325,11 +335,11 @@ def _overlay_codepct(disc, code, font):
     """drawtext chain for the persistent discount %/code overlay (bottom area)."""
     parts = []
     if font and disc:
-        parts.append(f"drawtext=fontfile='{font}':text='{_esc(disc)}':x=(w-text_w)/2:y=h*0.80:"
+        parts.append(f"drawtext=fontfile='{font}':expansion=none:text='{_esc(disc)}':x=(w-text_w)/2:y=h*0.80:"
                      f"fontsize=58:fontcolor=white:box=1:boxcolor=0xCC2200@0.85:boxborderw=12:"
                      f"shadowcolor=black@0.7:shadowx=2:shadowy=2")
     if font and code:
-        parts.append(f"drawtext=fontfile='{font}':text='Code\\: {_esc(code)}':x=(w-text_w)/2:y=h*0.875:"
+        parts.append(f"drawtext=fontfile='{font}':expansion=none:text='Code\\: {_esc(code)}':x=(w-text_w)/2:y=h*0.875:"
                      f"fontsize=40:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=10:"
                      f"shadowcolor=black@0.7:shadowx=2:shadowy=2")
     return parts
@@ -352,10 +362,11 @@ def seg_from_image(img_url, dst, td, ffmpeg, disc, code, font, idx, secs):
     except Exception as e:
         log(f"  image seg {idx} failed: {e}"); return False
 
-def seg_from_crop(shot, box, dst, td, ffmpeg, img_w, img_h, disc, code, font, banner, idx, secs):
-    """Crop a 9:16 window around a page region (price/reviews), gentle zoom, overlays."""
+def seg_from_crop(shot, box, dst, td, ffmpeg, img_w, img_h, disc, code, font, banner, idx, secs,
+                  zoom_mult=6.0, win_min=900, win_max=1500):
+    """Crop a tight 9:16 window around a page region (e.g. reviews), gentle zoom, overlays."""
     if not box: return False
-    win_h = float(min(max(box["h"] * 3.0, 700), img_h))
+    win_h = float(min(max(box["h"] * zoom_mult, win_min), min(img_h, win_max)))
     win_w = win_h * VIDEO_W / VIDEO_H
     if win_w > img_w:
         win_w = float(img_w); win_h = win_w * VIDEO_H / VIDEO_W
@@ -370,7 +381,7 @@ def seg_from_crop(shot, box, dst, td, ffmpeg, img_w, img_h, disc, code, font, ba
              f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={VIDEO_W}x{VIDEO_H}:fps={FPS}",
              "setsar=1"]
     if banner and font:
-        chain.append(f"drawtext=fontfile='{font}':text='{_esc(banner)}':x=(w-text_w)/2:y=h*0.10:"
+        chain.append(f"drawtext=fontfile='{font}':expansion=none:text='{_esc(banner)}':x=(w-text_w)/2:y=h*0.10:"
                      f"fontsize=46:fontcolor=white:box=1:boxcolor=0x008000@0.85:boxborderw=14:"
                      f"shadowcolor=black@0.8:shadowx=2:shadowy=2")
     chain += _overlay_codepct(disc, code, font)
@@ -381,6 +392,52 @@ def seg_from_crop(shot, box, dst, td, ffmpeg, img_w, img_h, disc, code, font, ba
         return True
     except Exception as e:
         log(f"  crop seg {idx} failed: {e}"); return False
+
+
+def seg_price(shot, box, dst, td, ffmpeg, img_w, img_h, disc, code, font, new_price, secs):
+    """Price frame: tight static crop on the real price, a red strike aligned to the
+    on-page (old) price, and the NEW price beside it with a blinking highlight."""
+    if not box: return False
+    # tight, readable window centred on the price element
+    win_h = float(min(max(box["h"] * 3.5, 620), min(img_h, 1050)))
+    win_w = win_h * VIDEO_W / VIDEO_H
+    if win_w > img_w:
+        win_w = float(img_w); win_h = win_w * VIDEO_H / VIDEO_W
+    cx, cy = box["x"] + box["w"]/2, box["y"] + box["h"]/2
+    x = min(max(cx - win_w/2, 0), img_w - win_w)
+    y = min(max(cy - win_h/2, 0), img_h - win_h)
+    # map the price box into the final 720x1280 frame (static crop → exact alignment)
+    sx, sy = VIDEO_W / win_w, VIDEO_H / win_h
+    px, py = (box["x"] - x) * sx, (box["y"] - y) * sy
+    pw, ph = box["w"] * sx, box["h"] * sy
+    chain = [f"crop={int(win_w)}:{int(win_h)}:{int(x)}:{int(y)}",
+             f"scale={VIDEO_W}:{VIDEO_H}:flags=bicubic", "setsar=1"]
+    # red strike through the old price, aligned to its bbox
+    strike_y = int(py + ph/2 - 5)
+    chain.append(f"drawbox=x={int(px)-6}:y={strike_y}:w={int(pw)+12}:h=10:color=red@0.95:t=fill")
+    # NEW price — place to the right if there's room, else just below the old price
+    nptxt = f"${_num(new_price):.2f}" if _num(new_price) else (new_price or "")
+    if px + pw + 230 <= VIDEO_W:
+        nx, ny = int(px + pw + 18), int(max(py - 6, 0))
+    else:
+        nx, ny = int(max(px, 12)), int(py + ph + 14)
+    if font and nptxt:
+        # base (always visible)
+        chain.append(f"drawtext=fontfile='{font}':expansion=none:text='{_esc(nptxt)}':x={nx}:y={ny}:"
+                     f"fontsize=72:fontcolor=white:box=1:boxcolor=0x008000@0.95:boxborderw=14:"
+                     f"shadowcolor=black@0.8:shadowx=2:shadowy=2")
+        # blinking emphasis copy on top (flash highlight)
+        chain.append(f"drawtext=fontfile='{font}':expansion=none:text='{_esc(nptxt)}':x={nx-4}:y={ny-4}:"
+                     f"fontsize=80:fontcolor=yellow:enable='lt(mod(t\\,0.8)\\,0.4)':"
+                     f"shadowcolor=black@0.8:shadowx=2:shadowy=2")
+    chain += _overlay_codepct(disc, code, font)
+    try:
+        subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-loop", "1", "-i", shot,
+            "-vf", ",".join(chain), "-r", str(FPS), "-t", f"{secs:.2f}", "-pix_fmt", "yuv420p"]
+            + _FF_ENCODE + ["-an", dst], check=True, timeout=120)
+        return True
+    except Exception as e:
+        log(f"  price seg failed: {e}"); return False
 
 def gen_beats(duration, td, ffmpeg):
     out = os.path.join(td, "beats.aac")
@@ -431,26 +488,27 @@ def main():
 
         log("\n[4] Building frames…")
         segs = []
-        # 1) cover image
+        # 1) cover image — held a little longer so it registers
         s = os.path.join(td, "s_cover.mp4")
-        if seg_from_image(imgs[0], s, td, ffmpeg, p["disc"], p["code"], font, 0, IMG_SECS):
+        if seg_from_image(imgs[0], s, td, ffmpeg, p["disc"], p["code"], font, 0, IMG_SECS + 0.8):
             segs.append(s); log("  ✓ cover")
-        # 2) price screenshot with was→now banner
-        if shot and price_box:
-            s = os.path.join(td, "s_price.mp4")
-            if seg_from_crop(shot, price_box, s, td, ffmpeg, pw, ph, p["disc"], p["code"],
-                             font, banner, 1, CROP_SECS):
-                segs.append(s); log("  ✓ price frame")
-        # 3) next gallery image
+        # 2) second product image (BEFORE switching to the Amazon page)
         if len(imgs) > 1:
             s = os.path.join(td, "s_img1.mp4")
             if seg_from_image(imgs[1], s, td, ffmpeg, p["disc"], p["code"], font, 1, IMG_SECS):
                 segs.append(s); log("  ✓ gallery image 2")
-        # 4) reviews + sold zoom
+        # 3) price screenshot — tight crop, red strike on old price, new price flashing
+        if shot and price_box:
+            s = os.path.join(td, "s_price.mp4")
+            if seg_price(shot, price_box, s, td, ffmpeg, pw, ph, p["disc"], p["code"],
+                         font, p["price"], CROP_SECS):
+                segs.append(s); log("  ✓ price frame")
+        # 4) reviews + sold zoom (tight)
         if shot and rev_box:
             s = os.path.join(td, "s_rev.mp4")
             if seg_from_crop(shot, rev_box, s, td, ffmpeg, pw, ph, p["disc"], p["code"],
-                             font, "LOVED BY REAL BUYERS", 2, CROP_SECS):
+                             font, "LOVED BY REAL BUYERS", 2, CROP_SECS,
+                             zoom_mult=6.0, win_min=950, win_max=1500):
                 segs.append(s); log("  ✓ reviews frame")
         # 5) rest of gallery
         for j, u in enumerate(imgs[2:5], start=2):
