@@ -280,7 +280,7 @@ def gemini_tts(text, keys, voice=TTS_VOICE):
 
 # ─── CHROME: capture gallery images + price/reviews regions ──────────────────────
 _GALLERY_JS = r"""
-const out = {images: [], price: null, reviews: null,
+const out = {images: [], price: null, reviews: null, title: null,
              bought: "", rating: "", rating_count: ""};
 function abs(el){ if(!el) return null; const r=el.getBoundingClientRect();
   if(r.width<8||r.height<4) return null;
@@ -301,6 +301,9 @@ imgEls.forEach(im=>{
   const m = s.match(/images\/I\/([A-Za-z0-9%+._-]+)\./);
   if(m && s.includes('media-amazon') && !seen.has(m[1])){ seen.add(m[1]); out.images.push(s); }
 });
+out.title   = abs(document.querySelector('#title')
+            || document.querySelector('#productTitle')
+            || document.querySelector('#titleSection'));
 // Tight price element (the actual price number) so the zoom + the strike align.
 out.price   = abs(document.querySelector('.priceToPay')
             || document.querySelector('.a-price')
@@ -339,7 +342,7 @@ def capture_page(asin, td, ffmpeg):
     if binary: opts.binary_location = binary
     driver = webdriver.Chrome(service=(Service(executable_path=drv) if drv else Service()), options=opts)
     shot = os.path.join(td, "page.png")
-    imgs, pw, ph, price_box, rev_box = [], 0, 0, None, None
+    imgs, pw, ph, price_box, rev_box, title_box = [], 0, 0, None, None, None
     social = {"bought": "", "rating": "", "rating_count": ""}
     try:
         driver.set_window_size(440, 950)
@@ -349,7 +352,7 @@ def capture_page(asin, td, ffmpeg):
         driver.execute_script("window.scrollTo(0,0);"); time.sleep(0.7)
         data = driver.execute_script(_GALLERY_JS) or {}
         imgs = data.get("images", [])[:6]
-        price_box, rev_box = data.get("price"), data.get("reviews")
+        price_box, rev_box, title_box = data.get("price"), data.get("reviews"), data.get("title")
         social = {"bought": data.get("bought", ""), "rating": data.get("rating", ""),
                   "rating_count": data.get("rating_count", "")}
         log(f"  gallery imgs: {len(imgs)} | price box: {'y' if price_box else 'n'} | reviews box: {'y' if rev_box else 'n'}")
@@ -365,7 +368,7 @@ def capture_page(asin, td, ffmpeg):
         with open(shot, "wb") as f: f.write(base64.b64decode(res["data"]))
         # CDP captured at deviceScaleFactor 2 → screenshot px = css px * 2
         pw, ph = pw * 2, ph * 2
-        for b in (price_box, rev_box):
+        for b in (price_box, rev_box, title_box):
             if b:
                 for k in b: b[k] *= 2
         log(f"  screenshot {pw}x{ph}")
@@ -374,7 +377,7 @@ def capture_page(asin, td, ffmpeg):
     finally:
         try: driver.quit()
         except Exception: pass
-    return imgs, (shot if os.path.exists(shot) else None), pw, ph, price_box, rev_box, social
+    return imgs, (shot if os.path.exists(shot) else None), pw, ph, price_box, rev_box, title_box, social
 
 # ─── SEGMENT BUILDERS ────────────────────────────────────────────────────────────
 def _overlay_codepct(disc, code, font):
@@ -440,16 +443,25 @@ def seg_from_crop(shot, box, dst, td, ffmpeg, img_w, img_h, disc, code, font, ba
         log(f"  crop seg {idx} failed: {e}"); return False
 
 
-def seg_price(shot, box, dst, td, ffmpeg, img_w, img_h, disc, code, font, new_price, secs):
-    """Price frame: tight static crop on the real price, a red strike aligned to the
-    on-page (old) price, and the NEW price beside it with a blinking highlight."""
+def seg_price(shot, box, dst, td, ffmpeg, img_w, img_h, disc, code, font, new_price, secs,
+              title_box=None):
+    """Price frame: crop the title→price region (so viewers see WHAT it is), with a
+    red strike aligned to the on-page (old) price and the NEW price flashing beside it."""
     if not box: return False
-    # tight, readable window centred on the price element
-    win_h = float(min(max(box["h"] * 3.5, 620), min(img_h, 1050)))
+    # Frame from the title down through the price (zoomed out for context). If no
+    # title, fall back to a readable window around the price.
+    if title_box and title_box["y"] < box["y"]:
+        top    = max(title_box["y"] - 40, 0)
+        bottom = box["y"] + box["h"] + 80
+        win_h  = float(min(max(bottom - top, 700), img_h))
+        cy     = (top + bottom) / 2.0
+    else:
+        win_h  = float(min(max(box["h"] * 4.0, 760), min(img_h, 1200)))
+        cy     = box["y"] + box["h"] / 2.0
     win_w = win_h * VIDEO_W / VIDEO_H
     if win_w > img_w:
         win_w = float(img_w); win_h = win_w * VIDEO_H / VIDEO_W
-    cx, cy = box["x"] + box["w"]/2, box["y"] + box["h"]/2
+    cx = box["x"] + box["w"]/2
     x = min(max(cx - win_w/2, 0), img_w - win_w)
     y = min(max(cy - win_h/2, 0), img_h - win_h)
     # map the price box into the final 720x1280 frame (static crop → exact alignment)
@@ -526,7 +538,7 @@ def main():
         log("\n--- FULL FB POST (piece1 + piece2) ---\n" + piece1 + "\n\n" + piece2 + "\n")
 
         log("[3] Capturing Amazon phone page (gallery + price + reviews + social)…")
-        imgs, shot, pw, ph, price_box, rev_box, social = capture_page(p["asin"], td, ffmpeg)
+        imgs, shot, pw, ph, price_box, rev_box, title_box, social = capture_page(p["asin"], td, ffmpeg)
         if p["cover"]:
             imgs = [p["cover"]] + [u for u in imgs if u != p["cover"]]
         if not imgs:
@@ -540,52 +552,8 @@ def main():
         log(f"\n[3b] Social proof → units sold/mo: {units} | stars: {stars} | "
             f"ratings: {rcnt} | SOCIAL SCORE: {sscore}")
 
-        log("\n[4] Building frames…")
-        segs = []
-        # 1) cover image — held a little longer so it registers
-        s = os.path.join(td, "s_cover.mp4")
-        if seg_from_image(imgs[0], s, td, ffmpeg, p["disc"], p["code"], font, 0, IMG_SECS + 0.8):
-            segs.append(s); log("  ✓ cover")
-        # 2) second product image (BEFORE switching to the Amazon page)
-        if len(imgs) > 1:
-            s = os.path.join(td, "s_img1.mp4")
-            if seg_from_image(imgs[1], s, td, ffmpeg, p["disc"], p["code"], font, 1, IMG_SECS):
-                segs.append(s); log("  ✓ gallery image 2")
-        # 3) price screenshot — tight crop, red strike on old price, new price flashing
-        if shot and price_box:
-            s = os.path.join(td, "s_price.mp4")
-            if seg_price(shot, price_box, s, td, ffmpeg, pw, ph, p["disc"], p["code"],
-                         font, p["price"], CROP_SECS):
-                segs.append(s); log("  ✓ price frame")
-        # 4) reviews + sold zoom (tight)
-        if shot and rev_box:
-            s = os.path.join(td, "s_rev.mp4")
-            if seg_from_crop(shot, rev_box, s, td, ffmpeg, pw, ph, p["disc"], p["code"],
-                             font, "LOVED BY REAL BUYERS", 2, CROP_SECS,
-                             zoom_mult=6.0, win_min=950, win_max=1500):
-                segs.append(s); log("  ✓ reviews frame")
-        # 5) rest of gallery
-        for j, u in enumerate(imgs[2:5], start=2):
-            s = os.path.join(td, f"s_img{j}.mp4")
-            if seg_from_image(u, s, td, ffmpeg, p["disc"], p["code"], font, j, IMG_SECS):
-                segs.append(s); log(f"  ✓ gallery image {j+1}")
-
-        if not segs:
-            raise RuntimeError("No frames built")
-
-        # concat
-        log("\n[5] Concatenating frames…")
-        listf = os.path.join(td, "list.txt")
-        concat = os.path.join(td, "concat.mp4")
-        with open(listf, "w") as f:
-            for s in segs: f.write(f"file '{Path(s).as_posix()}'\n")
-        subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-f", "concat", "-safe", "0", "-i", listf,
-                        "-c", "copy", concat], check=True, timeout=120)
-        vid_dur = probe_duration(concat, ffmpeg)
-        log(f"  video: {vid_dur:.1f}s ({len(segs)} frames)")
-
-        # VO via Gemini TTS (piece 1)
-        log("\n[6] Generating VO (Gemini TTS, piece 1)…")
+        # VO FIRST — so we can size the frames to the voiceover (no freezing)
+        log("\n[4] Generating VO (Gemini TTS, piece 1)…")
         vo_wav = os.path.join(td, "vo.wav"); vo_aac = os.path.join(td, "vo.aac")
         wav = gemini_tts(piece1, keys)
         have_vo, vo_dur = False, 0.0
@@ -601,15 +569,55 @@ def main():
         else:
             log("  ⚠️ Gemini TTS unavailable — beats only")
 
-        # If VO longer than the video, extend the last frame so video covers the VO
-        if have_vo and vo_dur > vid_dur + 0.3:
-            pad = vo_dur - vid_dur
-            ext = os.path.join(td, "ext.mp4")
-            subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-i", concat,
-                "-vf", f"tpad=stop_mode=clone:stop_duration={pad:.2f}", "-r", str(FPS),
-                "-pix_fmt", "yuv420p"] + _FF_ENCODE + ["-an", ext], check=True, timeout=120)
-            concat = ext; vid_dur = probe_duration(concat, ffmpeg)
-            log(f"  extended video to {vid_dur:.1f}s to fit VO")
+        # ── Plan the frames (only those available), with relative weights ──
+        plan = [("image", imgs[0], 1.5)]                       # cover (held longer)
+        if len(imgs) > 1:        plan.append(("image", imgs[1], 1.0))   # 2nd image
+        if shot and price_box:   plan.append(("price", None, 2.6))      # price (capped)
+        if shot and rev_box:     plan.append(("reviews", None, 1.5))    # reviews/sold
+        for u in imgs[2:6]:      plan.append(("image", u, 1.0))         # rest of gallery
+
+        # Distribute the VO length across frames; cap the price frame so it doesn't
+        # dominate, and push the slack onto the carousel frames (never freeze one).
+        target = (vo_dur + 0.4) if have_vo else 16.0
+        PRICE_CAP, MIN_SECS = 6.5, 1.8
+        tw = sum(w for _, _, w in plan) or 1
+        durs = [target * w / tw for _, _, w in plan]
+        for i, (kind, _, _) in enumerate(plan):
+            if kind == "price" and durs[i] > PRICE_CAP:
+                excess = durs[i] - PRICE_CAP; durs[i] = PRICE_CAP
+                others = [j for j in range(len(plan)) if j != i]
+                ow = sum(plan[j][2] for j in others) or 1
+                for j in others: durs[j] += excess * plan[j][2] / ow
+        durs = [max(d, MIN_SECS) for d in durs]
+
+        log("\n[5] Building frames (sized to VO)…")
+        segs = []
+        for i, (kind, payload, _) in enumerate(plan):
+            s = os.path.join(td, f"f{i}.mp4"); secs = durs[i]; ok = False
+            if kind == "image":
+                ok = seg_from_image(payload, s, td, ffmpeg, p["disc"], p["code"], font, i, secs)
+            elif kind == "price":
+                ok = seg_price(shot, price_box, s, td, ffmpeg, pw, ph, p["disc"], p["code"],
+                               font, p["price"], secs, title_box=title_box)
+            elif kind == "reviews":
+                ok = seg_from_crop(shot, rev_box, s, td, ffmpeg, pw, ph, p["disc"], p["code"],
+                                   font, "LOVED BY REAL BUYERS", i, secs,
+                                   zoom_mult=6.0, win_min=950, win_max=1500)
+            if ok: segs.append(s); log(f"  ✓ {kind} ({secs:.1f}s)")
+
+        if not segs:
+            raise RuntimeError("No frames built")
+
+        # concat
+        log("\n[6] Concatenating frames…")
+        listf = os.path.join(td, "list.txt")
+        concat = os.path.join(td, "concat.mp4")
+        with open(listf, "w") as f:
+            for s in segs: f.write(f"file '{Path(s).as_posix()}'\n")
+        subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-f", "concat", "-safe", "0", "-i", listf,
+                        "-c", "copy", concat], check=True, timeout=120)
+        vid_dur = probe_duration(concat, ffmpeg)
+        log(f"  video: {vid_dur:.1f}s ({len(segs)} frames)")
 
         # mix audio
         log("\n[7] Mixing audio…")
