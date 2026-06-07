@@ -286,20 +286,20 @@ function abs(el){ if(!el) return null; const r=el.getBoundingClientRect();
   if(r.width<8||r.height<4) return null;
   return {x:r.left+window.scrollX, y:r.top+window.scrollY, w:r.width, h:r.height}; }
 function txt(el){ return el ? (el.innerText||el.textContent||'').trim() : ''; }
-// gallery image URLs — ONLY from the product image gallery, to avoid ad/sponsor
-// banners (e.g. "Fanka") that live elsewhere on the page.
-const GAL = ['#main-image-container', '#imageBlock', '#altImages',
-             '#ivThumbViewport', '#imageBlockThumbs', '#imgTagWrapperId'];
-let imgEls = [];
-for (const sel of GAL){ const c = document.querySelector(sel);
-  if (c) imgEls = imgEls.concat([...c.querySelectorAll('img')]); }
-if (imgEls.length === 0)
-  imgEls = [...document.querySelectorAll('#landingImage, #imgTagWrapperId img')];
+// product gallery images: square-ish media-amazon images (incl. alt hi-res from
+// data-a-dynamic-image), skipping wide ad banners (e.g. "Fanka") by aspect ratio.
 const seen = new Set();
-imgEls.forEach(im=>{
-  let s = im.getAttribute('data-old-hires') || im.src || '';
-  const m = s.match(/images\/I\/([A-Za-z0-9%+._-]+)\./);
-  if(m && s.includes('media-amazon') && !seen.has(m[1])){ seen.add(m[1]); out.images.push(s); }
+function add(s){ if(!s) return; const m = s.match(/images\/I\/([A-Za-z0-9%+._-]+)\./);
+  if(m && s.includes('media-amazon') && !seen.has(m[1])){ seen.add(m[1]); out.images.push(s); } }
+document.querySelectorAll('img').forEach(im=>{
+  const r = im.getBoundingClientRect();
+  const ar = r.height > 0 ? r.width / r.height : 99;
+  if (ar > 2.2 || ar < 0.45) return;                 // skip wide/thin banners (ads)
+  if (im.closest('[data-cel-widget*="sp_"], [class*="adholder"], [aria-label*="ponsored"], [id^="ad-"]')) return;
+  const dyn = im.getAttribute('data-a-dynamic-image');   // alt hi-res image set
+  if (dyn){ try{ Object.keys(JSON.parse(dyn)).forEach(add); }catch(e){} }
+  add(im.getAttribute('data-old-hires'));
+  add(im.src);
 });
 out.title   = abs(document.querySelector('#title')
             || document.querySelector('#productTitle')
@@ -443,51 +443,53 @@ def seg_from_crop(shot, box, dst, td, ffmpeg, img_w, img_h, disc, code, font, ba
         log(f"  crop seg {idx} failed: {e}"); return False
 
 
-def seg_price(shot, box, dst, td, ffmpeg, img_w, img_h, disc, code, font, new_price, secs,
+def seg_price(shot, box, dst, td, ffmpeg, img_w, img_h, disc, code, font, old_txt, new_txt, secs,
               title_box=None):
-    """Price frame: crop the title→price region (so viewers see WHAT it is), with a
-    red strike aligned to the on-page (old) price and the NEW price flashing beside it."""
+    """Price frame: zoomed-out page (title + price + variations for context) with a
+    RELIABLE 'WAS $x  ✗   NOW $y' overlay drawn at a fixed spot — the WAS is struck
+    through and the NOW flashes. Independent of where the page price sits (works even
+    for variant-priced products)."""
     if not box: return False
-    # Frame from the title down through the price (zoomed out for context). If no
-    # title, fall back to a readable window around the price.
+    # Zoomed-out context window: from the title down past the price.
     if title_box and title_box["y"] < box["y"]:
-        top    = max(title_box["y"] - 40, 0)
-        bottom = box["y"] + box["h"] + 80
-        win_h  = float(min(max(bottom - top, 700), img_h))
-        cy     = (top + bottom) / 2.0
+        top    = max(title_box["y"] - 50, 0)
+        bottom = box["y"] + box["h"] + 420
     else:
-        win_h  = float(min(max(box["h"] * 4.0, 760), min(img_h, 1200)))
-        cy     = box["y"] + box["h"] / 2.0
+        top    = max(box["y"] - 650, 0)
+        bottom = box["y"] + box["h"] + 350
+    win_h = float(min(max(bottom - top, 1100), img_h))
     win_w = win_h * VIDEO_W / VIDEO_H
     if win_w > img_w:
         win_w = float(img_w); win_h = win_w * VIDEO_H / VIDEO_W
     cx = box["x"] + box["w"]/2
+    cy = (top + bottom) / 2.0
     x = min(max(cx - win_w/2, 0), img_w - win_w)
     y = min(max(cy - win_h/2, 0), img_h - win_h)
-    # map the price box into the final 720x1280 frame (static crop → exact alignment)
-    sx, sy = VIDEO_W / win_w, VIDEO_H / win_h
-    px, py = (box["x"] - x) * sx, (box["y"] - y) * sy
-    pw, ph = box["w"] * sx, box["h"] * sy
     chain = [f"crop={int(win_w)}:{int(win_h)}:{int(x)}:{int(y)}",
              f"scale={VIDEO_W}:{VIDEO_H}:flags=bicubic", "setsar=1"]
-    # red strike through the old price, aligned to its bbox
-    strike_y = int(py + ph/2 - 5)
-    chain.append(f"drawbox=x={int(px)-6}:y={strike_y}:w={int(pw)+12}:h=10:color=red@0.95:t=fill")
-    # NEW price — place to the right if there's room, else just below the old price
-    nptxt = f"${_num(new_price):.2f}" if _num(new_price) else (new_price or "")
-    if px + pw + 230 <= VIDEO_W:
-        nx, ny = int(px + pw + 18), int(max(py - 6, 0))
-    else:
-        nx, ny = int(max(px, 12)), int(py + ph + 14)
-    if font and nptxt:
-        # base (always visible)
-        chain.append(f"drawtext=fontfile='{font}':expansion=none:text='{_esc(nptxt)}':x={nx}:y={ny}:"
-                     f"fontsize=72:fontcolor=white:box=1:boxcolor=0x008000@0.95:boxborderw=14:"
-                     f"shadowcolor=black@0.8:shadowx=2:shadowy=2")
-        # blinking emphasis copy on top (flash highlight)
-        chain.append(f"drawtext=fontfile='{font}':expansion=none:text='{_esc(nptxt)}':x={nx-4}:y={ny-4}:"
-                     f"fontsize=80:fontcolor=yellow:enable='lt(mod(t\\,0.8)\\,0.4)':"
-                     f"shadowcolor=black@0.8:shadowx=2:shadowy=2")
+
+    # ── Reliable WAS ✗ / NOW (flashing) overlay at a fixed position ──
+    if font and (old_txt or new_txt):
+        yW = int(VIDEO_H * 0.40)      # WAS line
+        yN = int(VIDEO_H * 0.475)     # NOW line
+        if old_txt:
+            F = 52
+            est = int(len(old_txt) * F * 0.52)          # estimated text width
+            sx0 = (VIDEO_W - est) // 2
+            chain.append(f"drawtext=fontfile='{font}':expansion=none:text='WAS {_esc(old_txt)}':"
+                         f"x=(w-text_w)/2:y={yW}:fontsize={F}:fontcolor=white:"
+                         f"box=1:boxcolor=black@0.55:boxborderw=10")
+            # red strike across the WAS text
+            chain.append(f"drawbox=x={sx0-30}:y={yW + F//2 + 4}:w={est+60}:h=9:color=red@0.95:t=fill")
+        if new_txt:
+            # base NOW (always visible) + blinking yellow copy on top
+            chain.append(f"drawtext=fontfile='{font}':expansion=none:text='NOW {_esc(new_txt)}':"
+                         f"x=(w-text_w)/2:y={yN}:fontsize=84:fontcolor=white:"
+                         f"box=1:boxcolor=0x008000@0.95:boxborderw=16:"
+                         f"shadowcolor=black@0.8:shadowx=2:shadowy=2")
+            chain.append(f"drawtext=fontfile='{font}':expansion=none:text='NOW {_esc(new_txt)}':"
+                         f"x=(w-text_w)/2:y={yN-3}:fontsize=90:fontcolor=yellow:"
+                         f"enable='lt(mod(t\\,0.8)\\,0.4)':shadowcolor=black@0.9:shadowx=2:shadowy=2")
     chain += _overlay_codepct(disc, code, font)
     try:
         subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-loop", "1", "-i", shot,
@@ -597,8 +599,10 @@ def main():
             if kind == "image":
                 ok = seg_from_image(payload, s, td, ffmpeg, p["disc"], p["code"], font, i, secs)
             elif kind == "price":
+                old_txt = f"${old_v:.2f}" if old_v else ""
+                new_txt = f"${new_v:.2f}" if new_v else (p["price"] or "")
                 ok = seg_price(shot, price_box, s, td, ffmpeg, pw, ph, p["disc"], p["code"],
-                               font, p["price"], secs, title_box=title_box)
+                               font, old_txt, new_txt, secs, title_box=title_box)
             elif kind == "reviews":
                 ok = seg_from_crop(shot, rev_box, s, td, ffmpeg, pw, ph, p["disc"], p["code"],
                                    font, "LOVED BY REAL BUYERS", i, secs,
