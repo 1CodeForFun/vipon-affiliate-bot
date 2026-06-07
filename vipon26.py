@@ -206,6 +206,59 @@ def expiry_to_date_text(expiry_txt: str) -> str:
 
     return ""   # unparseable → VO will use "Limited time" fallback
 
+# ── Social proof (units sold + rating) → score for reel selection ──────────────
+def _parse_units_sold(text: str) -> int:
+    """'100+ bought in past month' → 100 ; '1K+' → 1000 ; '2.5K' → 2500."""
+    if not text: return 0
+    m = re.search(r"(\d+(?:\.\d+)?)\s*([KkMm]?)", text)
+    if not m: return 0
+    n = float(m.group(1))
+    return int(n * {"k": 1_000, "m": 1_000_000}.get(m.group(2).lower(), 1))
+
+def _parse_stars(text: str) -> float:
+    if not text: return 0.0
+    m = re.search(r"(\d(?:\.\d)?)", text)
+    return float(m.group(1)) if m else 0.0
+
+def _parse_rating_count(text: str) -> int:
+    if not text: return 0
+    m = re.search(r"([\d,]+)", text)
+    return int(m.group(1).replace(",", "")) if m else 0
+
+def _social_score(units_sold: int, stars: float, rating_count: int) -> float:
+    """Compound recent sales velocity with rating quality and a small log-volume
+    bump. Velocity leads; stars scale it; review volume nudges (saturating)."""
+    import math as _m
+    quality = (stars / 5.0) if stars else 0.6
+    volume  = 1 + _m.log10(rating_count + 1) / 4.0
+    base    = units_sold if units_sold else 1
+    return round(base * quality * volume, 1)
+
+def fetch_social_proof(asin: str, tld: str = "com") -> dict:
+    """Best-effort social proof from the Amazon page HTML (no Selenium).
+    Returns {'units': int, 'stars': float, 'ratings': int, 'score': float}."""
+    out = {"units": 0, "stars": 0.0, "ratings": 0, "score": 0.0}
+    try:
+        import html as _html
+        r = requests.get(
+            f"https://www.amazon.{tld}/dp/{asin}?th=1&psc=1",
+            headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.8"},
+            timeout=20,
+        )
+        if not r.ok:
+            return out
+        h = r.text
+        m_bought = re.search(r"([\d.,]+\+?\s*[KkMm]?)\+?\s*bought in past month", h)
+        m_stars  = re.search(r"(\d(?:\.\d)?)\s*out of\s*5\s*stars", h)
+        m_count  = re.search(r"([\d,]+)\s*(?:global\s*)?ratings?", h)
+        out["units"]   = _parse_units_sold(m_bought.group(1)) if m_bought else 0
+        out["stars"]   = _parse_stars(m_stars.group(1)) if m_stars else 0.0
+        out["ratings"] = _parse_rating_count(m_count.group(1)) if m_count else 0
+        out["score"]   = _social_score(out["units"], out["stars"], out["ratings"])
+    except Exception as e:
+        log(f"  ⚠️ social proof fetch failed for {asin}: {e}")
+    return out
+
 def _normalize_discount(raw: str) -> str:
     if not raw:
         return ""
@@ -816,8 +869,9 @@ HEADER = [
     "Link", "Reel", "IG", "Youtube", "TikTok",
     "Discount Code", "Disc", "Expiry", "Product", "Price",
     "PID", "Image", "Pin Image", "Reel URL", "FB Post", "Reel Posted",
-    "FB Text Posted", "YT Posted",
+    "FB Text Posted", "YT Posted", "Social Score",
 ]
+COL_S_SOCIAL = 19   # Social Score (1-based) — used by the reel publisher to rank
 
 # ── Pinterest sheet (preserved, gated by ENABLE_PINTEREST) ──────
 PINTEREST_SHEET_NAME       = "Pintrest"
@@ -2100,7 +2154,13 @@ def main():
             log(f"  ⚠️ reel failed for PID {pid}: {e}")
             reel_url = ""
 
-        # Write main sheet row
+        # Social proof → score (for the reel publisher to rank which products
+        # get a video). Best-effort; 0 on failure.
+        _m_asin = re.search(r"asin=([A-Za-z0-9]{10})", data["link"], re.I)
+        _sp = fetch_social_proof(_m_asin.group(1).upper(), "com") if _m_asin else {"score": 0.0}
+        log(f"  social: units={_sp.get('units',0)} stars={_sp.get('stars',0)} score={_sp.get('score',0)}")
+
+        # Write main sheet row (cols A-O, then P/Q/R blank, S = social score)
         ws.append_rows([[
             data["link"],
             data["link_reel"],
@@ -2124,6 +2184,7 @@ def main():
                 t_short,
                 data["price"],
             ),
+            "", "", "", _sp.get("score", 0.0),
         ]], value_input_option="USER_ENTERED", table_range="A1")
 
         # Write Pinterest row (only if enabled)
@@ -2170,6 +2231,9 @@ def main():
             log(f"  ⚠️ CA reel failed for PID {pid}: {e}")
             reel_url = ""
 
+        _m_asin = re.search(r"asin=([A-Za-z0-9]{10})", data["link"], re.I)
+        _sp = fetch_social_proof(_m_asin.group(1).upper(), AMAZON_TLD_CA) if _m_asin else {"score": 0.0}
+
         ws2.append_rows([[
             data["link"],
             data["link_reel"],
@@ -2193,10 +2257,11 @@ def main():
                 t_short,
                 data["price"],
             ),
+            "", "", "", _sp.get("score", 0.0),
         ]], value_input_option="USER_ENTERED", table_range="A1")
 
         time.sleep(0.3)
-        log(f"✓ CA row written for PID {pid}")
+        log(f"✓ CA row written for PID {pid} (social score {_sp.get('score',0)})")
 
     log(f"✅ CA done — {len(scraped_ca)} products processed")
 
