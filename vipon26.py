@@ -184,6 +184,14 @@ def is_plausible_code(code: str, *, strict: bool = False) -> bool:
     if strict and not any(ch.isdigit() for ch in c): return False
     return True
 
+# One-time (single-use) codes are multi-segment with dashes, e.g.
+# "ZAF7-U8NJCD-RYYKAF". A normal shareable code is a single token (no dash).
+# These can only be redeemed once, so we skip the product entirely.
+_ONETIME_RE = re.compile(r"[A-Z0-9]{2,}-[A-Z0-9]{2,}")
+
+def is_onetime_code(text: str) -> bool:
+    return bool(_ONETIME_RE.search((text or "").upper()))
+
 def expiry_to_date_text(expiry_txt: str) -> str:
     """Convert an expiry string to a short readable date like 'May 30'.
 
@@ -1375,67 +1383,67 @@ def try_reveal_code(driver):
             continue
 
 def extract_code(driver):
-    # 1a) PC_240_jumpToAmzFromCodeZone — wait for NON-EMPTY text (element exists from page load
-    #     but is empty until AJAX populates it after clicking GET CODE)
+    """Return a single shareable discount code, or "" to skip the product.
+
+    Only trusts the reveal zone + explicit code elements (NOT broad page-text
+    scans, which grabbed category words / fragments). Rejects one-time (dashed)
+    codes outright — they're single-use and can't be shared with followers.
+    """
+    # 1) Authoritative reveal zone — AJAX-populated after clicking GET CODE.
+    zone = ""
     try:
         WebDriverWait(driver, 5).until(
             lambda d: (d.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone").text or "").strip()
         )
-        el  = driver.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone")
-        txt = (_text(el) or "").upper()
-        m   = CODE_RE.search(txt)
-        if m and is_plausible_code(m.group(1), strict=False): return m.group(1)
-        if is_plausible_code(txt, strict=False): return txt
+        zone = (_text(driver.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone")) or "").strip().upper()
     except Exception:
         pass
-    # 1b) Other known IDs (presence check is fine — these only exist when code is ready)
+    if zone and is_onetime_code(zone):
+        log("  ✗ one-time (dashed) code — skipping"); return ""
+    if zone:
+        m = CODE_RE.search(zone)
+        if m and is_plausible_code(m.group(1)): return m.group(1)
+        if is_plausible_code(zone): return zone
+    # 2) Other explicit code IDs
     for i in ["PC_240_codeInDetail", "coupon_code"]:
         try:
-            el = WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.ID, i)))
-            txt = (_text(el) or "").upper()
+            el  = WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.ID, i)))
+            txt = (_text(el) or "").strip().upper()
+            if is_onetime_code(txt):
+                log("  ✗ one-time (dashed) code — skipping"); return ""
             m = CODE_RE.search(txt)
-            if m and is_plausible_code(m.group(1), strict=False): return m.group(1)
-            if is_plausible_code(txt, strict=False): return txt
+            if m and is_plausible_code(m.group(1)): return m.group(1)
+            if is_plausible_code(txt): return txt
         except Exception:
             pass
-    # 2) Input fields — code is often pre-filled for easy copy
+    # 3) Copy-input fields — the full value must be a clean single-token code
     try:
-        for inp in driver.find_elements(By.XPATH,
-                "//input[@type='text' or not(@type)]")[:20]:
+        for inp in driver.find_elements(By.XPATH, "//input[@type='text' or not(@type)]")[:20]:
             val = (inp.get_attribute("value") or "").strip().upper()
-            if is_plausible_code(val, strict=False):
+            if is_onetime_code(val):
+                log("  ✗ one-time (dashed) code — skipping"); return ""
+            if is_plausible_code(val):
                 return val
     except Exception:
         pass
-    # 3) Elements whose class or id contains "coupon" or "code"
+    # 4) Elements whose class/id explicitly mentions coupon/code
     try:
         for el in driver.find_elements(By.XPATH,
                 "//*[contains(@class,'coupon') or contains(@class,'code') or "
                 "contains(@id,'coupon') or contains(@id,'code') or "
-                "contains(@class,'Coupon') or contains(@class,'Code')]")[:60]:
+                "contains(@class,'Coupon') or contains(@class,'Code')]")[:40]:
             txt = (_text(el) or "").strip().upper()
-            if not txt or len(txt) > 20:
-                continue   # skip empty or long blocks
+            if not txt or len(txt) > 25:
+                continue
+            if is_onetime_code(txt):
+                log("  ✗ one-time (dashed) code — skipping"); return ""
             m = CODE_RE.search(txt)
-            if m and is_plausible_code(m.group(1), strict=False):
-                return m.group(1)
+            if m and is_plausible_code(m.group(1)): return m.group(1)
     except Exception:
         pass
-    # 4) Page-source keyword scan
-    try:
-        src = (driver.page_source or "").upper()
-        m = re.search(r"CODE[:\s]*([A-Z0-9]{6,12})", src)
-        if m and is_plausible_code(m.group(1), strict=False): return m.group(1)
-    except Exception:
-        pass
-    # 5) Broad text scan (last resort)
-    try:
-        for el in driver.find_elements(By.XPATH, "//strong|//b|//code|//span")[:250]:
-            txt = (_text(el) or "").upper()
-            m = CODE_RE.search(txt)
-            if m and is_plausible_code(m.group(1), strict=True): return m.group(1)
-    except Exception:
-        pass
+    # NOTE: broad page-source / span scans removed — they grabbed category words
+    # (e.g. "ELECTRONICS") and code fragments. No code from the reveal zone = skip
+    # (covers deal-only "Get Deal at Amazon" products, which have no code).
     return ""
 
 # ════════════════════════════════════════════════════════════════
