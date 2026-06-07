@@ -126,6 +126,37 @@ def friendly_date(expiry):
             return f"{d.strftime('%B')} {d.day}"
     return expiry
 
+def parse_units_sold(text):
+    """'100+ bought in past month' → 100 ; '1K+ bought' → 1000 ; '2.5K' → 2500."""
+    if not text: return 0
+    m = re.search(r"(\d+(?:\.\d+)?)\s*([KkMm]?)", text)
+    if not m: return 0
+    n = float(m.group(1))
+    return int(n * {"k": 1_000, "m": 1_000_000}.get(m.group(2).lower(), 1))
+
+def parse_stars(text):
+    """'4.3 out of 5 stars' → 4.3."""
+    if not text: return 0.0
+    m = re.search(r"(\d(?:\.\d)?)", text)
+    return float(m.group(1)) if m else 0.0
+
+def parse_count(text):
+    """'12,394 ratings' → 12394."""
+    if not text: return 0
+    m = re.search(r"([\d,]+)", text)
+    return int(m.group(1).replace(",", "")) if m else 0
+
+def social_score(units_sold, stars, rating_count):
+    """Compound recent sales velocity with rating quality (and a little volume).
+    Velocity is the strongest signal; stars scale it; a log of rating_count adds
+    a small, saturating bump so a huge review base helps but doesn't dominate.
+    """
+    import math as _m
+    quality = (stars / 5.0) if stars else 0.6          # neutral-ish if unknown
+    volume  = 1 + _m.log10(rating_count + 1) / 4.0     # ~1.0 .. ~2.0
+    base    = units_sold if units_sold else 1
+    return round(base * quality * volume, 1)
+
 def probe_duration(path, ffmpeg):
     try:
         r = subprocess.run([ffmpeg, "-i", path], stderr=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -249,10 +280,12 @@ def gemini_tts(text, keys, voice=TTS_VOICE):
 
 # ─── CHROME: capture gallery images + price/reviews regions ──────────────────────
 _GALLERY_JS = r"""
-const out = {images: [], price: null, reviews: null};
+const out = {images: [], price: null, reviews: null,
+             bought: "", rating: "", rating_count: ""};
 function abs(el){ if(!el) return null; const r=el.getBoundingClientRect();
   if(r.width<8||r.height<4) return null;
   return {x:r.left+window.scrollX, y:r.top+window.scrollY, w:r.width, h:r.height}; }
+function txt(el){ return el ? (el.innerText||el.textContent||'').trim() : ''; }
 // gallery image URLs — ONLY from the product image gallery, to avoid ad/sponsor
 // banners (e.g. "Fanka") that live elsewhere on the page.
 const GAL = ['#main-image-container', '#imageBlock', '#altImages',
@@ -276,6 +309,15 @@ out.price   = abs(document.querySelector('.priceToPay')
 out.reviews = abs(document.querySelector('#averageCustomerReviews')
             || document.querySelector('#acrPopover')
             || document.querySelector("[data-hook='review']"));
+// ── social proof ──
+// units sold this month ("100+ bought in past month")
+{ const els = document.querySelectorAll('span,div,a');
+  for (const e of els){ const t=(e.innerText||'').trim();
+    if(/bought in past/i.test(t) && t.length<60){ out.bought=t; break; } } }
+// star rating + how many ratings
+out.rating       = txt(document.querySelector("[data-hook='rating-out-of-text']")
+                 || document.querySelector('#acrPopover'));
+out.rating_count = txt(document.querySelector('#acrCustomerReviewText'));
 return out;
 """
 
@@ -298,6 +340,7 @@ def capture_page(asin, td, ffmpeg):
     driver = webdriver.Chrome(service=(Service(executable_path=drv) if drv else Service()), options=opts)
     shot = os.path.join(td, "page.png")
     imgs, pw, ph, price_box, rev_box = [], 0, 0, None, None
+    social = {"bought": "", "rating": "", "rating_count": ""}
     try:
         driver.set_window_size(440, 950)
         driver.get(f"https://www.amazon.com/dp/{asin}?th=1&psc=1")
@@ -307,7 +350,10 @@ def capture_page(asin, td, ffmpeg):
         data = driver.execute_script(_GALLERY_JS) or {}
         imgs = data.get("images", [])[:6]
         price_box, rev_box = data.get("price"), data.get("reviews")
+        social = {"bought": data.get("bought", ""), "rating": data.get("rating", ""),
+                  "rating_count": data.get("rating_count", "")}
         log(f"  gallery imgs: {len(imgs)} | price box: {'y' if price_box else 'n'} | reviews box: {'y' if rev_box else 'n'}")
+        log(f"  social: bought='{social['bought']}' rating='{social['rating']}' count='{social['rating_count']}'")
         metrics = driver.execute_cdp_cmd("Page.getLayoutMetrics", {})
         pw = math.ceil(metrics["cssContentSize"]["width"])
         ph = min(math.ceil(metrics["cssContentSize"]["height"]), 7000)
@@ -328,7 +374,7 @@ def capture_page(asin, td, ffmpeg):
     finally:
         try: driver.quit()
         except Exception: pass
-    return imgs, (shot if os.path.exists(shot) else None), pw, ph, price_box, rev_box
+    return imgs, (shot if os.path.exists(shot) else None), pw, ph, price_box, rev_box, social
 
 # ─── SEGMENT BUILDERS ────────────────────────────────────────────────────────────
 def _overlay_codepct(disc, code, font):
@@ -479,12 +525,20 @@ def main():
         log("\n--- FB POST PIECE 2 (link + code, text only) ---\n" + piece2)
         log("\n--- FULL FB POST (piece1 + piece2) ---\n" + piece1 + "\n\n" + piece2 + "\n")
 
-        log("[3] Capturing Amazon phone page (gallery + price + reviews)…")
-        imgs, shot, pw, ph, price_box, rev_box = capture_page(p["asin"], td, ffmpeg)
+        log("[3] Capturing Amazon phone page (gallery + price + reviews + social)…")
+        imgs, shot, pw, ph, price_box, rev_box, social = capture_page(p["asin"], td, ffmpeg)
         if p["cover"]:
             imgs = [p["cover"]] + [u for u in imgs if u != p["cover"]]
         if not imgs:
             raise RuntimeError("No product images available")
+
+        # Social-proof score (this is what product SELECTION will rank on)
+        units = parse_units_sold(social["bought"])
+        stars = parse_stars(social["rating"])
+        rcnt  = parse_count(social["rating_count"])
+        sscore = social_score(units, stars, rcnt)
+        log(f"\n[3b] Social proof → units sold/mo: {units} | stars: {stars} | "
+            f"ratings: {rcnt} | SOCIAL SCORE: {sscore}")
 
         log("\n[4] Building frames…")
         segs = []
