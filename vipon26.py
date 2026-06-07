@@ -234,29 +234,49 @@ def _social_score(units_sold: int, stars: float, rating_count: int) -> float:
     base    = units_sold if units_sold else 1
     return round(base * quality * volume, 1)
 
+# Circuit breaker: if Amazon blocks the social fetch (captcha on CI IPs) a few
+# times in a row, stop trying for the rest of the run so it can't slow the scrape.
+_SOCIAL_FAILS = 0
+_SOCIAL_OFF   = False
+
 def fetch_social_proof(asin: str, tld: str = "com") -> dict:
     """Best-effort social proof from the Amazon page HTML (no Selenium).
-    Returns {'units': int, 'stars': float, 'ratings': int, 'score': float}."""
+    Returns {'units': int, 'stars': float, 'ratings': int, 'score': float}.
+    Self-disables after repeated blocks so a captcha-walled Amazon can't bloat
+    the scrape."""
+    global _SOCIAL_FAILS, _SOCIAL_OFF
     out = {"units": 0, "stars": 0.0, "ratings": 0, "score": 0.0}
+    if _SOCIAL_OFF or not asin:
+        return out
     try:
-        import html as _html
         r = requests.get(
             f"https://www.amazon.{tld}/dp/{asin}?th=1&psc=1",
             headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.8"},
-            timeout=20,
+            timeout=12,
         )
-        if not r.ok:
+        body = r.text or ""
+        blocked = (not r.ok) or ("captcha" in body[:5000].lower()) or ("robot check" in body[:5000].lower())
+        if blocked:
+            _SOCIAL_FAILS += 1
+            if _SOCIAL_FAILS >= 3:
+                _SOCIAL_OFF = True
+                log("  ⚠️ social proof: Amazon blocking — disabled for the rest of this run")
             return out
-        h = r.text
-        m_bought = re.search(r"([\d.,]+\+?\s*[KkMm]?)\+?\s*bought in past month", h)
-        m_stars  = re.search(r"(\d(?:\.\d)?)\s*out of\s*5\s*stars", h)
-        m_count  = re.search(r"([\d,]+)\s*(?:global\s*)?ratings?", h)
+        _SOCIAL_FAILS = 0
+        m_bought = re.search(r"([\d.,]+\+?\s*[KkMm]?)\+?\s*bought in past month", body)
+        m_stars  = re.search(r"(\d(?:\.\d)?)\s*out of\s*5\s*stars", body)
+        m_count  = re.search(r"([\d,]+)\s*(?:global\s*)?ratings?", body)
         out["units"]   = _parse_units_sold(m_bought.group(1)) if m_bought else 0
         out["stars"]   = _parse_stars(m_stars.group(1)) if m_stars else 0.0
         out["ratings"] = _parse_rating_count(m_count.group(1)) if m_count else 0
         out["score"]   = _social_score(out["units"], out["stars"], out["ratings"])
     except Exception as e:
-        log(f"  ⚠️ social proof fetch failed for {asin}: {e}")
+        _SOCIAL_FAILS += 1
+        if _SOCIAL_FAILS >= 3:
+            _SOCIAL_OFF = True
+            log("  ⚠️ social proof: repeated errors — disabled for the rest of this run")
+        else:
+            log(f"  ⚠️ social proof fetch failed for {asin}: {e}")
     return out
 
 def _normalize_discount(raw: str) -> str:
