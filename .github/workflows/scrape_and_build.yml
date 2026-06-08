@@ -72,3 +72,14 @@ jobs:
           MAX_DISCOVERY: ${{ github.event.inputs.max_discovery }}
           SCROLL_MAX:    ${{ github.event.inputs.scroll_max }}
         run: python vipon26.py
+
+      # Always upload debug snapshots (login-failure screenshots + page HTML) so we
+      # can see what Vipon served the CI browser even when the run fails.
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrape-debug
+          path: debug_artifacts/
+          if-no-files-found: ignore
+          retention-days: 7

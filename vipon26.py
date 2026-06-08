@@ -979,29 +979,71 @@ def logout(driver):
     except Exception as e:
         log(f"  ⚠️ Logout error (ignored): {e.__class__.__name__}")
 
+def _capture_login_failure(driver, acc):
+    """On a login failure, snapshot what the CI browser actually sees (CAPTCHA /
+    Cloudflare / block page / blank). Saves PNG + HTML to debug_artifacts/ (uploaded
+    as a GitHub Actions artifact) and logs the URL, title, and any bot-check markers
+    found in the page text — the markers alone often answer 'why' without the image."""
+    try:
+        os.makedirs("debug_artifacts", exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        safe  = re.sub(r"[^A-Za-z0-9]", "_", (acc or {}).get("username", "acct"))
+        base  = os.path.join("debug_artifacts", f"login_fail_{safe}_{stamp}")
+        try:    url = driver.current_url
+        except Exception: url = "?"
+        try:    title = driver.title
+        except Exception: title = "?"
+        log(f"  📸 LOGIN FAILURE — url={url!r} title={title!r}")
+        try:
+            driver.save_screenshot(base + ".png")
+            log(f"  📸 screenshot -> {base}.png")
+        except Exception as e:
+            log(f"  ⚠️ screenshot failed: {e.__class__.__name__}")
+        html = ""
+        try:
+            html = driver.page_source or ""
+            with open(base + ".html", "w", encoding="utf-8") as f:
+                f.write(html)
+            log(f"  📸 page source -> {base}.html ({len(html)} chars)")
+        except Exception as e:
+            log(f"  ⚠️ page source failed: {e.__class__.__name__}")
+        low = html.lower()
+        markers = [m for m in ("captcha", "recaptcha", "cloudflare", "unusual traffic",
+                               "verify", "are you a robot", "access denied", "forbidden",
+                               "blocked", "too many requests", "rate limit", "geetest",
+                               "slider", "challenge") if m in low]
+        log(f"  🚩 bot-check markers: {', '.join(markers) if markers else 'none found in page text'}")
+    except Exception as e:
+        log(f"  ⚠️ _capture_login_failure error: {e.__class__.__name__}")
+
+
 def login(driver, wait):
     acc = _current_account()
     log(f"▶ Logging in as {acc['username']}…")
-    driver.get("https://www.myvipon.com/login")
-    wait.until(EC.presence_of_element_located((By.NAME, "LoginForm[email]"))).send_keys(acc["username"])
-    wait.until(EC.presence_of_element_located((By.NAME, "LoginForm[password]"))).send_keys(acc["password"])
-    for xp in [
-        "//div[contains(@class,'google_test') and normalize-space(text())='Log In']",
-        "//button[@type='submit']",
-        "//button[contains(.,'Login') or contains(.,'Log in') or contains(.,'Sign in')]",
-        "//input[@type='submit']",
-    ]:
-        try:
-            btn = WebDriverWait(driver, 12).until(EC.element_to_be_clickable((By.XPATH, xp)))
-            btn.click(); break
-        except Exception:
-            continue
-    # Give post-login redirect more time than the default WAIT_SECS
-    WebDriverWait(driver, 30).until(
-        EC.presence_of_element_located((By.XPATH, "//a[contains(@href,'logout')]"))
-    )
-    _dismiss_overlays(driver)
-    log("✓ Logged in")
+    try:
+        driver.get("https://www.myvipon.com/login")
+        wait.until(EC.presence_of_element_located((By.NAME, "LoginForm[email]"))).send_keys(acc["username"])
+        wait.until(EC.presence_of_element_located((By.NAME, "LoginForm[password]"))).send_keys(acc["password"])
+        for xp in [
+            "//div[contains(@class,'google_test') and normalize-space(text())='Log In']",
+            "//button[@type='submit']",
+            "//button[contains(.,'Login') or contains(.,'Log in') or contains(.,'Sign in')]",
+            "//input[@type='submit']",
+        ]:
+            try:
+                btn = WebDriverWait(driver, 12).until(EC.element_to_be_clickable((By.XPATH, xp)))
+                btn.click(); break
+            except Exception:
+                continue
+        # Give post-login redirect more time than the default WAIT_SECS
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.XPATH, "//a[contains(@href,'logout')]"))
+        )
+        _dismiss_overlays(driver)
+        log("✓ Logged in")
+    except Exception:
+        _capture_login_failure(driver, acc)   # snapshot the block/CAPTCHA page, then re-raise
+        raise
 
 # ════════════════════════════════════════════════════════════════
 #  GOOGLE SHEETS
