@@ -160,6 +160,9 @@ BAD_CODES = {
     "IMPROVEMENT", "INDUSTRIAL", "SCIENTIFIC", "MUSICAL", "INSTRUMENTS",
     "HANDMADE", "CAMERA", "PHOTO", "COMPUTERS", "SOFTWARE", "VIDEO", "MOVIES",
     "MUSIC", "BOOKS", "PETSUPPLIES", "WELLNESS",
+    "CRAFTS", "ARTS", "SEWING", "LUGGAGE", "MENS", "WOMENS", "BOYS", "GIRLS",
+    "KIDS", "ADULT", "UNISEX", "SMART", "VINYL", "CELL", "PHONES", "APPLIANCES",
+    "LIGHTING", "BEDDING", "DECOR", "PATIO", "LAWN", "TRAVEL", "FITNESS",
 }
 CODE_RE   = re.compile(r"\b([A-Z0-9]{6,12})\b")
 ASIN_RE   = re.compile(r"\bB0[A-Z0-9]{8}\b", re.I)
@@ -253,9 +256,32 @@ def _parse_rating_count(text: str) -> int:
     m = re.search(r"([\d,]+)", text)
     return int(m.group(1).replace(",", "")) if m else 0
 
+def _price_num(s) -> float:
+    m = re.search(r"(\d+(?:\.\d+)?)", (s or "").replace(",", ""))
+    return float(m.group(1)) if m else 0.0
+
+def _disc_num(s) -> float:
+    m = re.search(r"(\d{1,3})", s or "")
+    return float(m.group(1)) if m else 0.0
+
+def selection_score(units_sold: int, stars: float, rating_count: int,
+                    price, disc_pct) -> float:
+    """Rank products by COMMISSION potential, not raw unit velocity.
+
+    Price (the $/sale driver) and discount (clickability) lead; social proof
+    (units sold + ratings volume) is a SMOOTH, bounded multiplier so a cheap
+    high-volume item (lunch bag) can't bury a higher-ticket one (chainsaw).
+    """
+    import math as _m
+    pv = _price_num(price);  pv = pv if pv > 0 else 5.0
+    dv = _disc_num(disc_pct)
+    commercial = pv * (1 + dv / 100.0)               # higher price + bigger discount
+    quality    = (stars / 5.0) if stars else 0.7      # 0..1 rating quality
+    demand     = 1 + _m.log10(units_sold + 1) / 2.0 + _m.log10(rating_count + 1) / 4.0
+    return round(commercial * quality * demand, 1)
+
 def _social_score(units_sold: int, stars: float, rating_count: int) -> float:
-    """Compound recent sales velocity with rating quality and a small log-volume
-    bump. Velocity leads; stars scale it; review volume nudges (saturating)."""
+    """Social-proof-only signal (kept for logging/reference)."""
     import math as _m
     quality = (stars / 5.0) if stars else 0.6
     volume  = 1 + _m.log10(rating_count + 1) / 4.0
@@ -1416,7 +1442,9 @@ def extract_code(driver):
             if is_plausible_code(txt): return txt
         except Exception:
             pass
-    # 3) Copy-input fields — the full value must be a clean single-token code
+    # 3) Copy-input field — the FULL value must be a clean single-token code.
+    #    (We do NOT regex-search arbitrary text — that's what grabbed "CRAFTS"
+    #     out of the category breadcrumb. Only an exact input value qualifies.)
     try:
         for inp in driver.find_elements(By.XPATH, "//input[@type='text' or not(@type)]")[:20]:
             val = (inp.get_attribute("value") or "").strip().upper()
@@ -1426,24 +1454,10 @@ def extract_code(driver):
                 return val
     except Exception:
         pass
-    # 4) Elements whose class/id explicitly mentions coupon/code
-    try:
-        for el in driver.find_elements(By.XPATH,
-                "//*[contains(@class,'coupon') or contains(@class,'code') or "
-                "contains(@id,'coupon') or contains(@id,'code') or "
-                "contains(@class,'Coupon') or contains(@class,'Code')]")[:40]:
-            txt = (_text(el) or "").strip().upper()
-            if not txt or len(txt) > 25:
-                continue
-            if is_onetime_code(txt):
-                log("  ✗ one-time (dashed) code — skipping"); return ""
-            m = CODE_RE.search(txt)
-            if m and is_plausible_code(m.group(1)): return m.group(1)
-    except Exception:
-        pass
-    # NOTE: broad page-source / span scans removed — they grabbed category words
-    # (e.g. "ELECTRONICS") and code fragments. No code from the reveal zone = skip
-    # (covers deal-only "Get Deal at Amazon" products, which have no code).
+    # NOTE: the loose class/id="*code*" scan and broad page-text scans were removed —
+    # they pulled category words ("CRAFTS"/"ELECTRONICS") and code fragments. No code
+    # from the reveal zone/IDs/input = skip (also covers deal-only "Get Deal at
+    # Amazon" products, which have no exclusive code).
     return ""
 
 # ════════════════════════════════════════════════════════════════
@@ -2214,11 +2228,14 @@ def main():
         # not during the scrape. Leave the Reel URL blank here.
         reel_url = ""
 
-        # Social proof → score (for the reel publisher to rank which products
-        # get a video). Best-effort; 0 on failure.
+        # Selection score = commission potential (price × discount) × social proof.
+        # Best-effort social fetch; price/discount always available from the scrape.
         _m_asin = re.search(r"asin=([A-Za-z0-9]{10})", data["link"], re.I)
-        _sp = fetch_social_proof(_m_asin.group(1).upper(), "com") if _m_asin else {"score": 0.0}
-        log(f"  social: units={_sp.get('units',0)} stars={_sp.get('stars',0)} score={_sp.get('score',0)}")
+        _sp = fetch_social_proof(_m_asin.group(1).upper(), "com") if _m_asin else {}
+        _score = selection_score(_sp.get("units", 0), _sp.get("stars", 0.0),
+                                 _sp.get("ratings", 0), data["price"], data["discount"])
+        log(f"  score: units={_sp.get('units',0)} stars={_sp.get('stars',0)} "
+            f"price={data['price']} disc={data['discount']} → {_score}")
 
         # Write main sheet row (cols A-O, then P/Q/R blank, S = social score)
         ws.append_rows([[
@@ -2244,7 +2261,7 @@ def main():
                 t_short,
                 data["price"],
             ),
-            "", "", "", _sp.get("score", 0.0),
+            "", "", "", _score,
         ]], value_input_option="USER_ENTERED", table_range="A1")
 
         # Write Pinterest row (only if enabled)
@@ -2281,7 +2298,9 @@ def main():
         reel_url = ""
 
         _m_asin = re.search(r"asin=([A-Za-z0-9]{10})", data["link"], re.I)
-        _sp = fetch_social_proof(_m_asin.group(1).upper(), AMAZON_TLD_CA) if _m_asin else {"score": 0.0}
+        _sp = fetch_social_proof(_m_asin.group(1).upper(), AMAZON_TLD_CA) if _m_asin else {}
+        _score = selection_score(_sp.get("units", 0), _sp.get("stars", 0.0),
+                                 _sp.get("ratings", 0), data["price"], data["discount"])
 
         ws2.append_rows([[
             data["link"],
@@ -2306,11 +2325,11 @@ def main():
                 t_short,
                 data["price"],
             ),
-            "", "", "", _sp.get("score", 0.0),
+            "", "", "", _score,
         ]], value_input_option="USER_ENTERED", table_range="A1")
 
         time.sleep(0.3)
-        log(f"✓ CA row written for PID {pid} (social score {_sp.get('score',0)})")
+        log(f"✓ CA row written for PID {pid} (score {_score})")
 
     log(f"✅ CA done — {len(scraped_ca)} products processed")
 
