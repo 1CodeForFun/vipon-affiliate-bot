@@ -1397,10 +1397,13 @@ def try_reveal_code(driver):
             time.sleep(0.5)
             try: driver.execute_script("arguments[0].click();", el)
             except Exception: el.click()
-            # Wait for the code text to appear in PC_240_jumpToAmzFromCodeZone (AJAX result)
+            # Wait for the code to be present in PC_240_jumpToAmzFromCodeZone.
+            # Read textContent (not .text): the code can be in the DOM while the zone
+            # stays hidden, so .text would block the full 6s for nothing.
             try:
                 WebDriverWait(driver, 6).until(
-                    lambda d: (d.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone").text or "").strip()
+                    lambda d: (d.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone")
+                               .get_attribute("textContent") or "").strip()
                 )
             except Exception:
                 time.sleep(3.0)   # fallback if element not found by ID
@@ -1415,13 +1418,23 @@ def extract_code(driver):
     scans, which grabbed category words / fragments). Rejects one-time (dashed)
     codes outright — they're single-use and can't be shared with followers.
     """
-    # 1) Authoritative reveal zone — AJAX-populated after clicking GET CODE.
+    # 1) Authoritative reveal zone. The code is embedded in PC_240's <span> the whole
+    #    time; the "Get Code" click only UN-HIDES it (display:flex). Vipon throttles
+    #    that VISUAL reveal after ~8/session, but the code TEXT never leaves the DOM.
+    #    Selenium's .text returns "" for hidden nodes — which silently dropped every
+    #    product after the first 8 and triggered the endless account rotation. Read
+    #    textContent so a throttled/blocked visual reveal can't hide the code from us.
     zone = ""
     try:
         WebDriverWait(driver, 5).until(
-            lambda d: (d.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone").text or "").strip()
+            lambda d: (d.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone")
+                       .get_attribute("textContent") or "").strip()
         )
-        zone = (_text(driver.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone")) or "").strip().upper()
+    except Exception:
+        pass
+    try:
+        _el  = driver.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone")
+        zone = (_el.get_attribute("textContent") or _el.text or "").strip().upper()
     except Exception:
         pass
     if zone and is_onetime_code(zone):
