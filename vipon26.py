@@ -105,6 +105,12 @@ REVEAL_PACE_MAX = float(os.getenv("REVEAL_PACE_MAX") or "6.0")
 EARLY_STOP_MIN_PRODUCTS = int(os.getenv("EARLY_STOP_MIN_PRODUCTS") or "12")
 EARLY_STOP_AFTER_MIN    = float(os.getenv("EARLY_STOP_AFTER_MIN") or "45")
 
+# Seller-intake reward: products that sellers send us directly get their real
+# selection score PLUS this bonus, so the publisher produces their videos ahead of
+# the regular scraped batch (we reward direct outreach instead of burying it under
+# social scoring). Set to 0 to score sellers exactly like scraped products.
+SELLER_SCORE_BONUS = float(os.getenv("SELLER_SCORE_BONUS") or "1000")
+
 SCROLL_MIN         = int(os.getenv("SCROLL_MIN")    or "1")
 SCROLL_MAX         = int(os.getenv("SCROLL_MAX")    or "50")
 SCROLL_PAUSE_RANGE = (0.7, 1.7)
@@ -2111,7 +2117,14 @@ def process_seller_forms(ws_main) -> None:
         platform_links = get_platform_links(asin, "com")
         post_text      = generate_social_post(aff_link, code, disc_txt, expiry, t_short, price)
 
-        # ── Append to Sheet1 (same column order as scraped products) ──
+        # ── Score (rewarded) + append to Sheet1 (same column order as scraped) ──
+        # Real selection score + seller bonus so the publisher ranks/produces these
+        # ahead of the regular batch. Col S must be populated or the publisher (which
+        # ranks by Col S) treats the row as score 0 and never picks it.
+        _sp = fetch_social_proof(asin, "com")
+        _score = round(selection_score(_sp.get("units", 0), _sp.get("stars", 0.0),
+                                       _sp.get("ratings", 0), price, disc_txt)
+                       + SELLER_SCORE_BONUS, 1)
         ws_main.append_rows([[
             aff_link,
             platform_links.get("reel", ""),
@@ -2128,12 +2141,13 @@ def process_seller_forms(ws_main) -> None:
             images[0],
             reel_url,
             post_text,
+            "", "", "", _score,
         ]], value_input_option="USER_ENTERED", table_range="A1")
 
         # ── Mark done in form tab ─────────────────────────────────
         form_ws.update_cell(row_idx, status_col + 1, "Done")
         processed += 1
-        log(f"  ✓ Seller {asin} → Sheet1 row added")
+        log(f"  ✓ Seller {asin} → Sheet1 row added (score {_score}, seller-boosted)")
         time.sleep(0.3)
 
     log(f"✅ Seller forms done — {processed} added to Sheet1, {skipped} skipped")
@@ -2234,16 +2248,21 @@ def process_seller_forms_ca(ws2_main) -> None:
         post_text = generate_social_post(aff_link, code, disc_txt, expiry, t_short, price)
         reel_url = ""   # build-on-publish
 
+        _sp = fetch_social_proof(asin, AMAZON_TLD_CA)
+        _score = round(selection_score(_sp.get("units", 0), _sp.get("stars", 0.0),
+                                       _sp.get("ratings", 0), price, disc_txt)
+                       + SELLER_SCORE_BONUS, 1)
         ws2_main.append_rows([[
             aff_link, platform_links.get("reel",""), platform_links.get("ig",""),
             platform_links.get("youtube",""), platform_links.get("tiktok",""),
             code, disc_txt, expiry, t_short, price, asin,
             images[0], images[0], reel_url, post_text,
+            "", "", "", _score,
         ]], value_input_option="USER_ENTERED", table_range="A1")
 
         form_ws2.update_cell(row_idx, status_col + 1, "Done")
         processed += 1
-        log(f"  ✓ CA Seller {asin} -> Sheet2 row added")
+        log(f"  ✓ CA Seller {asin} -> Sheet2 row added (score {_score}, seller-boosted)")
         time.sleep(0.3)
 
     log(f"✅ CA seller forms done — {processed} added to Sheet2, {skipped} skipped")
@@ -2312,6 +2331,24 @@ def _write_product_row(ws, data, tld="com", ws_p=None) -> float:
     return _score
 
 
+def _sheet_topup_state(ws):
+    """For top-up: return (existing_data_row_count, set_of_existing_PIDs/ASINs in
+    Col K). Lets a rerun fill each sheet UP TO PRODUCT_LIMIT instead of clearing and
+    re-scraping (which re-burns the monthly code quota on products already banked)."""
+    try:
+        vals = ws.get_all_values()
+    except Exception:
+        return 0, set()
+    pids, n = set(), 0
+    for r in (vals[1:] if vals else []):          # skip header
+        if not any((c or "").strip() for c in r): # skip blank rows
+            continue
+        n += 1
+        if len(r) >= 11 and (r[10] or "").strip(): # Col K (11) = PID/ASIN
+            pids.add((r[10] or "").strip())
+    return n, pids
+
+
 # ════════════════════════════════════════════════════════════════
 #  MAIN  — Phase 1: scrape US (Chrome alive), writing each row as it lands
 #          Phase 1b: scrape Canada (same Chrome session, switched to CA)
@@ -2325,6 +2362,19 @@ def main():
     ws     = open_sheet_and_reset()
     ws2    = open_sheet2_and_reset()
     ws_p   = open_pinterest_sheet_and_reset() if ENABLE_PINTEREST else None
+
+    # Top-up: fill each sheet UP TO PRODUCT_LIMIT rather than always scraping a fresh
+    # full batch. After a short run, a rerun completes the day to 24/sheet without
+    # re-scraping (and re-burning quota on) products already banked. Existing PIDs are
+    # skipped so we never duplicate.
+    us_existing, us_pids = _sheet_topup_state(ws)
+    ca_existing, ca_pids = _sheet_topup_state(ws2)
+    us_target = max(0, PRODUCT_LIMIT - us_existing)
+    ca_target = max(0, PRODUCT_LIMIT - ca_existing)
+    need_scrape = (us_target > 0 or ca_target > 0)
+    log(f"▶ Top-up — US: have {us_existing}, need {us_target} more; "
+        f"CA: have {ca_existing}, need {ca_target} more (limit {PRODUCT_LIMIT}).")
+
     driver = create_driver()
     wait   = WebDriverWait(driver, WAIT_SECS)
 
@@ -2336,32 +2386,37 @@ def main():
     def _time_up():
         return (time.time() - scrape_start) >= _budget_sec
     try:
-        # Try every account until one logs in successfully
+        if not need_scrape:
+            log("▶ Both sheets already at the limit — skipping scrape, running seller intake only.")
+        # Try every account until one logs in successfully (only if we need to scrape)
         logged_in = False
-        for _attempt in range(len(VIPON_ACCOUNTS)):
-            try:
-                login(driver, wait)
-                logged_in = True
-                break
-            except Exception as e:
-                log(f"  ⚠️ Login failed for {_current_account()['username']}: {e.__class__.__name__}")
-                if _attempt < len(VIPON_ACCOUNTS) - 1:
-                    logout(driver)              # clear session before trying next account
-                    driver.delete_all_cookies()
-                    _rotate_account()
-        if not logged_in:
-            log("✗ All accounts failed to login — exiting")
-            raise RuntimeError("All Vipon accounts failed to login")
+        if need_scrape:
+            for _attempt in range(len(VIPON_ACCOUNTS)):
+                try:
+                    login(driver, wait)
+                    logged_in = True
+                    break
+                except Exception as e:
+                    log(f"  ⚠️ Login failed for {_current_account()['username']}: {e.__class__.__name__}")
+                    if _attempt < len(VIPON_ACCOUNTS) - 1:
+                        logout(driver)              # clear session before trying next account
+                        driver.delete_all_cookies()
+                        _rotate_account()
+            if not logged_in:
+                log("✗ All accounts failed to login — exiting")
+                raise RuntimeError("All Vipon accounts failed to login")
 
-        tiles = collect_promo_tiles_random(driver, wait)
+        tiles = collect_promo_tiles_random(driver, wait) if (need_scrape and us_target > 0) else []
         count = 0
         consecutive_fails = 0
         rotations_no_success = 0      # account cycles since the last successful code
         ROTATION_THRESHOLD = 6        # switch account after this many consecutive no-code results
 
         for pid, _, _ in tiles:
-            if count >= PRODUCT_LIMIT:
+            if count >= us_target:
                 break
+            if str(pid).strip() in us_pids:
+                continue                 # already on the sheet — don't re-scrape / waste a reveal
             # Time-budget early stop: enough banked + over the time budget → keep what
             # we have rather than burning more monthly quota chasing the full limit.
             if count >= EARLY_STOP_MIN_PRODUCTS and _time_up():
@@ -2410,7 +2465,7 @@ def main():
             rotations_no_success = 0   # a code came through → current session still works
             scraped.append(data)
             count += 1
-            log(f"✓ Scraped {count}/{PRODUCT_LIMIT}: {data['title'][:60]}")
+            log(f"✓ Scraped {count}/{us_target} (sheet total {us_existing + count}/{PRODUCT_LIMIT}): {data['title'][:60]}")
             # Write this row to the sheet NOW — durable + immediately usable by the
             # publisher/FB jobs, so nothing is lost if the run stops unexpectedly.
             try:
@@ -2420,7 +2475,10 @@ def main():
 
         # ── PHASE 1b: Switch to Canada and scrape CA deals ───────
         log("\n═══ Phase 1b: Canada Scrape ═══")
-        if _time_up() and len(scraped) >= EARLY_STOP_MIN_PRODUCTS:
+        if ca_target <= 0:
+            log(f"  ✓ Sheet2 already has {ca_existing} (≥ {PRODUCT_LIMIT}) — skipping CA scrape.")
+            ca_tiles = []
+        elif _time_up() and len(scraped) >= EARLY_STOP_MIN_PRODUCTS:
             log(f"  ⏳ Time budget reached with {len(scraped)} US products — "
                 f"skipping CA scrape and writing now.")
             ca_tiles = []
@@ -2433,8 +2491,10 @@ def main():
         ca_fails = 0
         CA_THROTTLE_STOP = 8   # consecutive no-code CA results → IP throttled, stop cleanly
         for pid, _, _ in ca_tiles:
-            if ca_count >= PRODUCT_LIMIT:
+            if ca_count >= ca_target:
                 break
+            if str(pid).strip() in ca_pids:
+                continue                 # already on Sheet2 — don't re-scrape / waste a reveal
             # Same time-budget guard for CA (only once we have a solid US batch banked).
             if len(scraped) >= EARLY_STOP_MIN_PRODUCTS and _time_up():
                 log(f"  ⏳ Early stop: time budget reached — {ca_count} CA products, writing now.")
@@ -2455,7 +2515,7 @@ def main():
             ca_fails = 0
             scraped_ca.append(data_ca)
             ca_count += 1
-            log(f"✓ CA Scraped {ca_count}/{PRODUCT_LIMIT}: {data_ca['title'][:60]}")
+            log(f"✓ CA Scraped {ca_count}/{ca_target} (sheet total {ca_existing + ca_count}/{PRODUCT_LIMIT}): {data_ca['title'][:60]}")
             # Write the CA row immediately too.
             try:
                 _write_product_row(ws2, data_ca, tld=AMAZON_TLD_CA)
@@ -2469,14 +2529,17 @@ def main():
         except Exception:
             pass
 
-    if not scraped:
-        log("✗ No products scraped — exiting")
-        return
-
     # Rows are written inline during Phase 1/1b (write-as-you-scrape), so there's
-    # nothing to bulk-write here — just report what landed.
-    log(f"✅ US done — {len(scraped)} products written to Sheet1")
-    log(f"✅ CA done — {len(scraped_ca)} products written to Sheet2")
+    # nothing to bulk-write here — just report what landed. Note: we do NOT exit when
+    # nothing was scraped, because seller intake (Phase 3/4) must still run — e.g. on
+    # a top-up rerun where the sheets were already full of scraped products.
+    if not scraped and not scraped_ca:
+        log("▶ No new products scraped this run (sheets already topped up or none "
+            "available) — proceeding to seller intake.")
+    log(f"✅ US done — {len(scraped)} new product(s) written to Sheet1 "
+        f"(sheet total ~{us_existing + len(scraped)})")
+    log(f"✅ CA done — {len(scraped_ca)} new product(s) written to Sheet2 "
+        f"(sheet total ~{ca_existing + len(scraped_ca)})")
 
     # Free the social-proof Chrome before the seller-form phases
     global _SOCIAL_DRIVER
