@@ -98,6 +98,13 @@ PRODUCT_LIMIT = int(os.getenv("PRODUCT_LIMIT") or "24")
 REVEAL_PACE_MIN = float(os.getenv("REVEAL_PACE_MIN") or "3.0")
 REVEAL_PACE_MAX = float(os.getenv("REVEAL_PACE_MAX") or "6.0")
 
+# Early-stop guard: once we've collected at least EARLY_STOP_MIN_PRODUCTS and spent
+# EARLY_STOP_AFTER_MIN minutes scraping, stop and write what we have to the sheet.
+# Banking a solid batch beats burning more monthly code quota chasing the full
+# PRODUCT_LIMIT and risking the whole run on a timeout.
+EARLY_STOP_MIN_PRODUCTS = int(os.getenv("EARLY_STOP_MIN_PRODUCTS") or "12")
+EARLY_STOP_AFTER_MIN    = float(os.getenv("EARLY_STOP_AFTER_MIN") or "45")
+
 SCROLL_MIN         = int(os.getenv("SCROLL_MIN")    or "1")
 SCROLL_MAX         = int(os.getenv("SCROLL_MAX")    or "50")
 SCROLL_PAUSE_RANGE = (0.7, 1.7)
@@ -2243,10 +2250,71 @@ def process_seller_forms_ca(ws2_main) -> None:
 
 
 # ════════════════════════════════════════════════════════════════
-#  MAIN  — Phase 1: scrape US (Chrome alive)
+#  PER-PRODUCT SHEET WRITE  (write-as-you-scrape)
+# ════════════════════════════════════════════════════════════════
+# Each scraped product is written to the sheet immediately, not batched at the end.
+# This makes the batch durable (a crash/timeout/throttle can't erase what we got) and
+# available to the publisher/FB jobs the moment it lands. We're paced anyway, so one
+# write every several seconds stays well under the Sheets write quota.
+
+def _append_row_retry(ws, row, retries: int = 4) -> bool:
+    """Append one row anchored at column A, retrying on transient/quota errors."""
+    delay = 2.0
+    for attempt in range(retries):
+        try:
+            ws.append_rows([row], value_input_option="USER_ENTERED", table_range="A1")
+            return True
+        except Exception as e:
+            if attempt < retries - 1:
+                log(f"  ⚠️ Sheet append retry {attempt+1}/{retries}: {e.__class__.__name__}")
+                time.sleep(delay); delay *= 1.8
+            else:
+                log(f"  ✗ Sheet append failed after {retries} tries: {e.__class__.__name__}")
+    return False
+
+
+def _write_product_row(ws, data, tld="com", ws_p=None) -> float:
+    """Build and immediately write one scraped product's row. Computes the VO post
+    (Col O) and social/selection score (Col S) inline so the row is fully usable by
+    the publisher/FB jobs. Returns the score. tld picks US vs CA social proof."""
+    pid     = data["pid"]
+    t_short = shorten_title(data["title"], MAX_TITLE_LEN)
+    reel_url = ""   # build-on-publish: the video is built by the publisher at post time
+
+    _m_asin = re.search(r"asin=([A-Za-z0-9]{10})", data["link"], re.I)
+    _sp = fetch_social_proof(_m_asin.group(1).upper(), tld) if _m_asin else {}
+    _score = selection_score(_sp.get("units", 0), _sp.get("stars", 0.0),
+                             _sp.get("ratings", 0), data["price"], data["discount"])
+    log(f"  score: units={_sp.get('units',0)} stars={_sp.get('stars',0)} "
+        f"price={data['price']} disc={data['discount']} → {_score}")
+
+    post_text = generate_social_post(data["link"], data["code"], data["discount"],
+                                     data["expiry"], t_short, data["price"])
+    row = [
+        data["link"], data["link_reel"], data["link_ig"], data["link_youtube"],
+        data["link_tiktok"], data["code"], data["discount"], data["expiry"],
+        t_short, data["price"], pid, data["image"], data["image"], reel_url,
+        post_text, "", "", "", _score,
+    ]
+    if _append_row_retry(ws, row):
+        log(f"✓ Row written for PID {pid} (score {_score})")
+    if ENABLE_PINTEREST and ws_p is not None:
+        try:
+            ws_p.append_row([
+                t_short, reel_url, PINTEREST_BOARD_DEFAULT, PINTEREST_THUMBNAIL_DEFAULT,
+                generate_pinterest_description(t_short, data["discount"], data["code"],
+                                               data["expiry"], data["price"]),
+                data.get("link_pinterest", data["link"]), "", PINTEREST_KEYWORDS_DEFAULT,
+            ], value_input_option="USER_ENTERED")
+        except Exception as e:
+            log(f"  ⚠️ Pinterest row write failed for PID {pid}: {e.__class__.__name__}")
+    time.sleep(0.3)
+    return _score
+
+
+# ════════════════════════════════════════════════════════════════
+#  MAIN  — Phase 1: scrape US (Chrome alive), writing each row as it lands
 #          Phase 1b: scrape Canada (same Chrome session, switched to CA)
-#          Phase 2: build US videos + write Sheet1 (Chrome closed)
-#          Phase 2b: build Canada videos + write Sheet2
 #          Phase 3: US seller form intake (Form Responses 2 -> Sheet1)
 #          Phase 4: CA seller form intake (Response Form 3 -> Sheet2)
 # ════════════════════════════════════════════════════════════════
@@ -2256,12 +2324,17 @@ def main():
 
     ws     = open_sheet_and_reset()
     ws2    = open_sheet2_and_reset()
+    ws_p   = open_pinterest_sheet_and_reset() if ENABLE_PINTEREST else None
     driver = create_driver()
     wait   = WebDriverWait(driver, WAIT_SECS)
 
     # ── PHASE 1: Scrape US ───────────────────────────────────────
     scraped    = []
     scraped_ca = []
+    scrape_start = time.time()                          # for the time-budget early stop
+    _budget_sec  = EARLY_STOP_AFTER_MIN * 60
+    def _time_up():
+        return (time.time() - scrape_start) >= _budget_sec
     try:
         # Try every account until one logs in successfully
         logged_in = False
@@ -2288,6 +2361,13 @@ def main():
 
         for pid, _, _ in tiles:
             if count >= PRODUCT_LIMIT:
+                break
+            # Time-budget early stop: enough banked + over the time budget → keep what
+            # we have rather than burning more monthly quota chasing the full limit.
+            if count >= EARLY_STOP_MIN_PRODUCTS and _time_up():
+                log(f"  ⏳ Early stop: {count} US products in "
+                    f"{int((time.time()-scrape_start)/60)} min (≥{EARLY_STOP_MIN_PRODUCTS} "
+                    f"& ≥{EARLY_STOP_AFTER_MIN:.0f}min) — writing what we have.")
                 break
             # Pace reveals: the GET-CODE endpoint rate-limits this IP when clicks come
             # too fast (the 8-13-then-throttle wall). A randomized human-like gap keeps
@@ -2331,18 +2411,33 @@ def main():
             scraped.append(data)
             count += 1
             log(f"✓ Scraped {count}/{PRODUCT_LIMIT}: {data['title'][:60]}")
+            # Write this row to the sheet NOW — durable + immediately usable by the
+            # publisher/FB jobs, so nothing is lost if the run stops unexpectedly.
+            try:
+                _write_product_row(ws, data, tld="com", ws_p=ws_p)
+            except Exception as e:
+                log(f"  ⚠️ inline sheet write failed for PID {data['pid']}: {e.__class__.__name__}")
 
         # ── PHASE 1b: Switch to Canada and scrape CA deals ───────
         log("\n═══ Phase 1b: Canada Scrape ═══")
-        ca_switched = switch_to_canada(driver)
-        if not ca_switched:
-            log("⚠️  Canada switch failed — skipping CA scrape to avoid writing US products to Sheet2")
-        ca_tiles = collect_promo_tiles_random(driver, wait, start_url=PROMO_URL_CA) if ca_switched else []
+        if _time_up() and len(scraped) >= EARLY_STOP_MIN_PRODUCTS:
+            log(f"  ⏳ Time budget reached with {len(scraped)} US products — "
+                f"skipping CA scrape and writing now.")
+            ca_tiles = []
+        else:
+            ca_switched = switch_to_canada(driver)
+            if not ca_switched:
+                log("⚠️  Canada switch failed — skipping CA scrape to avoid writing US products to Sheet2")
+            ca_tiles = collect_promo_tiles_random(driver, wait, start_url=PROMO_URL_CA) if ca_switched else []
         ca_count = 0
         ca_fails = 0
         CA_THROTTLE_STOP = 8   # consecutive no-code CA results → IP throttled, stop cleanly
         for pid, _, _ in ca_tiles:
             if ca_count >= PRODUCT_LIMIT:
+                break
+            # Same time-budget guard for CA (only once we have a solid US batch banked).
+            if len(scraped) >= EARLY_STOP_MIN_PRODUCTS and _time_up():
+                log(f"  ⏳ Early stop: time budget reached — {ca_count} CA products, writing now.")
                 break
             time.sleep(random.uniform(REVEAL_PACE_MIN, REVEAL_PACE_MAX))   # pace CA reveals too
             try:
@@ -2361,6 +2456,11 @@ def main():
             scraped_ca.append(data_ca)
             ca_count += 1
             log(f"✓ CA Scraped {ca_count}/{PRODUCT_LIMIT}: {data_ca['title'][:60]}")
+            # Write the CA row immediately too.
+            try:
+                _write_product_row(ws2, data_ca, tld=AMAZON_TLD_CA)
+            except Exception as e:
+                log(f"  ⚠️ inline CA sheet write failed for PID {data_ca['pid']}: {e.__class__.__name__}")
 
     finally:
         try:
@@ -2373,123 +2473,10 @@ def main():
         log("✗ No products scraped — exiting")
         return
 
-    # ── PHASE 2: Videos + Sheet ───────────────────────────────────
-    if ENABLE_PINTEREST:
-        ws_p = open_pinterest_sheet_and_reset()
-
-    for data in scraped:
-        pid       = data["pid"]
-        t_short   = shorten_title(data["title"], MAX_TITLE_LEN)
-        pin_img_url = data["image"]
-
-        # Build-on-publish: the video is built by the reel publisher at post time,
-        # not during the scrape. Leave the Reel URL blank here.
-        reel_url = ""
-
-        # Selection score = commission potential (price × discount) × social proof.
-        # Best-effort social fetch; price/discount always available from the scrape.
-        _m_asin = re.search(r"asin=([A-Za-z0-9]{10})", data["link"], re.I)
-        _sp = fetch_social_proof(_m_asin.group(1).upper(), "com") if _m_asin else {}
-        _score = selection_score(_sp.get("units", 0), _sp.get("stars", 0.0),
-                                 _sp.get("ratings", 0), data["price"], data["discount"])
-        log(f"  score: units={_sp.get('units',0)} stars={_sp.get('stars',0)} "
-            f"price={data['price']} disc={data['discount']} → {_score}")
-
-        # Write main sheet row (cols A-O, then P/Q/R blank, S = social score)
-        ws.append_rows([[
-            data["link"],
-            data["link_reel"],
-            data["link_ig"],
-            data["link_youtube"],
-            data["link_tiktok"],
-            data["code"],
-            data["discount"],
-            data["expiry"],
-            t_short,
-            data["price"],
-            pid,
-            data["image"],
-            pin_img_url,
-            reel_url,
-            generate_social_post(
-                data["link"],
-                data["code"],
-                data["discount"],
-                data["expiry"],
-                t_short,
-                data["price"],
-            ),
-            "", "", "", _score,
-        ]], value_input_option="USER_ENTERED", table_range="A1")
-
-        # Write Pinterest row (only if enabled)
-        if ENABLE_PINTEREST:
-            ws_p.append_row([
-                t_short,
-                reel_url,
-                PINTEREST_BOARD_DEFAULT,
-                PINTEREST_THUMBNAIL_DEFAULT,
-                generate_pinterest_description(
-                    t_short,
-                    data["discount"],
-                    data["code"],
-                    data["expiry"],
-                    data["price"],
-                ),
-                data["link_pinterest"],
-                "",
-                PINTEREST_KEYWORDS_DEFAULT,
-            ], value_input_option="USER_ENTERED")
-
-        time.sleep(0.3)
-        log(f"✓ Row written for PID {pid}")
-
-    log(f"✅ US done — {len(scraped)} products processed")
-
-    # ── PHASE 2b: Canada Videos + Sheet2 ─────────────────────────
-    log("\n═══ Phase 2b: Canada Videos + Sheet2 ═══")
-    for data in scraped_ca:
-        pid     = data["pid"]
-        t_short = shorten_title(data["title"], MAX_TITLE_LEN)
-
-        # Build-on-publish: video built by the reel publisher, not in the scrape.
-        reel_url = ""
-
-        _m_asin = re.search(r"asin=([A-Za-z0-9]{10})", data["link"], re.I)
-        _sp = fetch_social_proof(_m_asin.group(1).upper(), AMAZON_TLD_CA) if _m_asin else {}
-        _score = selection_score(_sp.get("units", 0), _sp.get("stars", 0.0),
-                                 _sp.get("ratings", 0), data["price"], data["discount"])
-
-        ws2.append_rows([[
-            data["link"],
-            data["link_reel"],
-            data["link_ig"],
-            data["link_youtube"],
-            data["link_tiktok"],
-            data["code"],
-            data["discount"],
-            data["expiry"],
-            t_short,
-            data["price"],
-            pid,
-            data["image"],
-            data["image"],
-            reel_url,
-            generate_social_post(
-                data["link"],
-                data["code"],
-                data["discount"],
-                data["expiry"],
-                t_short,
-                data["price"],
-            ),
-            "", "", "", _score,
-        ]], value_input_option="USER_ENTERED", table_range="A1")
-
-        time.sleep(0.3)
-        log(f"✓ CA row written for PID {pid} (score {_score})")
-
-    log(f"✅ CA done — {len(scraped_ca)} products processed")
+    # Rows are written inline during Phase 1/1b (write-as-you-scrape), so there's
+    # nothing to bulk-write here — just report what landed.
+    log(f"✅ US done — {len(scraped)} products written to Sheet1")
+    log(f"✅ CA done — {len(scraped_ca)} products written to Sheet2")
 
     # Free the social-proof Chrome before the seller-form phases
     global _SOCIAL_DRIVER
