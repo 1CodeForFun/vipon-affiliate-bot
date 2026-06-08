@@ -410,6 +410,27 @@ BLOCKED_TITLE_KEYWORDS = [
     "bikini", "swimsuit", "swimwear", "swim wear",
 ]
 
+def _blocked_keyword_hit(title: str) -> str:
+    """Return the blocked keyword found in the title, or '' if the title is clean.
+
+    Single words match on WORD BOUNDARIES so a banned token can't fire inside an
+    innocent word — 'bra' must not block 'Library', 'neck' must not block
+    'necklace', 'pants' must not block 'pantsuit'. Multi-word phrases (with a
+    space or hyphen) match as plain substrings. Comparison is case-insensitive,
+    so capitalized list entries ('Skirt', 'Dress') still match lowercase titles.
+    """
+    t_low = (title or "").lower()
+    for b in BLOCKED_TITLE_KEYWORDS:
+        if not b:
+            continue
+        bl = b.lower()
+        if " " in bl or "-" in bl:
+            if bl in t_low:
+                return b
+        elif re.search(rf"\b{re.escape(bl)}\b", t_low):
+            return b
+    return ""
+
 # ════════════════════════════════════════════════════════════════
 #  GOOGLE SHEET — row update with retry
 # ════════════════════════════════════════════════════════════════
@@ -1526,12 +1547,11 @@ def scrape_product_page(driver, wait, pid, tld="com"):
     title    = _safe_xpath("//p[contains(@class,'product-title')]//span")
     price    = _safe_css("p.product-price > span")
 
-    # Filter blocked keywords
-    t_low = (title or "").lower()
-    for bad in BLOCKED_TITLE_KEYWORDS:
-        if bad in t_low:
-            log(f"  ✗ blocked keyword '{bad}' — skipping PID {pid}")
-            return None
+    # Filter blocked keywords (word-boundary match — see _blocked_keyword_hit)
+    bad = _blocked_keyword_hit(title)
+    if bad:
+        log(f"  ✗ blocked keyword '{bad}' — skipping PID {pid}")
+        return None
 
     image_url = resolve_cover_image_url(driver)
     log(f"  ↳ cover image: {image_url or 'NONE'}")
@@ -1948,13 +1968,7 @@ def process_seller_forms(ws_main) -> None:
         # ── Title + blocked-keyword check ─────────────────────────
         log(f"  → Form row {row_idx}: ASIN {asin}…")
         title = _fetch_amazon_title_simple(asin) or f"Amazon Product {asin}"
-        t_low = title.lower()
-        bad_hit = next(
-            (b for b in BLOCKED_TITLE_KEYWORDS
-             if b and (b in t_low if (" " in b or "-" in b)
-                       else re.search(rf"\b{re.escape(b)}\b", t_low))),
-            None,
-        )
+        bad_hit = _blocked_keyword_hit(title)
         if bad_hit:
             log(f"  ✗ Form row {row_idx}: blocked by '{bad_hit}'")
             form_ws.update_cell(row_idx, status_col + 1, "Blocked")
