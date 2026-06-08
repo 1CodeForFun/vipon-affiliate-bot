@@ -868,6 +868,69 @@ def _cloudinary_upload_video(mp4_path: str, public_id: str, max_retries: int = 5
             else:
                 raise
 
+# ── Code-failure diagnostics ─────────────────────────────────────
+# On the FIRST no-code result per account, snapshot the page and push it to
+# Cloudinary (named account + timestamp). Lets us see whether the reveal zone is
+# empty, shows a cap/limit message, or a CAPTCHA — i.e. IP vs account vs something
+# else. One image per account keeps noise + Cloudinary usage low.
+_CODE_FAIL_CAPTURED = set()   # account indices already captured this run
+
+def _cloudinary_upload_image(img_path: str, public_id: str, max_retries: int = 3) -> str:
+    ts        = str(int(time.time()))
+    to_sign   = f"public_id={public_id}&timestamp={ts}{CLOUDINARY_API_SECRET}"
+    signature = hashlib.sha1(to_sign.encode("utf-8")).hexdigest()
+    url  = f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/image/upload"
+    data = {"api_key": CLOUDINARY_API_KEY, "timestamp": ts,
+            "public_id": public_id, "signature": signature}
+    delay = 2.0
+    for attempt in range(max_retries):
+        try:
+            with open(img_path, "rb") as f:
+                files = {"file": (os.path.basename(img_path), f, "image/png")}
+                r = requests.post(url, data=data, files=files,
+                                  headers={"Connection": "close"}, timeout=(30, 120))
+            r.raise_for_status()
+            j = r.json()
+            return j.get("secure_url") or j.get("url") or ""
+        except requests.RequestException as e:
+            if attempt < max_retries - 1:
+                time.sleep(delay); delay *= 1.8
+            else:
+                log(f"  ⚠️ Cloudinary image upload failed: {e.__class__.__name__}")
+    return ""
+
+def _capture_code_failure(driver, pid):
+    """First no-code result per account: log the reveal-zone text + bot-check markers,
+    screenshot the page, and upload the image to Cloudinary for inspection."""
+    idx = _account_index
+    if idx in _CODE_FAIL_CAPTURED:
+        return
+    _CODE_FAIL_CAPTURED.add(idx)
+    try:
+        acc   = (_current_account() or {}).get("username", f"acct{idx}")
+        safe  = re.sub(r"[^A-Za-z0-9]", "_", acc)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        try:    url = driver.current_url
+        except Exception: url = "?"
+        try:    zone = (driver.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone")
+                        .get_attribute("textContent") or "").strip()
+        except Exception: zone = "(zone not found)"
+        try:    html = (driver.page_source or "").lower()
+        except Exception: html = ""
+        markers = [m for m in ("captcha", "recaptcha", "cloudflare", "unusual traffic",
+                               "verify", "limit", "too many", "rate", "blocked",
+                               "access denied", "try again", "challenge") if m in html]
+        log(f"  🔎 first code-failure [{acc}] PID {pid} url={url!r} "
+            f"reveal-zone={zone[:60]!r} markers={markers or 'none'}")
+        os.makedirs("debug_artifacts", exist_ok=True)
+        png = os.path.join("debug_artifacts", f"codefail_{safe}_{stamp}.png")
+        if driver.save_screenshot(png):
+            sec = _cloudinary_upload_image(png, f"vipon_debug/codefail_{safe}_{stamp}")
+            if sec:
+                log(f"  📸 code-failure screenshot [{acc}] -> {sec}")
+    except Exception as e:
+        log(f"  ⚠️ _capture_code_failure error: {e.__class__.__name__}")
+
 # ════════════════════════════════════════════════════════════════
 #  AFFILIATE LINKS
 # ════════════════════════════════════════════════════════════════
@@ -1580,6 +1643,7 @@ def scrape_product_page(driver, wait, pid, tld="com"):
         code = extract_code(driver)
     code = (code or "").strip().upper()
     if not is_plausible_code(code, strict=False):
+        _capture_code_failure(driver, pid)   # snapshot the page on the 1st fail per account
         log("  ✗ no valid code — skipping")
         return None
 
