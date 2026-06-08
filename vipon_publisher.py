@@ -149,7 +149,10 @@ def select_candidates(ws):
             "code":    row[COL_F_CODE   - 1].strip(),
             "disc":    row[COL_G_DISC   - 1].strip(),
             "expiry":  row[COL_H_EXPIRY - 1].strip(),
-            "aff_link": link,
+            "aff_link": link,                                       # A → freshdeal00cc-20 (FB text)
+            "reel_link": row[COL_B_REEL_LINK - 1].strip() or link,   # B → manus00-20 (FB/IG reels)
+            "ig_link":   row[COL_C_IG_LINK   - 1].strip() or link,   # C → insinstagram-20 (IG)
+            "yt_link":   row[COL_D_YT_LINK   - 1].strip() or link,   # D → youtubefdusa-20 (YouTube)
             "cover":   row[COL_L_IMAGE  - 1].strip(),
             "vo_text": row[COL_O_VO     - 1].strip(),   # piece 1 (VO script)
         }
@@ -429,15 +432,16 @@ def main() -> None:
             continue
 
         title    = product["title"] or "Deal Alert!"
-        aff_link = product["aff_link"]
-        yt_desc  = _build_yt_description(aff_link, product["code"], product["disc"])
+        reel_link = product["reel_link"]   # B → manus00-20 (FB + IG reel descriptions)
+        ig_link   = product["ig_link"]     # C → insinstagram-20 (IG)
+        yt_desc  = _build_yt_description(product["yt_link"], product["code"], product["disc"])
         errors, yt_success = [], False
 
         for fb_file, fb_label in [(FB_FRESHDEALS_TOKEN, "FreshDeals"), (FB_ULTAFIND_TOKEN, "Ultafind")]:
             log(f"--- Facebook ({fb_label}) ---")
             try:
                 pid, tok, _ = load_fb_token(fb_file)
-                post_fb_reel(pid, tok, video_url, title, aff_link)
+                post_fb_reel(pid, tok, video_url, title, reel_link)
             except Exception as e:
                 log(f"ERROR (FB {fb_label}): {e}"); errors.append(f"FB-{fb_label}: {e}")
 
@@ -448,7 +452,7 @@ def main() -> None:
             log(f"--- Instagram ({ig_label}) ---")
             try:
                 _, tok, _ = load_fb_token(fb_file)
-                post_ig_reel(ig_uid, tok, video_url, aff_link)
+                post_ig_reel(ig_uid, tok, video_url, ig_link)
             except Exception as e:
                 log(f"ERROR (IG {ig_label}): {e}"); errors.append(f"IG-{ig_label}: {e}")
 
@@ -490,7 +494,7 @@ def main() -> None:
                 pid2, tok2, _ = load_fb_token(FB_CANADA_TOKEN)
             else:
                 _, tok2, _ = load_fb_token(FB_FRESHDEALS_TOKEN); pid2 = FB_CANADA_PAGE_ID
-            post_fb_reel(pid2, tok2, video_url2, product2["title"] or "Deal Alert!", product2["aff_link"])
+            post_fb_reel(pid2, tok2, video_url2, product2["title"] or "Deal Alert!", product2["reel_link"])
             ws2.update_acell(f"N{sheet_row2}", video_url2)   # save Cloudinary reel link
             ws2.update_acell(f"P{sheet_row2}", "Yes")
             log(f"CA row {sheet_row2}: Facebook reel posted.")
