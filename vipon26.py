@@ -92,6 +92,12 @@ PROMO_URL     = "https://www.myvipon.com"
 PROMO_URL_CA  = "https://www.myvipon.com/promotion/index?type=instant"  # CA full deal listing (supports infinite scroll)
 PRODUCT_LIMIT = int(os.getenv("PRODUCT_LIMIT") or "24")
 
+# Human-like delay (seconds) between code reveals. Vipon throttles the GET-CODE
+# endpoint when reveals arrive too fast from one IP; a randomized gap keeps us
+# under the rate limit. Tune via env without code changes.
+REVEAL_PACE_MIN = float(os.getenv("REVEAL_PACE_MIN") or "3.0")
+REVEAL_PACE_MAX = float(os.getenv("REVEAL_PACE_MAX") or "6.0")
+
 SCROLL_MIN         = int(os.getenv("SCROLL_MIN")    or "1")
 SCROLL_MAX         = int(os.getenv("SCROLL_MAX")    or "50")
 SCROLL_PAUSE_RANGE = (0.7, 1.7)
@@ -2171,11 +2177,16 @@ def main():
         tiles = collect_promo_tiles_random(driver, wait)
         count = 0
         consecutive_fails = 0
-        ROTATION_THRESHOLD = 8  # switch account after this many consecutive no-code results
+        rotations_no_success = 0      # account cycles since the last successful code
+        ROTATION_THRESHOLD = 6        # switch account after this many consecutive no-code results
 
         for pid, _, _ in tiles:
             if count >= PRODUCT_LIMIT:
                 break
+            # Pace reveals: the GET-CODE endpoint rate-limits this IP when clicks come
+            # too fast (the 8-13-then-throttle wall). A randomized human-like gap keeps
+            # us under it.
+            time.sleep(random.uniform(REVEAL_PACE_MIN, REVEAL_PACE_MAX))
             try:
                 data = scrape_product_page(driver, wait, pid)
             except TimeoutException:
@@ -2187,11 +2198,11 @@ def main():
 
             if data is None:
                 consecutive_fails += 1
-                # Auto-rotate account when we hit the daily code limit
+                # Auto-rotate account when reveals start failing in a row.
                 if consecutive_fails >= ROTATION_THRESHOLD and len(VIPON_ACCOUNTS) > 1:
                     _rotate_account()
-                    # Always reset counter so we don't loop endlessly on failed re-login
                     consecutive_fails = 0
+                    rotations_no_success += 1
                     try:
                         logout(driver)                # must log out or /login redirects to home
                         driver.delete_all_cookies()   # clear any remaining session cookies
@@ -2199,9 +2210,18 @@ def main():
                         log(f"  ✓ Account rotated successfully")
                     except Exception as e:
                         log(f"  ⚠️ Re-login after rotation failed: {e.__class__.__name__} — continuing with current session")
+                    # Stop-clean: if we've cycled through every account and not one of
+                    # them yields a code, the throttle is on the IP — rotating can't fix
+                    # it. Keep what we have and move on instead of grinding the whole
+                    # tile list (and wasting CI minutes) for nothing.
+                    if rotations_no_success >= len(VIPON_ACCOUNTS):
+                        log(f"  ⛔ Reveal throttle: cycled all {len(VIPON_ACCOUNTS)} account(s) "
+                            f"with no code (IP rate-limited) — stopping US scrape at {count} product(s).")
+                        break
                 continue
 
             consecutive_fails = 0
+            rotations_no_success = 0   # a code came through → current session still works
             scraped.append(data)
             count += 1
             log(f"✓ Scraped {count}/{PRODUCT_LIMIT}: {data['title'][:60]}")
@@ -2214,17 +2234,22 @@ def main():
         ca_tiles = collect_promo_tiles_random(driver, wait, start_url=PROMO_URL_CA) if ca_switched else []
         ca_count = 0
         ca_fails = 0
+        CA_THROTTLE_STOP = 8   # consecutive no-code CA results → IP throttled, stop cleanly
         for pid, _, _ in ca_tiles:
             if ca_count >= PRODUCT_LIMIT:
                 break
+            time.sleep(random.uniform(REVEAL_PACE_MIN, REVEAL_PACE_MAX))   # pace CA reveals too
             try:
                 data_ca = scrape_product_page(driver, wait, pid, tld=AMAZON_TLD_CA)
             except (TimeoutException, WebDriverException) as e:
                 log(f"  ⚠️ CA PID {pid} error: {e.__class__.__name__} — skip")
-                ca_fails += 1
                 data_ca = None
             if data_ca is None:
                 ca_fails += 1
+                if ca_fails >= CA_THROTTLE_STOP:
+                    log(f"  ⛔ CA reveal throttle: {ca_fails} no-code in a row — "
+                        f"stopping CA scrape at {ca_count} product(s).")
+                    break
                 continue
             ca_fails = 0
             scraped_ca.append(data_ca)
