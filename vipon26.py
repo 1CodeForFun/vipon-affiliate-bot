@@ -1622,7 +1622,82 @@ def extract_code(driver):
 #  PRODUCT PAGE SCRAPER
 # ════════════════════════════════════════════════════════════════
 
+# Skip-reason sentinels returned by scrape_product_page instead of bare None.
+# The main loop uses them to decide whether to count against consecutive_fails /
+# trigger account rotation / retry.
+SKIP_THROTTLE  = "throttle"   # reveal returned nothing — rate-limited or capped account
+SKIP_DEAL_ONLY = "deal-only"  # no exclusive code; product is a "Get Deal at Amazon" offer
+SKIP_ONETIME   = "onetime"    # dashed single-use code — can't be shared
+SKIP_BLOCKED   = "blocked"    # blocked keyword in title
+SKIP_NO_IMAGE  = "no-image"   # couldn't resolve product image
+
+
+def _check_deal_only(driver) -> bool:
+    """Return True when this product has NO shareable code — it's a price-drop deal
+    only (the JS sets GetDealatAmazon=true / plummet-status button is present and the
+    coupon-container is absent or hidden). In this case there's nothing to reveal, so
+    no reveal attempt should count against the throttle counter."""
+    try:
+        src = driver.page_source or ""
+        # Vipon sets GetDealatAmazon=true in the page JS for deal-only listings.
+        if "GetDealatAmazon = true" in src or "GetDealatAmazon=true" in src:
+            return True
+        # plummet-status button without a coupon-container is another reliable marker.
+        try:
+            driver.find_element(By.ID, "plummet-status")
+            # If there's also a coupon-container it might still have a code.
+            try:
+                driver.find_element(By.ID, "coupon-container")
+                return False   # has both → might have a code, let extract_code decide
+            except Exception:
+                return True    # only plummet, no coupon-container → deal-only
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return False
+
+
+def _check_cap_toast(driver) -> bool:
+    """Poll briefly for the '400 codes every 30 days' iView toast that Vipon shows for
+    ~1.5s after a capped account clicks GET CODE. Returns True if detected."""
+    _CAP_PHRASES = ("400 codes", "only claim", "codes every 30", "limit reached",
+                    "you can only")
+    deadline = time.time() + 2.0    # toast lasts ~1.5s; poll for 2s to be safe
+    while time.time() < deadline:
+        try:
+            # iView notifications land in .ivu-notice-content or .ivu-message-content
+            for sel in (".ivu-notice-content", ".ivu-message-content",
+                        "[class*='notice']", "[class*='message']", "[class*='toast']"):
+                try:
+                    els = driver.find_elements(By.CSS_SELECTOR, sel)
+                    for el in els:
+                        txt = (el.text or "").lower()
+                        if any(p in txt for p in _CAP_PHRASES):
+                            log(f"  🚫 account cap toast detected: {el.text.strip()!r}")
+                            return True
+                except Exception:
+                    pass
+            # Also check for the phrase anywhere in the visible page text (fast).
+            body = (driver.find_element(By.TAG_NAME, "body").text or "").lower()
+            if any(p in body for p in _CAP_PHRASES):
+                log(f"  🚫 account cap phrase detected in body text")
+                return True
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return False
+
+
 def scrape_product_page(driver, wait, pid, tld="com"):
+    """Scrape one product page. Returns a data dict on success, or one of the
+    SKIP_* sentinel strings to let the caller distinguish *why* it was skipped:
+
+      SKIP_DEAL_ONLY  — no exclusive code (price-drop deal); don't count against throttle.
+      SKIP_ONETIME    — single-use dashed code; don't count against throttle.
+      SKIP_BLOCKED    — title contains a blocked keyword.
+      SKIP_THROTTLE   — reveal returned nothing (rate-limited / account capped).
+    """
     url = f"https://www.myvipon.com/product/{pid}"
     log(f"→ PID {pid}: opening product page…")
     try:
@@ -1637,15 +1712,28 @@ def scrape_product_page(driver, wait, pid, tld="com"):
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
         time.sleep(2.0)
 
+    # ── Deal-only check BEFORE clicking GET CODE ──────────────────
+    # These products have no exclusive code at all — clicking GET CODE would burn a
+    # reveal slot and (on a capped account) waste a quota unit for nothing.
+    if _check_deal_only(driver):
+        log(f"  ⏭ deal-only product (no exclusive code) — skipping PID {pid}")
+        return SKIP_DEAL_ONLY
+
     try_reveal_code(driver)
+
+    # Poll immediately for the 400-cap toast (appears for ~1.5s right after click).
+    account_capped = _check_cap_toast(driver)
+
     # Guard: if a reveal click navigated away from vipon (e.g. clicked "Use on Amazon"), come back
     if "myvipon.com/product/" not in driver.current_url:
         log(f"  ↩ navigated away during reveal — returning to product page")
         driver.get(url)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
         time.sleep(2.0)
+
     code = extract_code(driver)
-    # Retry once if code not found — AJAX may still be in flight
+
+    # Inner retry — AJAX may still be in flight (not a throttle; just timing).
     if not code or not is_plausible_code(code, strict=False):
         time.sleep(3.0)
         try_reveal_code(driver)
@@ -1654,11 +1742,20 @@ def scrape_product_page(driver, wait, pid, tld="com"):
             wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
             time.sleep(2.0)
         code = extract_code(driver)
+
     code = (code or "").strip().upper()
+
+    # ── Classify the skip reason precisely ───────────────────────
     if not is_plausible_code(code, strict=False):
-        _capture_code_failure(driver, pid)   # snapshot the page on the 1st fail per account
-        log("  ✗ no valid code — skipping")
-        return None
+        _capture_code_failure(driver, pid)
+        if account_capped:
+            log(f"  🚫 no valid code — account at 400/30-day cap → rotate immediately")
+            return SKIP_THROTTLE   # caller will rotate right away (not after 6 fails)
+        if is_onetime_code(code):
+            log(f"  ✗ one-time (dashed) code — skipping (not counted against rotation)")
+            return SKIP_ONETIME
+        log("  ✗ no valid code — skipping (throttle/empty reveal)")
+        return SKIP_THROTTLE
 
     def _safe_css(c):
         try: return (driver.find_element(By.CSS_SELECTOR, c).text or "").strip()
@@ -1676,7 +1773,7 @@ def scrape_product_page(driver, wait, pid, tld="com"):
     bad = _blocked_keyword_hit(title)
     if bad:
         log(f"  ✗ blocked keyword '{bad}' — skipping PID {pid}")
-        return None
+        return SKIP_BLOCKED
 
     image_url = resolve_cover_image_url(driver)
     log(f"  ↳ cover image: {image_url or 'NONE'}")
@@ -2408,65 +2505,81 @@ def main():
 
         tiles = collect_promo_tiles_random(driver, wait) if (need_scrape and us_target > 0) else []
         count = 0
-        consecutive_fails = 0
-        rotations_no_success = 0      # account cycles since the last successful code
-        ROTATION_THRESHOLD = 6        # switch account after this many consecutive no-code results
+        consecutive_fails = 0          # only throttle results count (not deal-only/onetime)
+        rotations_no_success = 0       # account cycles since last successful code
+        ROTATION_THRESHOLD = 3         # rotate sooner now that we only count real throttles
+
+        def _do_rotate():
+            nonlocal rotations_no_success
+            _rotate_account()
+            rotations_no_success += 1
+            try:
+                logout(driver)
+                driver.delete_all_cookies()
+                login(driver, wait)
+                log(f"  ✓ Account rotated successfully")
+            except Exception as _e:
+                log(f"  ⚠️ Re-login after rotation failed: {_e.__class__.__name__} — continuing")
 
         for pid, _, _ in tiles:
             if count >= us_target:
                 break
             if str(pid).strip() in us_pids:
-                continue                 # already on the sheet — don't re-scrape / waste a reveal
-            # Time-budget early stop: enough banked + over the time budget → keep what
-            # we have rather than burning more monthly quota chasing the full limit.
+                continue                 # already on the sheet — don't re-scrape
             if count >= EARLY_STOP_MIN_PRODUCTS and _time_up():
                 log(f"  ⏳ Early stop: {count} US products in "
-                    f"{int((time.time()-scrape_start)/60)} min (≥{EARLY_STOP_MIN_PRODUCTS} "
-                    f"& ≥{EARLY_STOP_AFTER_MIN:.0f}min) — writing what we have.")
+                    f"{int((time.time()-scrape_start)/60)} min — writing what we have.")
                 break
-            # Pace reveals: the GET-CODE endpoint rate-limits this IP by requests/min.
-            # A fixed, generous gap keeps us under it (the slow VM never tripped it).
+            # Fixed pace between reveals (rate-limit protection).
             time.sleep(REVEAL_PACE_SEC)
             try:
                 data = scrape_product_page(driver, wait, pid)
             except TimeoutException:
                 log(f"  ⏱️ hard timeout on PID {pid} — skip")
-                data = None
+                data = SKIP_THROTTLE
             except WebDriverException as e:
                 log(f"  ⚠️ webdriver error on PID {pid}: {e} — skip")
-                data = None
+                data = SKIP_THROTTLE
 
-            if data is None:
-                consecutive_fails += 1
-                # Auto-rotate account when reveals start failing in a row.
-                if consecutive_fails >= ROTATION_THRESHOLD and len(VIPON_ACCOUNTS) > 1:
-                    _rotate_account()
-                    consecutive_fails = 0
-                    rotations_no_success += 1
-                    try:
-                        logout(driver)                # must log out or /login redirects to home
-                        driver.delete_all_cookies()   # clear any remaining session cookies
-                        login(driver, wait)
-                        log(f"  ✓ Account rotated successfully")
-                    except Exception as e:
-                        log(f"  ⚠️ Re-login after rotation failed: {e.__class__.__name__} — continuing with current session")
-                    # Stop-clean: if we've cycled through every account and not one of
-                    # them yields a code, the throttle is on the IP — rotating can't fix
-                    # it. Keep what we have and move on instead of grinding the whole
-                    # tile list (and wasting CI minutes) for nothing.
-                    if rotations_no_success >= len(VIPON_ACCOUNTS):
-                        log(f"  ⛔ Reveal throttle: cycled all {len(VIPON_ACCOUNTS)} account(s) "
-                            f"with no code (IP rate-limited) — stopping US scrape at {count} product(s).")
-                        break
+            # ── Classified skip handling ──────────────────────────────
+            if data in (SKIP_DEAL_ONLY, SKIP_BLOCKED, SKIP_ONETIME):
+                # These are legit non-code products — don't penalise the account.
                 continue
 
+            if data == SKIP_THROTTLE:
+                # Outer retry: wait another REVEAL_PACE_SEC then try the same PID once more.
+                # A transient throttle often clears after a short pause; a genuine account
+                # cap will fail again and we'll rotate on the second failure.
+                log(f"  🔄 throttle on PID {pid} — waiting {REVEAL_PACE_SEC}s then retrying once…")
+                time.sleep(REVEAL_PACE_SEC)
+                try:
+                    data = scrape_product_page(driver, wait, pid)
+                except Exception:
+                    data = SKIP_THROTTLE
+
+                if data == SKIP_THROTTLE or data is None:
+                    consecutive_fails += 1
+                    # Rotate immediately if cap toast was detected OR after ROTATION_THRESHOLD
+                    # real throttle failures.
+                    if consecutive_fails >= ROTATION_THRESHOLD and len(VIPON_ACCOUNTS) > 1:
+                        _do_rotate()
+                        consecutive_fails = 0
+                        if rotations_no_success >= len(VIPON_ACCOUNTS):
+                            log(f"  ⛔ Cycled all {len(VIPON_ACCOUNTS)} account(s) — "
+                                f"stopping US scrape at {count} product(s).")
+                            break
+                    continue
+                if data in (SKIP_DEAL_ONLY, SKIP_BLOCKED, SKIP_ONETIME):
+                    continue   # retry resolved to a legit skip — don't penalise
+
+            if not isinstance(data, dict):
+                continue   # unknown sentinel — skip
+
             consecutive_fails = 0
-            rotations_no_success = 0   # a code came through → current session still works
+            rotations_no_success = 0
             scraped.append(data)
             count += 1
-            log(f"✓ Scraped {count}/{us_target} (sheet total {us_existing + count}/{PRODUCT_LIMIT}): {data['title'][:60]}")
-            # Write this row to the sheet NOW — durable + immediately usable by the
-            # publisher/FB jobs, so nothing is lost if the run stops unexpectedly.
+            log(f"✓ Scraped {count}/{us_target} (sheet total {us_existing+count}/{PRODUCT_LIMIT}): {data['title'][:60]}")
             try:
                 _write_product_row(ws, data, tld="com", ws_p=ws_p)
             except Exception as e:
@@ -2493,29 +2606,45 @@ def main():
             if ca_count >= ca_target:
                 break
             if str(pid).strip() in ca_pids:
-                continue                 # already on Sheet2 — don't re-scrape / waste a reveal
-            # Same time-budget guard for CA (only once we have a solid US batch banked).
+                continue
             if len(scraped) >= EARLY_STOP_MIN_PRODUCTS and _time_up():
                 log(f"  ⏳ Early stop: time budget reached — {ca_count} CA products, writing now.")
                 break
-            time.sleep(REVEAL_PACE_SEC)   # pace CA reveals too (same fixed gap)
+            time.sleep(REVEAL_PACE_SEC)
             try:
                 data_ca = scrape_product_page(driver, wait, pid, tld=AMAZON_TLD_CA)
             except (TimeoutException, WebDriverException) as e:
                 log(f"  ⚠️ CA PID {pid} error: {e.__class__.__name__} — skip")
-                data_ca = None
-            if data_ca is None:
-                ca_fails += 1
-                if ca_fails >= CA_THROTTLE_STOP:
-                    log(f"  ⛔ CA reveal throttle: {ca_fails} no-code in a row — "
-                        f"stopping CA scrape at {ca_count} product(s).")
-                    break
+                data_ca = SKIP_THROTTLE
+
+            # Legit skips don't count against the throttle stop.
+            if data_ca in (SKIP_DEAL_ONLY, SKIP_BLOCKED, SKIP_ONETIME):
                 continue
+
+            if data_ca == SKIP_THROTTLE or data_ca is None:
+                # Outer retry for CA too.
+                log(f"  🔄 CA throttle on PID {pid} — retrying once after {REVEAL_PACE_SEC}s…")
+                time.sleep(REVEAL_PACE_SEC)
+                try:
+                    data_ca = scrape_product_page(driver, wait, pid, tld=AMAZON_TLD_CA)
+                except Exception:
+                    data_ca = SKIP_THROTTLE
+                if data_ca in (SKIP_DEAL_ONLY, SKIP_BLOCKED, SKIP_ONETIME):
+                    continue
+                if data_ca == SKIP_THROTTLE or not isinstance(data_ca, dict):
+                    ca_fails += 1
+                    if ca_fails >= CA_THROTTLE_STOP:
+                        log(f"  ⛔ CA throttle: {ca_fails} real fails — stopping CA at {ca_count}.")
+                        break
+                    continue
+
+            if not isinstance(data_ca, dict):
+                continue
+
             ca_fails = 0
             scraped_ca.append(data_ca)
             ca_count += 1
-            log(f"✓ CA Scraped {ca_count}/{ca_target} (sheet total {ca_existing + ca_count}/{PRODUCT_LIMIT}): {data_ca['title'][:60]}")
-            # Write the CA row immediately too.
+            log(f"✓ CA Scraped {ca_count}/{ca_target} (sheet total {ca_existing+ca_count}/{PRODUCT_LIMIT}): {data_ca['title'][:60]}")
             try:
                 _write_product_row(ws2, data_ca, tld=AMAZON_TLD_CA)
             except Exception as e:
