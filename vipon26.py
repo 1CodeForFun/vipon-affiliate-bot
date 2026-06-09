@@ -92,11 +92,11 @@ PROMO_URL     = "https://www.myvipon.com"
 PROMO_URL_CA  = "https://www.myvipon.com/promotion/index?type=instant"  # CA full deal listing (supports infinite scroll)
 PRODUCT_LIMIT = int(os.getenv("PRODUCT_LIMIT") or "24")
 
-# Human-like delay (seconds) between code reveals. Vipon throttles the GET-CODE
-# endpoint when reveals arrive too fast from one IP; a randomized gap keeps us
-# under the rate limit. Tune via env without code changes.
-REVEAL_PACE_MIN = float(os.getenv("REVEAL_PACE_MIN") or "3.0")
-REVEAL_PACE_MAX = float(os.getenv("REVEAL_PACE_MAX") or "6.0")
+# FIXED delay (seconds) between code reveals. Vipon rate-limits the GET-CODE
+# endpoint per IP by requests-per-minute — the old VM never tripped it because it
+# ran slowly; GitHub's speed does. A fixed, generous gap holds us under that rate.
+# Bump REVEAL_PACE_SEC higher if a run still hits "limit reached" / no-code walls.
+REVEAL_PACE_SEC = float(os.getenv("REVEAL_PACE_SEC") or "25")
 
 # Early-stop guard: once we've collected at least EARLY_STOP_MIN_PRODUCTS and spent
 # EARLY_STOP_AFTER_MIN minutes scraping, stop and write what we have to the sheet.
@@ -2424,10 +2424,9 @@ def main():
                     f"{int((time.time()-scrape_start)/60)} min (≥{EARLY_STOP_MIN_PRODUCTS} "
                     f"& ≥{EARLY_STOP_AFTER_MIN:.0f}min) — writing what we have.")
                 break
-            # Pace reveals: the GET-CODE endpoint rate-limits this IP when clicks come
-            # too fast (the 8-13-then-throttle wall). A randomized human-like gap keeps
-            # us under it.
-            time.sleep(random.uniform(REVEAL_PACE_MIN, REVEAL_PACE_MAX))
+            # Pace reveals: the GET-CODE endpoint rate-limits this IP by requests/min.
+            # A fixed, generous gap keeps us under it (the slow VM never tripped it).
+            time.sleep(REVEAL_PACE_SEC)
             try:
                 data = scrape_product_page(driver, wait, pid)
             except TimeoutException:
@@ -2499,7 +2498,7 @@ def main():
             if len(scraped) >= EARLY_STOP_MIN_PRODUCTS and _time_up():
                 log(f"  ⏳ Early stop: time budget reached — {ca_count} CA products, writing now.")
                 break
-            time.sleep(random.uniform(REVEAL_PACE_MIN, REVEAL_PACE_MAX))   # pace CA reveals too
+            time.sleep(REVEAL_PACE_SEC)   # pace CA reveals too (same fixed gap)
             try:
                 data_ca = scrape_product_page(driver, wait, pid, tld=AMAZON_TLD_CA)
             except (TimeoutException, WebDriverException) as e:
