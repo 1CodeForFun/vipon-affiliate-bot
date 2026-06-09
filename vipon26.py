@@ -1556,13 +1556,13 @@ def try_reveal_code(driver):
         except Exception:
             continue
 
-def extract_code(driver):
-    """Return a single shareable discount code, or "" to skip the product.
+_ONETIME_SENTINEL = "__ONETIME__"   # returned by extract_code for dashed single-use codes
 
-    Only trusts the reveal zone + explicit code elements (NOT broad page-text
-    scans, which grabbed category words / fragments). Rejects one-time (dashed)
-    codes outright — they're single-use and can't be shared with followers.
-    """
+def extract_code(driver):
+    """Return a shareable discount code string on success.
+    Returns _ONETIME_SENTINEL when a dashed single-use code is detected (caller must
+    exit immediately — no retry, no screenshot).
+    Returns "" when no code was found (throttle / empty reveal)."""
     # 1) Authoritative reveal zone. The code is embedded in PC_240's <span> the whole
     #    time; the "Get Code" click only UN-HIDES it (display:flex). Vipon throttles
     #    that VISUAL reveal after ~8/session, but the code TEXT never leaves the DOM.
@@ -1583,7 +1583,7 @@ def extract_code(driver):
     except Exception:
         pass
     if zone and is_onetime_code(zone):
-        log("  ✗ one-time (dashed) code — skipping"); return ""
+        log("  ✗ one-time (dashed) code — skipping"); return _ONETIME_SENTINEL
     if zone:
         m = CODE_RE.search(zone)
         if m and is_plausible_code(m.group(1)): return m.group(1)
@@ -1594,7 +1594,7 @@ def extract_code(driver):
             el  = WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.ID, i)))
             txt = (_text(el) or "").strip().upper()
             if is_onetime_code(txt):
-                log("  ✗ one-time (dashed) code — skipping"); return ""
+                log("  ✗ one-time (dashed) code — skipping"); return _ONETIME_SENTINEL
             m = CODE_RE.search(txt)
             if m and is_plausible_code(m.group(1)): return m.group(1)
             if is_plausible_code(txt): return txt
@@ -1607,7 +1607,7 @@ def extract_code(driver):
         for inp in driver.find_elements(By.XPATH, "//input[@type='text' or not(@type)]")[:20]:
             val = (inp.get_attribute("value") or "").strip().upper()
             if is_onetime_code(val):
-                log("  ✗ one-time (dashed) code — skipping"); return ""
+                log("  ✗ one-time (dashed) code — skipping"); return _ONETIME_SENTINEL
             if is_plausible_code(val):
                 return val
     except Exception:
@@ -1731,6 +1731,10 @@ def scrape_product_page(driver, wait, pid, tld="com"):
 
     code = extract_code(driver)
 
+    # Dashed one-time code: exit immediately — no retry, no screenshot, no rotation.
+    if code == _ONETIME_SENTINEL:
+        return SKIP_ONETIME
+
     # Inner retry — AJAX may still be in flight (not a throttle; just timing).
     if not code or not is_plausible_code(code, strict=False):
         time.sleep(3.0)
@@ -1740,18 +1744,18 @@ def scrape_product_page(driver, wait, pid, tld="com"):
             wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
             time.sleep(2.0)
         code = extract_code(driver)
+        # Dashed code on the retry too — exit cleanly.
+        if code == _ONETIME_SENTINEL:
+            return SKIP_ONETIME
 
     code = (code or "").strip().upper()
 
     # ── Classify the skip reason precisely ───────────────────────
     if not is_plausible_code(code, strict=False):
-        _capture_code_failure(driver, pid)
+        _capture_code_failure(driver, pid)   # only for genuine throttle/empty reveal
         if account_capped:
             log(f"  🚫 no valid code — account at 400/30-day cap → rotate immediately")
-            return SKIP_THROTTLE   # caller will rotate right away (not after 6 fails)
-        if is_onetime_code(code):
-            log(f"  ✗ one-time (dashed) code — skipping (not counted against rotation)")
-            return SKIP_ONETIME
+            return SKIP_THROTTLE
         log("  ✗ no valid code — skipping (throttle/empty reveal)")
         return SKIP_THROTTLE
 
