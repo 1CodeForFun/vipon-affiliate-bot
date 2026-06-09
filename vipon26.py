@@ -103,7 +103,7 @@ REVEAL_PACE_SEC = float(os.getenv("REVEAL_PACE_SEC") or "25")
 # Banking a solid batch beats burning more monthly code quota chasing the full
 # PRODUCT_LIMIT and risking the whole run on a timeout.
 EARLY_STOP_MIN_PRODUCTS = int(os.getenv("EARLY_STOP_MIN_PRODUCTS") or "12")
-EARLY_STOP_AFTER_MIN    = float(os.getenv("EARLY_STOP_AFTER_MIN") or "45")
+EARLY_STOP_AFTER_MIN    = float(os.getenv("EARLY_STOP_AFTER_MIN") or "75")
 
 # Seller-intake reward: products that sellers send us directly get their real
 # selection score PLUS this bonus, so the publisher produces their videos ahead of
