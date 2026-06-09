@@ -768,9 +768,18 @@ def generate_social_post(link, code, discount_pct, expiry, title, price):
     prompt = _build_post_prompt(code, discount_pct, expiry_date, title, price)
 
     # ── Try Gemini keys in order, skip dead/rate-limited keys ────
+    # When the server returns 503 (overloaded) on 3+ keys in a row it usually means
+    # the whole fleet is momentarily busy — not that the keys are bad. Wait 5s then
+    # restart from key 0 so fresh capacity is tried. Only do one such reset per call
+    # to avoid an infinite loop; after the reset the loop runs to exhaustion normally.
     gemini_keys = _read_gemini_keys()
-    for kidx, gemini_key in enumerate(gemini_keys):
+    _503_streak   = 0
+    _did_503_reset = False
+    kidx = 0
+    while kidx < len(gemini_keys):
+        gemini_key = gemini_keys[kidx]
         if gemini_key in _GEMINI_DEAD_KEYS:
+            kidx += 1
             continue   # expired key — don't waste a round-trip
         try:
             api_url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
@@ -797,18 +806,29 @@ def generate_social_post(link, code, discount_pct, expiry, title, price):
                     return _clean_post_text(txt)
             elif resp.status_code == 429:
                 log(f"  ⚠️ Gemini key {kidx+1}/{len(gemini_keys)} rate-limited — trying next")
-                continue
+                _503_streak = 0
             elif resp.status_code == 400:
                 log(f"  ⚠️ Gemini key {kidx+1} expired/invalid — marking dead for this session")
                 _GEMINI_DEAD_KEYS.add(gemini_key)
-                continue
+                _503_streak = 0
             elif resp.status_code == 503:
-                log(f"  ⚠️ Gemini key {kidx+1} server busy (503) — trying next")
-                continue
+                _503_streak += 1
+                log(f"  ⚠️ Gemini key {kidx+1} server busy (503) — trying next "
+                    f"(503 streak: {_503_streak})")
+                if _503_streak >= 3 and not _did_503_reset:
+                    log(f"  ⏳ 3 consecutive 503s — waiting 5s then restarting from key 1…")
+                    time.sleep(5)
+                    _503_streak   = 0
+                    _did_503_reset = True   # only one reset per generate_social_post call
+                    kidx = 0               # restart from key 1
+                    continue
             else:
                 log(f"  ⚠️ Gemini key {kidx+1} error {resp.status_code}: {resp.text[:150]}")
+                _503_streak = 0
         except Exception as e:
             log(f"  ⚠️ Gemini key {kidx+1} exception: {e}")
+            _503_streak = 0
+        kidx += 1
 
     # ── Fallback: OpenAI GPT-3.5-turbo ────────────────────────
     api_key = _read_openai_key()
