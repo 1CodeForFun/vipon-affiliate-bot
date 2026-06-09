@@ -1633,28 +1633,26 @@ SKIP_NO_IMAGE  = "no-image"   # couldn't resolve product image
 
 
 def _check_deal_only(driver) -> bool:
-    """Return True when this product has NO shareable code — it's a price-drop deal
-    only (the JS sets GetDealatAmazon=true / plummet-status button is present and the
-    coupon-container is absent or hidden). In this case there's nothing to reveal, so
-    no reveal attempt should count against the throttle counter."""
+    """Return True ONLY when this product genuinely has no exclusive code.
+
+    The ONLY reliable marker is the PRESENCE of PC_239_getCodeInDetail (the GET CODE
+    button). If that button exists the product has a code to reveal — return False
+    immediately regardless of any other markers. The JS string 'GetDealatAmazon=true'
+    lives in a function definition on EVERY Vipon page and must NOT be used as a
+    signal (it matches every product and false-flags all of them as deal-only)."""
     try:
-        src = driver.page_source or ""
-        # Vipon sets GetDealatAmazon=true in the page JS for deal-only listings.
-        if "GetDealatAmazon = true" in src or "GetDealatAmazon=true" in src:
-            return True
-        # plummet-status button without a coupon-container is another reliable marker.
-        try:
-            driver.find_element(By.ID, "plummet-status")
-            # If there's also a coupon-container it might still have a code.
-            try:
-                driver.find_element(By.ID, "coupon-container")
-                return False   # has both → might have a code, let extract_code decide
-            except Exception:
-                return True    # only plummet, no coupon-container → deal-only
-        except Exception:
-            pass
+        # GET CODE button present → definitely has an exclusive code, not deal-only.
+        driver.find_element(By.ID, "PC_239_getCodeInDetail")
+        return False
     except Exception:
         pass
+    # GET CODE button absent → check for the deal-only plummet button.
+    try:
+        driver.find_element(By.ID, "plummet-status")
+        return True   # only "Get Deal at Amazon", no GET CODE → deal-only
+    except Exception:
+        pass
+    # Neither button found (page still loading?) — let extract_code decide.
     return False
 
 
