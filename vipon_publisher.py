@@ -466,10 +466,18 @@ def main() -> None:
             except Exception as e:
                 log(f"ERROR (YT {yt_label}): {e}"); errors.append(f"YT-{yt_label}: {e}")
 
-        ws.update_acell(f"N{sheet_row}", video_url)   # save the Cloudinary reel link
-        ws.update_acell(f"P{sheet_row}", "Yes")
-        if yt_success:
-            ws.update_acell(f"R{sheet_row}", "Yes")
+        # Write-back: wrap individually so a stale row number (sheet was reset by a
+        # concurrent scrape run while we were posting) never crashes a run that
+        # already successfully posted to all platforms.
+        for _cell, _val in [(f"N{sheet_row}", video_url),
+                            (f"P{sheet_row}", "Yes"),
+                            (f"R{sheet_row}", "Yes") if yt_success else (None, None)]:
+            if _cell is None:
+                continue
+            try:
+                ws.update_acell(_cell, _val)
+            except Exception as _e:
+                log(f"  ⚠️ sheet write {_cell}={_val!r} failed (row may no longer exist): {_e}")
         log(f"US row {sheet_row}: posted ({len(errors)} error(s))" +
             (f": {'; '.join(map(str, errors))}" if errors else " — all platforms OK"))
         posted_us = True
@@ -495,11 +503,16 @@ def main() -> None:
             else:
                 _, tok2, _ = load_fb_token(FB_FRESHDEALS_TOKEN); pid2 = FB_CANADA_PAGE_ID
             post_fb_reel(pid2, tok2, video_url2, product2["title"] or "Deal Alert!", product2["reel_link"])
-            ws2.update_acell(f"N{sheet_row2}", video_url2)   # save Cloudinary reel link
-            ws2.update_acell(f"P{sheet_row2}", "Yes")
             log(f"CA row {sheet_row2}: Facebook reel posted.")
         except Exception as e:
-            log(f"ERROR (FB Canada) row {sheet_row2}: {e} — P not marked, will retry")
+            log(f"ERROR (FB Canada) row {sheet_row2}: {e} — skipping sheet write-back")
+            break
+        # Sheet write-back separate from the post so a stale row never re-triggers a post.
+        for _cell, _val in [(f"N{sheet_row2}", video_url2), (f"P{sheet_row2}", "Yes")]:
+            try:
+                ws2.update_acell(_cell, _val)
+            except Exception as _e:
+                log(f"  ⚠️ CA sheet write {_cell} failed (row may no longer exist): {_e}")
         break
 
     log("=== vipon_publisher done ===")
