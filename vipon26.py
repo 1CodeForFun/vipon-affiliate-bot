@@ -415,28 +415,59 @@ def shorten_title(s: str, max_len: int = MAX_TITLE_LEN) -> str:
 # ════════════════════════════════════════════════════════════════
 
 BLOCKED_TITLE_KEYWORDS = [
+    # Clothing / lingerie
     "lingerie",
     "sleepwear", "sleep ware", "sleep wear", "sleepware",
     "women's clothes", "womens clothes", "women clothes",
     "legging", "leggings", "pants", "sex", "neck",
-    "panty", "panties", "underwear", "bra", "Skirt",
+    "panty", "panties", "underwear", "bra", "skirt",
     "sexy", "lace", "wig",
+    "nightgown", "blouse", "dress", "dressy",
+    "bikini", "swimsuit", "swimwear", "swim wear",
+    "shorts",  # "short" removed (too generic — blocks "short cable" etc.)
+
+    # Alcohol / tobacco / smoking paraphernalia
     "hooka", "hookah", "shisha",
     "smoking", "tobacco", "tobaco",
-    "Christian","bible", "christian", "nightgown",
-    "dress", "Dress", "dressy", "blouse",
     "wine", "vodka", "whiskey", "whisky", "beer",
-    "bikini", "swimsuit", "swimwear", "swim wear",
+
+    # Religious (brand-safety on faith-targeted pages)
+    "christian", "bible",
+
+    # ── Adult / sexual entertainment ──────────────────────────────────────────
+    "anal",          # covers "anal plug", "anal beads", etc. — \b...\b won't match "analysis"
+    "dildo",
+    "vibrator",
+    "masturbator", "masturbation", "masturbate",
+    "fleshlight",
+    "butt plug",
+    "cock ring",
+    "sex toy", "adult toy",
+    "bondage",
+    "bdsm",
+    "fetish",
+    "erotic",
+    "condom",
+    "penis", "vagina", "vulva", "clitoris",
+    "nipple clamp", "nipple cover",
+    "g-string",
+
+    # ── Weapons / injury-risk ─────────────────────────────────────────────────
+    "stun gun",
+    "taser",
+    "brass knuckles",
+    "switchblade",
+    "butterfly knife",
+    "nunchuck", "nunchaku",
 ]
 
 def _blocked_keyword_hit(title: str) -> str:
     """Return the blocked keyword found in the title, or '' if the title is clean.
 
-    Single words match on WORD BOUNDARIES so a banned token can't fire inside an
-    innocent word — 'bra' must not block 'Library', 'neck' must not block
-    'necklace', 'pants' must not block 'pantsuit'. Multi-word phrases (with a
-    space or hyphen) match as plain substrings. Comparison is case-insensitive,
-    so capitalized list entries ('Skirt', 'Dress') still match lowercase titles.
+    Single words use WORD BOUNDARY + optional plural suffix so 'bra' blocks
+    'bras' but not 'library', 'anal' blocks 'anals' but not 'analysis', etc.
+    Multi-word phrases (space or hyphen) match as plain substrings.
+    Comparison is case-insensitive.
     """
     t_low = (title or "").lower()
     for b in BLOCKED_TITLE_KEYWORDS:
@@ -446,7 +477,7 @@ def _blocked_keyword_hit(title: str) -> str:
         if " " in bl or "-" in bl:
             if bl in t_low:
                 return b
-        elif re.search(rf"\b{re.escape(bl)}\b", t_low):
+        elif re.search(rf"\b{re.escape(bl)}(?:s|es)?\b", t_low):
             return b
     return ""
 
