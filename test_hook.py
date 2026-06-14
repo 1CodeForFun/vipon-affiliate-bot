@@ -263,7 +263,7 @@ def generate_hook_concept(title: str, bullets: list[str], keys: list[str]) -> di
     prompt_text = META_PROMPT.format(product_name=title, bullets=bullets_text)
     payload = {
         "contents": [{"parts": [{"text": prompt_text}]}],
-        "generationConfig": {"temperature": 0.9, "maxOutputTokens": 1500},
+        "generationConfig": {"temperature": 0.9, "maxOutputTokens": 8192},
     }
 
     for i, key in enumerate(keys):
