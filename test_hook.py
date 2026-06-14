@@ -55,7 +55,7 @@ HEADERS = {
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def load_keys() -> list[str]:
-    """Load all Gemini keys from geminikeys.txt (one per line)."""
+    """Load all Gemini keys from geminikey.txt (one per line)."""
     if not GEMINI_KEYS_FILE.exists():
         sys.exit(f"Key file not found: {GEMINI_KEYS_FILE}")
     keys = [k.strip() for k in GEMINI_KEYS_FILE.read_text().splitlines() if k.strip()]
