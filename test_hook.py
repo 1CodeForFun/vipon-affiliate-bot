@@ -35,7 +35,7 @@ HOOK_DURATION_SEC   = 5
 HOOK_THUMB_OFFSET   = 2.5    # seconds — where peak-motion frame lives
 
 # Gemini model — flash works on free-tier keys and is fast enough for this task
-GEMINI_MODEL        = "gemini-2.0-flash"
+GEMINI_MODEL        = "gemini-2.5-flash"
 
 GEMINI_API_BASE     = "https://generativelanguage.googleapis.com/v1beta"
 OUTPUT_DIR          = Path("hook_test_output")
