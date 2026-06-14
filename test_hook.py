@@ -26,7 +26,7 @@ from bs4 import BeautifulSoup
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 # Uses the same free-tier key file as the main scraper — no credits consumed
-GEMINI_KEYS_FILE    = Path.home() / "geminikeys.txt"
+GEMINI_KEYS_FILE    = Path.home() / "geminikey.txt"
 AMAZON_DEALS_URL    = "https://www.amazon.com/deals"
 
 # Veo 3 model name — verify at https://ai.google.dev/api if this returns 404
