@@ -34,7 +34,7 @@ HOOK_DURATION_SEC   = 5
 HOOK_THUMB_OFFSET   = 2.5    # seconds — where peak-motion frame lives
 
 # Gemini model for concept generation
-GEMINI_MODEL        = "gemini-2.0-flash"  # fast; swap to "gemini-2.5-pro" for richer output
+GEMINI_MODEL        = "gemini-2.5-pro"    # Pro key; swap to "gemini-2.0-flash" for free-tier keys
 
 GEMINI_API_BASE     = "https://generativelanguage.googleapis.com/v1beta"
 OUTPUT_DIR          = Path("hook_test_output")
@@ -258,26 +258,39 @@ def generate_hook_concept(title: str, bullets: list[str], api_key: str) -> dict:
     bullets_text = "\n".join(f"• {b}" for b in bullets)
     prompt_text = META_PROMPT.format(product_name=title, bullets=bullets_text)
 
-    url = f"{GEMINI_API_BASE}/models/{GEMINI_MODEL}:generateContent?key={api_key}"
+    # Try models in order — Pro first, then fallbacks if key lacks access
+    models_to_try = [GEMINI_MODEL, "gemini-1.5-pro-latest", "gemini-2.0-flash", "gemini-1.5-flash"]
     payload = {
         "contents": [{"parts": [{"text": prompt_text}]}],
         "generationConfig": {"temperature": 0.9, "maxOutputTokens": 1500},
     }
 
-    log(f"  Calling Gemini ({GEMINI_MODEL})...")
-    resp = requests.post(url, json=payload, timeout=60)
-    resp.raise_for_status()
+    for model in models_to_try:
+        url = f"{GEMINI_API_BASE}/models/{model}:generateContent?key={api_key}"
+        for attempt in range(3):
+            log(f"  Calling Gemini ({model}) attempt {attempt + 1}...")
+            resp = requests.post(url, json=payload, timeout=60)
+            if resp.status_code == 429:
+                wait = 15 * (attempt + 1)
+                log(f"  429 rate-limit — waiting {wait}s before retry...")
+                time.sleep(wait)
+                continue
+            if resp.status_code in (400, 404):
+                log(f"  Model {model} not available ({resp.status_code}) — trying next...")
+                break  # try next model
+            resp.raise_for_status()
+            # Success
+            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE).strip()
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as e:
+                log(f"  ⚠️  JSON parse failed: {e}\n  Raw:\n{raw}")
+                raise
+        else:
+            log(f"  {model} exhausted retries — trying next model...")
 
-    raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-    # Strip markdown fences if Gemini adds them despite instructions
-    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE).strip()
-
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        log(f"  ⚠️  JSON parse failed: {e}")
-        log(f"  Raw response:\n{raw}")
-        raise
+    raise RuntimeError("All Gemini models failed — check API key and quota.")
 
 
 # ── Step 4: Veo 3 → generate hook video ───────────────────────────────────────
