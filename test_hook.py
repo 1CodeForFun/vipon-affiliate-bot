@@ -297,9 +297,14 @@ def generate_hook_concept(title: str, bullets: list[str], keys: list[str]) -> di
 # ── Step 4: Veo 3 → generate hook video ───────────────────────────────────────
 
 def generate_veo3_hook(veo3_prompt: str, api_key: str, output_path: Path) -> Path:
-    """Submit a Veo 3 generation job, poll until done, save to output_path."""
+    """Submit a Veo generation job, polling until done. Tries model names in order."""
 
-    submit_url = f"{GEMINI_API_BASE}/models/{VEO_MODEL}:generateVideo?key={api_key}"
+    veo_models_to_try = [
+        "veo-3.0-generate-001",
+        "veo-2.0-generate-001",
+        "veo-003",
+    ]
+
     payload = {
         "prompt": veo3_prompt,
         "generationConfig": {
@@ -308,20 +313,27 @@ def generate_veo3_hook(veo3_prompt: str, api_key: str, output_path: Path) -> Pat
         },
     }
 
-    log(f"  Submitting to Veo 3 ({VEO_MODEL})...")
-    resp = requests.post(submit_url, json=payload, timeout=30)
+    resp = None
+    used_model = None
+    for model in veo_models_to_try:
+        submit_url = f"{GEMINI_API_BASE}/models/{model}:generateVideo?key={api_key}"
+        log(f"  Submitting to Veo ({model})...")
+        resp = requests.post(submit_url, json=payload, timeout=30)
+        if resp.status_code == 404:
+            log(f"  {model} not found — trying next...")
+            continue
+        if resp.status_code == 403:
+            log(f"\n  ✗ {model} returned 403 — key does not have Veo access.")
+            log("    Apply at: https://aistudio.google.com")
+            log("    Concept saved — paste the Veo3 prompt manually into AI Studio to test.")
+            return None
+        used_model = model
+        break
 
-    if resp.status_code == 403:
-        log("\n  ✗ Veo 3 returned 403 Forbidden.")
-        log("    This key does not have video generation access.")
-        log("    Apply for Veo 3 access at: https://aistudio.google.com")
-        log("    Concept + Veo3 prompt are saved — you can paste the prompt manually.")
-        return None
-
-    if resp.status_code == 404:
-        log(f"\n  ✗ Veo 3 model '{VEO_MODEL}' not found (404).")
-        log("    Try changing VEO_MODEL in this script to: veo-2.0-generate-001 or veo-3.0-generate-001")
-        log("    Check available models: https://ai.google.dev/api/generate-content#models")
+    if used_model is None:
+        log("\n  ✗ No Veo model responded — all returned 404.")
+        log("    These free-tier keys may not have Veo access yet.")
+        log("    Paste hook_test_output/hook_concept.json → veo3_prompt into https://aistudio.google.com")
         return None
 
     resp.raise_for_status()
