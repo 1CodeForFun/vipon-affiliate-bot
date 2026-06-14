@@ -25,7 +25,8 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-GEMINI_PRO_KEY_FILE = Path.home() / "geminipro.txt"
+# Uses the same free-tier key file as the main scraper — no credits consumed
+GEMINI_KEYS_FILE    = Path.home() / "geminikeys.txt"
 AMAZON_DEALS_URL    = "https://www.amazon.com/deals"
 
 # Veo 3 model name — verify at https://ai.google.dev/api if this returns 404
@@ -33,8 +34,8 @@ VEO_MODEL           = "veo-003"
 HOOK_DURATION_SEC   = 5
 HOOK_THUMB_OFFSET   = 2.5    # seconds — where peak-motion frame lives
 
-# Gemini model for concept generation
-GEMINI_MODEL        = "gemini-2.5-pro"    # Pro key; swap to "gemini-2.0-flash" for free-tier keys
+# Gemini model — flash works on free-tier keys and is fast enough for this task
+GEMINI_MODEL        = "gemini-2.0-flash"
 
 GEMINI_API_BASE     = "https://generativelanguage.googleapis.com/v1beta"
 OUTPUT_DIR          = Path("hook_test_output")
@@ -53,13 +54,15 @@ HEADERS = {
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def load_key() -> str:
-    if not GEMINI_PRO_KEY_FILE.exists():
-        sys.exit(f"Key file not found: {GEMINI_PRO_KEY_FILE}")
-    key = GEMINI_PRO_KEY_FILE.read_text().strip().splitlines()[0].strip()
-    if not key:
-        sys.exit(f"Key file is empty: {GEMINI_PRO_KEY_FILE}")
-    return key
+def load_keys() -> list[str]:
+    """Load all Gemini keys from geminikeys.txt (one per line)."""
+    if not GEMINI_KEYS_FILE.exists():
+        sys.exit(f"Key file not found: {GEMINI_KEYS_FILE}")
+    keys = [k.strip() for k in GEMINI_KEYS_FILE.read_text().splitlines() if k.strip()]
+    if not keys:
+        sys.exit(f"No keys found in {GEMINI_KEYS_FILE}")
+    log(f"  Loaded {len(keys)} Gemini keys from {GEMINI_KEYS_FILE}")
+    return keys
 
 
 def log(msg: str):
@@ -254,93 +257,41 @@ Respond ONLY in valid JSON. No markdown. No code fences. No explanation outside 
 """
 
 
-def diagnose_key(api_key: str):
-    """Print available models and run a 1-token ping to verify the key works."""
-    log("\n── Key diagnostic ──────────────────────────────────")
-    # List models
-    r = requests.get(f"{GEMINI_API_BASE}/models?key={api_key}", timeout=15)
-    if r.status_code != 200:
-        log(f"  models.list failed {r.status_code}: {r.text[:300]}")
-    else:
-        names = [m["name"] for m in r.json().get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])]
-        log(f"  Models supporting generateContent ({len(names)}):")
-        for n in names:
-            log(f"    {n}")
-
-    # Ping with tiny request
-    ping_url = f"{GEMINI_API_BASE}/models/gemini-2.0-flash:generateContent?key={api_key}"
-    ping = requests.post(ping_url, json={"contents": [{"parts": [{"text": "Hi"}]}],
-                                         "generationConfig": {"maxOutputTokens": 5}}, timeout=15)
-    log(f"\n  Ping gemini-2.0-flash → {ping.status_code}")
-    if ping.status_code != 200:
-        try:
-            body = ping.json()
-        except Exception:
-            body = ping.text
-        log(f"  Error body: {json.dumps(body, indent=2)[:600]}")
-    else:
-        log("  ✓ Key is working")
-    log("────────────────────────────────────────────────────\n")
-
-
-def generate_hook_concept(title: str, bullets: list[str], api_key: str) -> dict:
+def generate_hook_concept(title: str, bullets: list[str], keys: list[str]) -> dict:
+    """Call Gemini to get hook concept. Rotates through keys on 429 — 1 attempt per key."""
     bullets_text = "\n".join(f"• {b}" for b in bullets)
     prompt_text = META_PROMPT.format(product_name=title, bullets=bullets_text)
-
-    # Tier 1 prepay model names — versioned aliases are more stable than "latest"
-    models_to_try = [
-        "gemini-2.5-pro",
-        "gemini-2.5-pro-preview-06-05",   # explicit version if alias fails
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-001",            # explicit version
-        "gemini-1.5-pro",
-        "gemini-1.5-pro-002",
-    ]
     payload = {
         "contents": [{"parts": [{"text": prompt_text}]}],
         "generationConfig": {"temperature": 0.9, "maxOutputTokens": 1500},
     }
 
-    for model in models_to_try:
-        url = f"{GEMINI_API_BASE}/models/{model}:generateContent?key={api_key}"
-        for attempt in range(3):
-            log(f"  Calling Gemini ({model}) attempt {attempt + 1}...")
-            resp = requests.post(url, json=payload, timeout=60)
+    for i, key in enumerate(keys):
+        url = f"{GEMINI_API_BASE}/models/{GEMINI_MODEL}:generateContent?key={key}"
+        log(f"  Calling Gemini (key {i + 1}/{len(keys)})...")
+        resp = requests.post(url, json=payload, timeout=60)
 
-            if resp.status_code == 429:
-                # Print actual error body so we know WHY it's 429
-                try:
-                    err = resp.json()
-                    log(f"  429 detail: {json.dumps(err.get('error', err), indent=2)[:400]}")
-                except Exception:
-                    log(f"  429 body: {resp.text[:300]}")
-                wait = 20 * (attempt + 1)
-                log(f"  Waiting {wait}s before retry...")
-                time.sleep(wait)
-                continue
-
-            if resp.status_code in (400, 404):
-                try:
-                    err_msg = resp.json().get("error", {}).get("message", resp.text[:120])
-                except Exception:
-                    err_msg = resp.text[:120]
-                log(f"  {model} → {resp.status_code}: {err_msg} — trying next...")
-                break
-
-            resp.raise_for_status()
-            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE).strip()
+        if resp.status_code == 429:
             try:
-                return json.loads(raw)
-            except json.JSONDecodeError as e:
-                log(f"  ⚠️  JSON parse failed: {e}\n  Raw:\n{raw}")
-                raise
-        else:
-            log(f"  {model} exhausted retries — trying next model...")
+                msg = resp.json().get("error", {}).get("message", "")
+            except Exception:
+                msg = resp.text[:120]
+            log(f"  Key {i + 1} → 429: {msg[:120]} — trying next key...")
+            continue
 
-    # All models failed — run diagnostic to show what's really wrong
-    diagnose_key(api_key)
-    raise RuntimeError("All Gemini models failed — see diagnostic above.")
+        if resp.status_code != 200:
+            log(f"  Key {i + 1} → {resp.status_code} — trying next key...")
+            continue
+
+        raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE).strip()
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            log(f"  ⚠️  JSON parse failed: {e}\n  Raw:\n{raw}")
+            raise
+
+    raise RuntimeError(f"All {len(keys)} Gemini keys returned 429/error — quota exhausted for today.")
 
 
 # ── Step 4: Veo 3 → generate hook video ───────────────────────────────────────
@@ -455,7 +406,8 @@ def main():
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(exist_ok=True)
-    api_key = load_key()
+    keys = load_keys()
+    api_key = keys[0]  # Veo 3 uses first key; concept generation rotates all keys
 
     # ── Step 1: Get product ───────────────────────────────────────────────────
     log("\n═══ Step 1: Get Amazon product ═══")
@@ -476,7 +428,7 @@ def main():
 
     # ── Step 2: Hook concept via Gemini ──────────────────────────────────────
     log("\n═══ Step 2: Generate hook concept (Gemini) ═══")
-    concept = generate_hook_concept(title, bullets, api_key)
+    concept = generate_hook_concept(title, bullets, keys)
 
     log(f"\n  Pinpoint:     {concept['pinpoint']}")
     log(f"  Persona:      {concept['persona']}")
