@@ -254,12 +254,48 @@ Respond ONLY in valid JSON. No markdown. No code fences. No explanation outside 
 """
 
 
+def diagnose_key(api_key: str):
+    """Print available models and run a 1-token ping to verify the key works."""
+    log("\n── Key diagnostic ──────────────────────────────────")
+    # List models
+    r = requests.get(f"{GEMINI_API_BASE}/models?key={api_key}", timeout=15)
+    if r.status_code != 200:
+        log(f"  models.list failed {r.status_code}: {r.text[:300]}")
+    else:
+        names = [m["name"] for m in r.json().get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])]
+        log(f"  Models supporting generateContent ({len(names)}):")
+        for n in names:
+            log(f"    {n}")
+
+    # Ping with tiny request
+    ping_url = f"{GEMINI_API_BASE}/models/gemini-2.0-flash:generateContent?key={api_key}"
+    ping = requests.post(ping_url, json={"contents": [{"parts": [{"text": "Hi"}]}],
+                                         "generationConfig": {"maxOutputTokens": 5}}, timeout=15)
+    log(f"\n  Ping gemini-2.0-flash → {ping.status_code}")
+    if ping.status_code != 200:
+        try:
+            body = ping.json()
+        except Exception:
+            body = ping.text
+        log(f"  Error body: {json.dumps(body, indent=2)[:600]}")
+    else:
+        log("  ✓ Key is working")
+    log("────────────────────────────────────────────────────\n")
+
+
 def generate_hook_concept(title: str, bullets: list[str], api_key: str) -> dict:
     bullets_text = "\n".join(f"• {b}" for b in bullets)
     prompt_text = META_PROMPT.format(product_name=title, bullets=bullets_text)
 
-    # Try models in order — Pro first, then fallbacks if key lacks access
-    models_to_try = [GEMINI_MODEL, "gemini-1.5-pro-latest", "gemini-2.0-flash", "gemini-1.5-flash"]
+    # Tier 1 prepay model names — versioned aliases are more stable than "latest"
+    models_to_try = [
+        "gemini-2.5-pro",
+        "gemini-2.5-pro-preview-06-05",   # explicit version if alias fails
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-001",            # explicit version
+        "gemini-1.5-pro",
+        "gemini-1.5-pro-002",
+    ]
     payload = {
         "contents": [{"parts": [{"text": prompt_text}]}],
         "generationConfig": {"temperature": 0.9, "maxOutputTokens": 1500},
@@ -270,16 +306,28 @@ def generate_hook_concept(title: str, bullets: list[str], api_key: str) -> dict:
         for attempt in range(3):
             log(f"  Calling Gemini ({model}) attempt {attempt + 1}...")
             resp = requests.post(url, json=payload, timeout=60)
+
             if resp.status_code == 429:
-                wait = 15 * (attempt + 1)
-                log(f"  429 rate-limit — waiting {wait}s before retry...")
+                # Print actual error body so we know WHY it's 429
+                try:
+                    err = resp.json()
+                    log(f"  429 detail: {json.dumps(err.get('error', err), indent=2)[:400]}")
+                except Exception:
+                    log(f"  429 body: {resp.text[:300]}")
+                wait = 20 * (attempt + 1)
+                log(f"  Waiting {wait}s before retry...")
                 time.sleep(wait)
                 continue
+
             if resp.status_code in (400, 404):
-                log(f"  Model {model} not available ({resp.status_code}) — trying next...")
-                break  # try next model
+                try:
+                    err_msg = resp.json().get("error", {}).get("message", resp.text[:120])
+                except Exception:
+                    err_msg = resp.text[:120]
+                log(f"  {model} → {resp.status_code}: {err_msg} — trying next...")
+                break
+
             resp.raise_for_status()
-            # Success
             raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
             raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE).strip()
             try:
@@ -290,7 +338,9 @@ def generate_hook_concept(title: str, bullets: list[str], api_key: str) -> dict:
         else:
             log(f"  {model} exhausted retries — trying next model...")
 
-    raise RuntimeError("All Gemini models failed — check API key and quota.")
+    # All models failed — run diagnostic to show what's really wrong
+    diagnose_key(api_key)
+    raise RuntimeError("All Gemini models failed — see diagnostic above.")
 
 
 # ── Step 4: Veo 3 → generate hook video ───────────────────────────────────────
