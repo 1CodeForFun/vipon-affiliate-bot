@@ -92,18 +92,11 @@ def get_first_deal_url() -> str:
 
 # ── Step 2: Bullet points from product page ────────────────────────────────────
 
-def get_product_info(product_url: str) -> tuple[str, list[str], str]:
-    """Return (title, [bullet1, bullet2, bullet3], price_text)."""
-    log(f"  GET {product_url}")
-    resp = requests.get(product_url, headers=HEADERS, timeout=20)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    # Title
+def _parse_bullets(soup: "BeautifulSoup") -> tuple[str, list[str], str]:
+    """Extract (title, bullets, price) from a BeautifulSoup page."""
     title_el = soup.select_one("#productTitle")
     title = title_el.get_text(strip=True) if title_el else "Unknown Product"
 
-    # Bullet points — feature-bullets is the main list; productFactsDesktop is fallback
     bullets: list[str] = []
     for selector in [
         "#feature-bullets li span.a-list-item",
@@ -112,7 +105,6 @@ def get_product_info(product_url: str) -> tuple[str, list[str], str]:
     ]:
         for li in soup.select(selector):
             text = li.get_text(" ", strip=True)
-            # Filter out short boilerplate ("Make sure...", etc.)
             if len(text) > 25 and not text.lower().startswith("make sure"):
                 bullets.append(text)
             if len(bullets) >= 3:
@@ -120,13 +112,6 @@ def get_product_info(product_url: str) -> tuple[str, list[str], str]:
         if len(bullets) >= 3:
             break
 
-    if not bullets:
-        raise RuntimeError(
-            f"Could not find product bullet points at {product_url}\n"
-            "Amazon may have rate-limited this IP. Try again in a few minutes."
-        )
-
-    # Price (best-effort)
     price = ""
     for sel in [".a-price .a-offscreen", "#priceblock_ourprice", "#priceblock_dealprice"]:
         el = soup.select_one(sel)
@@ -135,6 +120,61 @@ def get_product_info(product_url: str) -> tuple[str, list[str], str]:
             break
 
     return title, bullets[:3], price
+
+
+def _get_bullets_via_selenium(product_url: str) -> tuple[str, list[str], str]:
+    """Fallback: use undetected_chromedriver (already in project) when requests gets blocked."""
+    log("  Retrying with Selenium (Amazon blocked plain requests)...")
+    import undetected_chromedriver as uc
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    opts = uc.ChromeOptions()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--window-size=1280,900")
+
+    driver = uc.Chrome(options=opts)
+    try:
+        driver.get(product_url)
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.ID, "feature-bullets"))
+        )
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        return _parse_bullets(soup)
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
+def get_product_info(product_url: str) -> tuple[str, list[str], str]:
+    """Return (title, [bullet1, bullet2, bullet3], price_text).
+    Tries plain requests first; falls back to Selenium if Amazon blocks it."""
+    log(f"  GET {product_url}")
+    try:
+        resp = requests.get(product_url, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        title, bullets, price = _parse_bullets(soup)
+        if bullets:
+            return title, bullets, price
+    except Exception as e:
+        log(f"  requests failed ({e}) — trying Selenium...")
+
+    # Selenium fallback
+    title, bullets, price = _get_bullets_via_selenium(product_url)
+
+    if not bullets:
+        raise RuntimeError(
+            f"Could not find product bullet points at {product_url}\n"
+            "Even Selenium found no bullets — the page may require login or is geo-blocked."
+        )
+
+    return title, bullets, price
 
 
 # ── Step 3: Gemini Pro → pinpoint + persona + Veo 3 prompt ───────────────────
