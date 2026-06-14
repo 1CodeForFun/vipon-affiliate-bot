@@ -4,6 +4,7 @@ Pillow
 gspread
 oauth2client
 requests
+beautifulsoup4
 edge-tts
 # paapi5-python-sdk is NOT on PyPI — installed separately from Amazon's GitHub in workflows
 cloudinary
