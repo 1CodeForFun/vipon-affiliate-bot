@@ -66,7 +66,7 @@ def _load_vipon_accounts():
     return [{"username": "ayman1elmasry@yahoo.com", "password": "HighVoltage123*"}]
 
 VIPON_ACCOUNTS  = _load_vipon_accounts()
-_account_index  = 0   # mutable via _rotate_account()
+_account_index  = datetime.now().timetuple().tm_yday % len(VIPON_ACCOUNTS)  # day-based start
 
 def _current_account():
     return VIPON_ACCOUNTS[_account_index % len(VIPON_ACCOUNTS)]
@@ -2539,6 +2539,8 @@ def main():
         if not need_scrape:
             log("▶ Both sheets already at the limit — skipping scrape, running seller intake only.")
         # Try every account until one logs in successfully (only if we need to scrape)
+        log(f"📅 Daily account rotation: starting with account "
+            f"{_account_index + 1}/{len(VIPON_ACCOUNTS)} ({_current_account()['username']})")
         logged_in = False
         if need_scrape:
             for _attempt in range(len(VIPON_ACCOUNTS)):
@@ -2560,12 +2562,18 @@ def main():
         count = 0
         consecutive_fails = 0          # only throttle results count (not deal-only/onetime)
         rotations_no_success = 0       # account cycles since last successful code
-        ROTATION_THRESHOLD = 3         # rotate sooner now that we only count real throttles
+        account_scraped   = 0          # successful codes from current account this run
+        ROTATION_THRESHOLD = 3         # rotate after this many consecutive throttle fails
+        # Proactive: spread codes evenly — rotate before hitting the 60/day cap
+        PROACTIVE_ROTATE_AFTER = max(1, (us_target + ca_target + len(VIPON_ACCOUNTS) - 1) // len(VIPON_ACCOUNTS))
+        log(f"  ↺ Proactive rotation every {PROACTIVE_ROTATE_AFTER} code(s) per account "
+            f"(target {us_target + ca_target} across {len(VIPON_ACCOUNTS)} accounts)")
 
         def _do_rotate():
-            nonlocal rotations_no_success
+            nonlocal rotations_no_success, account_scraped
             _rotate_account()
             rotations_no_success += 1
+            account_scraped = 0
             try:
                 logout(driver)
                 driver.delete_all_cookies()
@@ -2630,9 +2638,13 @@ def main():
 
             consecutive_fails = 0
             rotations_no_success = 0
+            account_scraped += 1
             scraped.append(data)
             count += 1
             log(f"✓ Scraped {count}/{us_target} (sheet total {us_existing+count}/{PRODUCT_LIMIT}): {data['title'][:60]}")
+            if account_scraped >= PROACTIVE_ROTATE_AFTER and len(VIPON_ACCOUNTS) > 1 and count < us_target:
+                log(f"  📊 Proactive rotation after {account_scraped} code(s) — spreading load evenly")
+                _do_rotate()
             try:
                 _write_product_row(ws, data, tld="com", ws_p=ws_p)
             except Exception as e:
@@ -2695,9 +2707,13 @@ def main():
                 continue
 
             ca_fails = 0
+            account_scraped += 1
             scraped_ca.append(data_ca)
             ca_count += 1
             log(f"✓ CA Scraped {ca_count}/{ca_target} (sheet total {ca_existing+ca_count}/{PRODUCT_LIMIT}): {data_ca['title'][:60]}")
+            if account_scraped >= PROACTIVE_ROTATE_AFTER and len(VIPON_ACCOUNTS) > 1 and ca_count < ca_target:
+                log(f"  📊 Proactive rotation after {account_scraped} code(s) — spreading load evenly")
+                _do_rotate()
             try:
                 _write_product_row(ws2, data_ca, tld=AMAZON_TLD_CA)
             except Exception as e:
