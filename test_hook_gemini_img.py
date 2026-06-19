@@ -34,6 +34,13 @@ IMAGEN_MODELS = [
     "imagen-3.0-fast-generate-001",
 ]
 
+# Gemini Flash image generation — uses the same generateContent endpoint as text,
+# so it works on free-tier keys. Falls back to this when Imagen returns 404.
+GEMINI_IMG_MODELS = [
+    "gemini-2.0-flash-preview-image-generation",
+    "gemini-2.0-flash-exp",
+]
+
 OUTPUT_DIR = Path("hook_test_output")
 
 HEADERS = {
@@ -226,9 +233,17 @@ def generate_hook_concept(title: str, bullets: list, keys: list) -> dict:
 
 # ── Step 3: Imagen 3 still images ─────────────────────────────────────────────
 
+def _save_img_bytes(b64: str, output_path: Path) -> Path:
+    output_path.write_bytes(base64.b64decode(b64))
+    log(f"  Saved: {output_path}  ({output_path.stat().st_size // 1024} KB)")
+    return output_path
+
+
 def generate_imagen(prompt: str, keys: list, output_path: Path, seed: int = None) -> Path:
-    """Generate one image via Imagen 3. Tries models in order, rotates keys on 429."""
-    payload = {
+    """Generate one image. Tries Imagen 3 first, falls back to Gemini Flash image gen."""
+
+    # ── Path A: Imagen 3 (high quality, needs special access) ────────────────
+    imagen_payload = {
         "instances": [{"prompt": prompt}],
         "parameters": {
             "sampleCount": 1,
@@ -238,46 +253,65 @@ def generate_imagen(prompt: str, keys: list, output_path: Path, seed: int = None
         },
     }
     if seed is not None:
-        payload["parameters"]["seed"] = seed
+        imagen_payload["parameters"]["seed"] = seed
 
+    all_imagen_404 = True
     for model in IMAGEN_MODELS:
-        url_template = f"{GEMINI_API_BASE}/models/{model}:predict?key={{key}}"
+        url_tpl = f"{GEMINI_API_BASE}/models/{model}:predict?key={{key}}"
         for i, key in enumerate(keys):
             log(f"  Imagen ({model}, key {i+1}/{len(keys)})...")
-            resp = requests.post(url_template.format(key=key), json=payload, timeout=90)
+            resp = requests.post(url_tpl.format(key=key), json=imagen_payload, timeout=90)
             if resp.status_code == 404:
-                log(f"  {model} not found — trying next model...")
-                break  # try next model, not next key
+                log(f"  {model} → 404, trying next model...")
+                break
+            all_imagen_404 = False
             if resp.status_code == 429:
                 log(f"  Key {i+1} → 429 — trying next key...")
                 continue
-            if resp.status_code == 400:
-                err = resp.json().get("error", {}).get("message", resp.text[:200])
-                log(f"  400 error: {err}")
-                # Safety block — try next key with slightly modified prompt
+            if resp.status_code not in (200,):
+                log(f"  Key {i+1} → {resp.status_code} — trying next key...")
                 continue
-            if resp.status_code != 200:
-                log(f"  Key {i+1} → {resp.status_code}: {resp.text[:200]} — trying next key...")
-                continue
-
             predictions = resp.json().get("predictions", [])
-            if not predictions:
-                log(f"  No predictions in response — trying next key...")
-                continue
+            if predictions and predictions[0].get("bytesBase64Encoded"):
+                return _save_img_bytes(predictions[0]["bytesBase64Encoded"], output_path)
 
-            img_b64 = predictions[0].get("bytesBase64Encoded")
-            if not img_b64:
-                log(f"  No image bytes — trying next key...")
-                continue
+    if not all_imagen_404:
+        log("  Imagen keys exhausted — falling back to Gemini Flash image generation...")
 
-            output_path.write_bytes(base64.b64decode(img_b64))
-            log(f"  Saved: {output_path}  ({output_path.stat().st_size // 1024} KB)")
-            return output_path
+    # ── Path B: Gemini Flash native image generation (works on free-tier keys) ─
+    # Append vertical format hint to the prompt since we can't pass aspectRatio
+    flash_prompt = prompt.rstrip(".") + ", 9:16 vertical portrait format."
+    flash_payload = {
+        "contents": [{"parts": [{"text": flash_prompt}]}],
+        "generationConfig": {"responseModalities": ["IMAGE"], "temperature": 1.0},
+    }
+    for model in GEMINI_IMG_MODELS:
+        url_tpl = f"{GEMINI_API_BASE}/models/{model}:generateContent?key={{key}}"
+        for i, key in enumerate(keys):
+            log(f"  Gemini Flash img ({model}, key {i+1}/{len(keys)})...")
+            resp = requests.post(url_tpl.format(key=key), json=flash_payload, timeout=90)
+            if resp.status_code == 404:
+                log(f"  {model} → 404, trying next model...")
+                break
+            if resp.status_code == 429:
+                log(f"  Key {i+1} → 429 — trying next key...")
+                continue
+            if resp.status_code not in (200,):
+                log(f"  Key {i+1} → {resp.status_code}: {resp.text[:200]}")
+                continue
+            # Extract inlineData image from response parts
+            parts = resp.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
+            for part in parts:
+                inline = part.get("inlineData", {})
+                if inline.get("data"):
+                    return _save_img_bytes(inline["data"], output_path)
+            log(f"  No image in response parts — trying next key...")
 
     raise RuntimeError(
-        "Imagen unavailable on all keys/models. "
-        "Free-tier keys may not have Imagen access yet — "
-        "check https://aistudio.google.com"
+        "All image generation paths failed.\n"
+        "  • Imagen 3: needs special API access (apply at aistudio.google.com)\n"
+        "  • Gemini Flash img: model may not be available on your key tier\n"
+        "Try running test_hook_pollinations.py as a no-key fallback."
     )
 
 
