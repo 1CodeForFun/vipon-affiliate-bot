@@ -78,6 +78,38 @@ def _rotate_account():
     print(f"[rotate] switching to account {_account_index + 1}/{len(VIPON_ACCOUNTS)}: {acc['username']}")
     return acc
 
+_CONFIG_TAB = "_config"  # lightweight sheet that persists run state across GitHub Actions runs
+
+def _read_account_state(ss) -> int:
+    """Return the account index to start on this run.
+    Reads last-saved index from the sheet and advances by one, so consecutive
+    runs never start on the same account. Falls back to day-of-year if no state."""
+    try:
+        cfg = ss.worksheet(_CONFIG_TAB)
+        val = cfg.acell("A1").value
+        if val is not None and str(val).strip().lstrip("-").isdigit():
+            saved = int(val)
+            nxt = (saved + 1) % len(VIPON_ACCOUNTS)
+            print(f"[account-state] last run ended on index {saved} — starting on {nxt} ({VIPON_ACCOUNTS[nxt]['username']})")
+            return nxt
+    except Exception:
+        pass
+    fallback = datetime.now().timetuple().tm_yday % len(VIPON_ACCOUNTS)
+    print(f"[account-state] no saved state — day-based fallback index {fallback}")
+    return fallback
+
+def _write_account_state(ss) -> None:
+    """Persist the current _account_index so the next run starts on the next account."""
+    try:
+        try:
+            cfg = ss.worksheet(_CONFIG_TAB)
+        except Exception:
+            cfg = ss.add_worksheet(title=_CONFIG_TAB, rows=5, cols=2)
+        cfg.update("A1", [[_account_index]])
+        print(f"[account-state] saved index {_account_index} for next run")
+    except Exception as _e:
+        print(f"[account-state] WARNING: could not save state: {_e.__class__.__name__}")
+
 # ── Video dimensions: 720×1280 is valid for all Reels/Shorts, ~56% fewer pixels → much faster ──
 VIDEO_W = 720
 VIDEO_H = 1280
@@ -2513,6 +2545,9 @@ def main():
     ws2    = open_sheet2_and_reset()
     ws_p   = open_pinterest_sheet_and_reset() if ENABLE_PINTEREST else None
 
+    global _account_index
+    _account_index = _read_account_state(ws.spreadsheet)
+
     # Top-up: fill each sheet UP TO PRODUCT_LIMIT rather than always scraping a fresh
     # full batch. After a short run, a rerun completes the day to 24/sheet without
     # re-scraping (and re-burning quota on) products already banked. Existing PIDs are
@@ -2720,6 +2755,7 @@ def main():
                 log(f"  ⚠️ inline CA sheet write failed for PID {data_ca['pid']}: {e.__class__.__name__}")
 
     finally:
+        _write_account_state(ws.spreadsheet)
         try:
             driver.quit()
             log("✓ Chrome closed — RAM freed, starting video production…")
