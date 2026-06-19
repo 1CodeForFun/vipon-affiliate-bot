@@ -19,7 +19,7 @@ Usage:
   python test_hook.py --url "https://www.amazon.com/dp/ASIN"  # skip deals scrape
 """
 
-import os, re, sys, json, time, base64, argparse, subprocess
+import os, re, sys, json, time, base64, argparse, subprocess, urllib.parse
 import requests
 from pathlib import Path
 from bs4 import BeautifulSoup
@@ -38,6 +38,7 @@ HOOK_THUMB_OFFSET   = 2.5    # seconds — where peak-motion frame lives
 GEMINI_MODEL        = "gemini-2.5-flash"
 
 GEMINI_API_BASE     = "https://generativelanguage.googleapis.com/v1beta"
+POLLINATIONS_BASE   = "https://image.pollinations.ai/prompt"
 OUTPUT_DIR          = Path("hook_test_output")
 
 HEADERS = {
@@ -213,37 +214,21 @@ Rules:
 • Think: something teetering on an edge, a tower about to fall, a ball mid-flight toward glass,
   a stack of things collapsing in slow motion, an avalanche of items about to hit someone
 
-STEP 4 — VEO 3 VIDEO PROMPT
-Write a Veo 3 generation prompt using EXACTLY this structure. Be specific and cinematic.
+STEP 4 — VEO PROMPT
+Write a SINGLE FLOWING PARAGRAPH that Veo can use directly as a generation prompt.
+Do NOT use section headers like "OPENING:" or "PEAK:" — Veo ignores them and only renders
+the first concept it reads. Instead write one cohesive scene description that naturally
+flows through all three phases:
 
-OPENING (0–2s): [Describe the scene and building action. Set the world. Show the problem escalating.
-                 The viewer must feel something is about to go very wrong or very right.]
+Phase 1 (build): describe what is happening at the start and how tension rises
+Phase 2 (peak): describe the suspended mid-motion moment at maximum drama — THIS is the
+  thumbnail frame, so make it visually unmistakable: object frozen mid-fall, mid-crash,
+  mid-collision — maximum visual tension in a single frame
+Phase 3 (cut): the action continues but the clip ends abruptly before resolution
 
-PEAK (2–3s): [THIS IS THE THUMBNAIL FRAME — the frame at exactly 2.5 seconds.
-              An object or person must be SUSPENDED MID-MOTION: mid-fall, mid-spin, mid-crash,
-              mid-explosion, mid-tip. The composition must look like a freeze-frame that makes
-              any viewer ask "what happens in the next second?"
-              Camera: extreme close-up OR wide dramatic angle. Maximum visual tension.
-              Do NOT resolve the action here — just hold it at the peak of uncertainty.]
-
-RESOLUTION (3–5s): [The motion continues but does NOT fully complete. End the clip at the
-                    most suspenseful possible moment before resolution. Leave it hanging.
-                    The viewer must feel compelled to click Play to see what happens.]
-
-AUDIO: [Frame-by-frame sound design — e.g.: "0-1s: distant rumble building; 1-2s: slow-motion
-        whoosh, items sliding; 2-3s: a split-second of silence + audible gasp; 3-5s: bass drop
-        building but cutting off before impact". Be specific — Veo 3 generates sync audio.]
-
-STYLE: Cinematic 4K. Ultra-dramatic slow-motion at peak (2–3s). High contrast.
-       Dramatic lighting — either golden-hour warmth or harsh studio spotlight on subject.
-       Shot style: mix of close-up for detail and wide for scale. High-budget commercial look.
-       Color grade: vivid, punchy, slightly over-exposed highlights.
-
-ASPECT RATIO: 9:16 vertical (social media / Reels / Shorts / TikTok).
-
-CRITICAL CONSTRAINT: The thumbnail is automatically extracted at exactly 2.5 seconds.
-The composition at that precise moment must be the most dramatic, emotion-triggering,
-curiosity-inducing frame in the entire clip. Design the entire video around this frame.
+Weave in sound design naturally: ambient sounds building to a dramatic silence or impact
+sound that cuts off unresolved. End the prompt with: "Cinematic 4K, ultra-dramatic
+slow-motion at the peak moment, high contrast, 9:16 vertical aspect ratio."
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Respond ONLY in valid JSON. No markdown. No code fences. No explanation outside the JSON.
@@ -252,7 +237,7 @@ Respond ONLY in valid JSON. No markdown. No code fences. No explanation outside 
   "pinpoint": "...",
   "persona": "...",
   "hook_concept": "one paragraph describing the visual narrative",
-  "veo3_prompt": "OPENING (0-2s): ...\\n\\nPEAK (2-3s): ...\\n\\nRESOLUTION (3-5s): ...\\n\\nAUDIO: ...\\n\\nSTYLE: ...\\n\\nASPECT RATIO: 9:16 vertical"
+  "veo3_prompt": "single flowing paragraph — no section headers, no newlines inside, written as one continuous scene description Veo can render start to finish"
 }}
 """
 
@@ -410,62 +395,214 @@ def extract_thumbnail(video_path: Path, thumb_path: Path):
     log(f"  Thumbnail saved: {thumb_path}  (frame at {HOOK_THUMB_OFFSET}s)")
 
 
+# ── Image hook: Pollinations.ai + FFmpeg Ken Burns ────────────────────────────
+
+def _image_prompts(concept: dict) -> list[str]:
+    """Derive 3 sequential still-image prompts from the hook concept."""
+    base  = concept.get("hook_concept", "")
+    style = ("cinematic, ultra-high contrast, dramatic studio lighting, "
+             "photorealistic, 9:16 vertical portrait")
+    return [
+        # Frame 1 — peaceful before-state, tension just starting to build
+        f"{base}  The very beginning: calm, still, peaceful. {style}",
+        # Frame 2 — peak drama, the freeze-frame thumbnail moment
+        f"{base}  The peak frozen moment: maximum visual tension, object suspended mid-motion, "
+        f"most dramatic frame possible. {style}",
+        # Frame 3 — action continuing, clip about to cut
+        f"{base}  Just before the cut: action progressing, resolution still unseen, "
+        f"unresolved tension. {style}",
+    ]
+
+
+def fetch_pollinations_image(prompt: str, output_path: Path, seed: int = 42) -> Path:
+    """Download one image from Pollinations.ai (Flux model, free, no API key)."""
+    encoded = urllib.parse.quote(prompt)
+    url = f"{POLLINATIONS_BASE}/{encoded}?width=720&height=1280&model=flux&seed={seed}&nologo=true"
+    log(f"  Fetching from Pollinations.ai (seed={seed})...")
+    resp = requests.get(url, timeout=90)
+    resp.raise_for_status()
+    output_path.write_bytes(resp.content)
+    log(f"  Saved: {output_path}  ({len(resp.content) // 1024} KB)")
+    return output_path
+
+
+def build_image_hook(image_paths: list, output_path: Path, thumb_path: Path) -> Path:
+    """
+    Assemble a 5-second Ken Burns hook video from 3 still images:
+      clip 1 (1.5 s) — slow zoom in
+      clip 2 (1.5 s) — static hold, the peak-drama frame  → thumbnail
+      clip 3 (2.0 s) — slow pan right
+    """
+    clips = []
+    tmp = output_path.parent
+
+    # ── clip 1: slow zoom in (1.0x → 1.12x) ─────────────────────────────────
+    c1 = tmp / "_c1.mp4"
+    r = subprocess.run([
+        "ffmpeg", "-y", "-loop", "1", "-i", str(image_paths[0]),
+        "-vf", (
+            "scale=720:1280:force_original_aspect_ratio=decrease,"
+            "pad=720:1280:(ow-iw)/2:(oh-ih)/2,"
+            "zoompan=z='min(zoom+0.00267,1.12)':d=45"
+            ":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=720x1280,fps=30"
+        ),
+        "-t", "1.5", "-pix_fmt", "yuv420p", str(c1),
+    ], capture_output=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"FFmpeg clip 1 failed:\n{r.stderr.decode()[-600:]}")
+    clips.append(c1)
+
+    # ── clip 2: static hold (peak-drama, thumbnail source) ───────────────────
+    c2 = tmp / "_c2.mp4"
+    r = subprocess.run([
+        "ffmpeg", "-y", "-loop", "1", "-i", str(image_paths[1]),
+        "-vf", (
+            "scale=720:1280:force_original_aspect_ratio=decrease,"
+            "pad=720:1280:(ow-iw)/2:(oh-ih)/2,fps=30"
+        ),
+        "-t", "1.5", "-pix_fmt", "yuv420p", str(c2),
+    ], capture_output=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"FFmpeg clip 2 failed:\n{r.stderr.decode()[-600:]}")
+    clips.append(c2)
+
+    # ── clip 3: slow pan right at 1.12x zoom ─────────────────────────────────
+    c3 = tmp / "_c3.mp4"
+    r = subprocess.run([
+        "ffmpeg", "-y", "-loop", "1", "-i", str(image_paths[2]),
+        "-vf", (
+            "scale=720:1280:force_original_aspect_ratio=decrease,"
+            "pad=720:1280:(ow-iw)/2:(oh-ih)/2,"
+            "zoompan=z='1.12':d=60"
+            ":x='min(x+1,iw-iw/zoom)':y='ih/2-(ih/zoom/2)':s=720x1280,fps=30"
+        ),
+        "-t", "2.0", "-pix_fmt", "yuv420p", str(c3),
+    ], capture_output=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"FFmpeg clip 3 failed:\n{r.stderr.decode()[-600:]}")
+    clips.append(c3)
+
+    # ── concat ────────────────────────────────────────────────────────────────
+    list_file = tmp / "_clip_list.txt"
+    list_file.write_text("\n".join(f"file '{p}'" for p in clips))
+    r = subprocess.run([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
+        "-c", "copy", str(output_path),
+    ], capture_output=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"FFmpeg concat failed:\n{r.stderr.decode()[-600:]}")
+    log(f"  Hook video: {output_path}  ({output_path.stat().st_size // 1024} KB)")
+
+    # ── thumbnail from the first frame of clip 2 (peak-drama still) ──────────
+    r = subprocess.run([
+        "ffmpeg", "-y", "-i", str(c2),
+        "-frames:v", "1", "-q:v", "2", str(thumb_path),
+    ], capture_output=True)
+    if r.returncode == 0:
+        log(f"  Thumbnail: {thumb_path}")
+
+    # cleanup temp files
+    for f in clips + [list_file]:
+        try:
+            f.unlink()
+        except Exception:
+            pass
+
+    return output_path
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Amazon deal → Veo 3 hook video prototype")
+    parser = argparse.ArgumentParser(description="Amazon deal → hook video prototype")
     parser.add_argument("--url", help="Skip deals scrape, use this Amazon product URL directly")
+    parser.add_argument("--image", action="store_true",
+                        help="Use Pollinations.ai images + FFmpeg instead of Veo 3")
+    parser.add_argument("--skip-concept", action="store_true",
+                        help="Reuse existing hook_concept.json (skip Gemini call)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Seed for Pollinations.ai image generation (default: 42)")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(exist_ok=True)
-    keys = load_keys()
-    api_key = keys[0]  # Veo 3 uses first key; concept generation rotates all keys
-
-    # ── Step 1: Get product ───────────────────────────────────────────────────
-    log("\n═══ Step 1: Get Amazon product ═══")
-    if args.url:
-        product_url = args.url
-        log(f"  Using provided URL: {product_url}")
-    else:
-        product_url = get_first_deal_url()
-        log(f"  Found deal: {product_url}")
-
-    title, bullets, price = get_product_info(product_url)
-    log(f"  Title: {title[:90]}")
-    if price:
-        log(f"  Price: {price}")
-    log("  Bullets:")
-    for b in bullets:
-        log(f"    • {b[:100]}")
-
-    # ── Step 2: Hook concept via Gemini ──────────────────────────────────────
-    log("\n═══ Step 2: Generate hook concept (Gemini) ═══")
-    concept = generate_hook_concept(title, bullets, keys)
-
-    log(f"\n  Pinpoint:     {concept['pinpoint']}")
-    log(f"  Persona:      {concept['persona']}")
-    log(f"  Hook concept: {concept['hook_concept']}")
-    log(f"\n  ── Veo 3 Prompt ──────────────────────────")
-    for line in concept["veo3_prompt"].split("\n"):
-        log(f"  {line}")
-    log("  ──────────────────────────────────────────")
-
     concept_out = OUTPUT_DIR / "hook_concept.json"
-    concept_out.write_text(json.dumps(
-        {"product_title": title, "product_url": product_url, **concept},
-        indent=2,
-        ensure_ascii=False,
-    ))
-    log(f"\n  Concept saved → {concept_out}")
 
-    # ── Step 3: Veo 3 hook video ──────────────────────────────────────────────
+    # ── Step 1: Get product (skip if reusing existing concept) ───────────────
+    if args.skip_concept:
+        if not concept_out.exists():
+            sys.exit(f"--skip-concept set but {concept_out} not found. Run without it first.")
+        concept = json.loads(concept_out.read_text())
+        title   = concept.get("product_title", "Unknown")
+        log(f"  Reusing existing concept for: {title[:80]}")
+    else:
+        keys    = load_keys()
+        api_key = keys[0]
+
+        log("\n═══ Step 1: Get Amazon product ═══")
+        if args.url:
+            product_url = args.url
+            log(f"  Using provided URL: {product_url}")
+        else:
+            product_url = get_first_deal_url()
+            log(f"  Found deal: {product_url}")
+
+        title, bullets, price = get_product_info(product_url)
+        log(f"  Title: {title[:90]}")
+        if price:
+            log(f"  Price: {price}")
+        log("  Bullets:")
+        for b in bullets:
+            log(f"    • {b[:100]}")
+
+        # ── Step 2: Hook concept via Gemini ──────────────────────────────────
+        log("\n═══ Step 2: Generate hook concept (Gemini) ═══")
+        concept = generate_hook_concept(title, bullets, keys)
+
+        log(f"\n  Pinpoint:     {concept['pinpoint']}")
+        log(f"  Persona:      {concept['persona']}")
+        log(f"  Hook concept: {concept['hook_concept']}")
+
+        concept_out.write_text(json.dumps(
+            {"product_title": title, "product_url": product_url, **concept},
+            indent=2,
+            ensure_ascii=False,
+        ))
+        log(f"\n  Concept saved → {concept_out}")
+
+    # ── Step 3a: Image hook (Pollinations.ai + FFmpeg) ────────────────────────
+    if args.image:
+        log("\n═══ Step 3: Generate image hook (Pollinations.ai + FFmpeg) ═══")
+        prompts     = _image_prompts(concept)
+        image_paths = []
+        for i, prompt in enumerate(prompts, 1):
+            img_path = OUTPUT_DIR / f"hook_img_{i}.jpg"
+            fetch_pollinations_image(prompt, img_path, seed=args.seed + i)
+            image_paths.append(img_path)
+
+        log("\n  Assembling Ken Burns animation...")
+        hook_path  = OUTPUT_DIR / "hook_image.mp4"
+        thumb_path = OUTPUT_DIR / "hook_image_thumbnail.jpg"
+        build_image_hook(image_paths, hook_path, thumb_path)
+
+        log("\n" + "═" * 60)
+        log("✓ COMPLETE  (image hook)")
+        log(f"  hook_image.mp4            → 5s animated hook clip")
+        log(f"  hook_image_thumbnail.jpg  → peak-drama frame, use as FB thumbnail")
+        log(f"  hook_img_1/2/3.jpg        → individual frames for review")
+        log("═" * 60)
+        return
+
+    # ── Step 3b: Veo 3 hook video (original path) ────────────────────────────
     log("\n═══ Step 3: Generate Veo 3 hook video ═══")
+    if args.skip_concept:
+        keys    = load_keys()
+        api_key = keys[0]
     hook_path = OUTPUT_DIR / "hook.mp4"
     video_result = generate_veo3_hook(concept["veo3_prompt"], api_key, hook_path)
 
     if video_result is None:
         log("\n  Stopped after hook concept — Veo 3 access not available on this key.")
-        log(f"  Paste the Veo 3 prompt from {concept_out} into https://aistudio.google.com to test manually.")
+        log(f"  Tip: rerun with --image to generate a free animated image hook instead.")
         return
 
     # ── Step 4: Thumbnail ─────────────────────────────────────────────────────
@@ -473,7 +610,6 @@ def main():
     thumb_path = OUTPUT_DIR / "hook_thumbnail.jpg"
     extract_thumbnail(hook_path, thumb_path)
 
-    # ── Summary ───────────────────────────────────────────────────────────────
     log("\n" + "═" * 60)
     log("✓ COMPLETE")
     log(f"  hook.mp4           → upload as the first 5s of your product video")
