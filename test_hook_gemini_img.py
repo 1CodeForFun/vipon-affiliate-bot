@@ -30,13 +30,16 @@ GEMINI_API_BASE  = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_TEXT_MODEL = "gemini-2.5-flash"
 
 IMAGEN_MODELS = [
+    "imagen-4.0-generate-preview-05-20",   # Imagen 4 (newest)
     "imagen-3.0-generate-001",
     "imagen-3.0-fast-generate-001",
 ]
 
-# Gemini Flash image generation — uses the same generateContent endpoint as text,
-# so it works on free-tier keys. Falls back to this when Imagen returns 404.
+# Gemini multimodal image generation via generateContent + responseModalities.
+# gemini-2.5-flash is already confirmed working for text on these free keys —
+# it also supports image output via the same endpoint.
 GEMINI_IMG_MODELS = [
+    "gemini-2.5-flash",                          # already works for text — try image too
     "gemini-2.0-flash-preview-image-generation",
     "gemini-2.0-flash-exp",
 ]
