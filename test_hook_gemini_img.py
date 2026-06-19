@@ -414,6 +414,8 @@ def main():
                         help="Reuse existing hook_concept_imagen.json (no Gemini text call)")
     parser.add_argument("--seed",         type=int, default=None,
                         help="Imagen seed for reproducible images")
+    parser.add_argument("--billing-key",  type=int, default=None,
+                        help="1-based index of the key with billing/credits (used exclusively for Imagen)")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(exist_ok=True)
@@ -461,7 +463,16 @@ def main():
 
     # ── Step 3: Generate images via Imagen ───────────────────────────────────
     log("\n═══ Step 3: Imagen 3 still images ═══")
-    keys = load_keys()
+    all_keys   = load_keys()
+    if args.billing_key:
+        idx        = args.billing_key - 1   # convert to 0-based
+        if idx < 0 or idx >= len(all_keys):
+            sys.exit(f"--billing-key {args.billing_key} out of range (have {len(all_keys)} keys)")
+        imagen_keys = [all_keys[idx]]
+        log(f"  Using billing key #{args.billing_key} exclusively for Imagen")
+    else:
+        imagen_keys = all_keys
+    keys = all_keys   # keep full list for Gemini text fallback
     image_prompts = concept.get("image_prompts", [])
     if len(image_prompts) != 3:
         sys.exit("Concept missing 'image_prompts' array of 3. Delete concept file and rerun.")
@@ -470,7 +481,7 @@ def main():
     for i, prompt in enumerate(image_prompts, 1):
         img_path = OUTPUT_DIR / f"hook_gi_{i}.jpg"
         seed = (args.seed + i) if args.seed is not None else None
-        generate_imagen(prompt, keys, img_path, seed=seed)
+        generate_imagen(prompt, imagen_keys, img_path, seed=seed)
         image_paths.append(img_path)
 
     # ── Step 4: Assemble hook video ───────────────────────────────────────────
