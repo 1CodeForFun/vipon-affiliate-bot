@@ -39,7 +39,6 @@ IMAGEN_MODELS = [
 # gemini-2.5-flash is already confirmed working for text on these free keys —
 # it also supports image output via the same endpoint.
 GEMINI_IMG_MODELS = [
-    "gemini-2.5-flash",                          # already works for text — try image too
     "gemini-2.0-flash-preview-image-generation",
     "gemini-2.0-flash-exp",
 ]
@@ -258,28 +257,30 @@ def generate_imagen(prompt: str, keys: list, output_path: Path, seed: int = None
     if seed is not None:
         imagen_payload["parameters"]["seed"] = seed
 
-    all_imagen_404 = True
     for model in IMAGEN_MODELS:
         url_tpl = f"{GEMINI_API_BASE}/models/{model}:predict?key={{key}}"
+        all_404_for_model = True
         for i, key in enumerate(keys):
             log(f"  Imagen ({model}, key {i+1}/{len(keys)})...")
             resp = requests.post(url_tpl.format(key=key), json=imagen_payload, timeout=90)
             if resp.status_code == 404:
-                log(f"  {model} → 404, trying next model...")
-                break
-            all_imagen_404 = False
+                # 404 may be tier-dependent (billing unlocks the model) — try all keys
+                log(f"  Key {i+1} → 404 (tier/billing restriction — trying next key)")
+                continue
+            all_404_for_model = False
             if resp.status_code == 429:
                 log(f"  Key {i+1} → 429 — trying next key...")
                 continue
             if resp.status_code not in (200,):
-                log(f"  Key {i+1} → {resp.status_code} — trying next key...")
+                log(f"  Key {i+1} → {resp.status_code}: {resp.text[:300]}")
                 continue
             predictions = resp.json().get("predictions", [])
             if predictions and predictions[0].get("bytesBase64Encoded"):
                 return _save_img_bytes(predictions[0]["bytesBase64Encoded"], output_path)
+        if all_404_for_model:
+            log(f"  All keys → 404 for {model} — trying next model...")
 
-    if not all_imagen_404:
-        log("  Imagen keys exhausted — falling back to Gemini Flash image generation...")
+    log("  Imagen exhausted — falling back to Gemini Flash image generation...")
 
     # ── Path B: Gemini Flash native image generation (works on free-tier keys) ─
     # Append vertical format hint to the prompt since we can't pass aspectRatio
