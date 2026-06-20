@@ -168,6 +168,64 @@ def scrape_amazon_deals(min_pct=DEAL_MIN_DISCOUNT):
     return pick
 
 
+# ── PRODUCT IMAGE FETCH (requests, no Selenium) ───────────────────────────────
+_DESKTOP_UA = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+def _clean_amz_img(url):
+    return re.sub(r'\._[A-Z0-9_,]+_\.', '.', url)
+
+def _fetch_product_images(asin, max_imgs=6):
+    """Fetch Amazon product images from static HTML — same approach as test_veo_reel.py."""
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        log("  beautifulsoup4 not installed — pip install beautifulsoup4"); return []
+
+    url = f"https://www.amazon.com/dp/{asin}?th=1&psc=1"
+    try:
+        resp = requests.get(url, headers=_DESKTOP_UA, timeout=20)
+        resp.raise_for_status()
+    except Exception as e:
+        log(f"  requests fetch failed: {e}"); return []
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    images = []
+
+    main = soup.select_one("#landingImage, #imgTagWrappingDiv img")
+    if main:
+        src = main.get("data-old-hires") or main.get("src", "")
+        if src and "amazon" in src:
+            images.append(_clean_amz_img(src))
+
+    for img in soup.select("#altImages ul li.item img"):
+        src = img.get("src", "")
+        if src and "amazon" in src:
+            full = _clean_amz_img(src)
+            if full not in images:
+                images.append(full)
+        if len(images) >= max_imgs:
+            break
+
+    for script in soup.find_all("script", type="text/javascript"):
+        text = script.string or ""
+        if "colorImages" in text or "hiRes" in text:
+            for hi in re.findall(r'"hiRes"\s*:\s*"([^"]+)"', text):
+                if hi not in images:
+                    images.append(hi)
+            if len(images) >= max_imgs:
+                break
+
+    images = [i for i in images if i][:max_imgs]
+    log(f"  requests image fetch: {len(images)} images")
+    return images
+
 
 # ── VEO HOOK ─────────────────────────────────────────────────────────────────
 def generate_veo_hook(deal, veo_key, keys, output_path):
@@ -603,9 +661,12 @@ def main():
         log("\n[1] Scraping Amazon deals (60%+ off)...")
         deal = scrape_amazon_deals()
 
-        # 2. Capture product page — reuse capture_page() from reel_concept_test (proven in prod)
+        # 2. Capture product page
         log(f"\n[2] Capturing product page — ASIN {deal['asin']}...")
-        imgs, shot, pw, ph, price_box, rev_box, title_box, social = capture_page(
+        # Images: use requests + BeautifulSoup on static HTML (same as test_veo_reel.py — proven)
+        imgs = _fetch_product_images(deal["asin"])
+        # Screenshot + price_box: still need Selenium for the full-page CDP screenshot
+        _, shot, pw, ph, price_box, _, title_box, _ = capture_page(
             deal["asin"], td, ffmpeg
         )
         page_data = {
@@ -616,7 +677,7 @@ def main():
             "price_box":  price_box,
             "title_box":  title_box,
         }
-        log(f"  Gallery images: {len(imgs)} | price_box: {'y' if price_box else 'n'}")
+        log(f"  Images: {len(imgs)} | price_box: {'y' if price_box else 'n'}")
 
         # 3. Veo hook — billing key loaded from ~/geminikey.txt index 1 (same as test_veo_reel.py)
         log("\n[3] Generating Veo 6s hook...")
