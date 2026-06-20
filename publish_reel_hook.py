@@ -229,9 +229,9 @@ def capture_hook_product(asin, td, ffmpeg):
     try:
         driver.set_window_size(440, 950)
         driver.get(f"https://www.amazon.com/dp/{asin}?th=1&psc=1")
-        time.sleep(5)
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight*0.55)"); time.sleep(1.3)
-        driver.execute_script("window.scrollTo(0,0)"); time.sleep(0.7)
+        time.sleep(7)
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight*0.55)"); time.sleep(1.5)
+        driver.execute_script("window.scrollTo(0,0)"); time.sleep(1.0)
         data = driver.execute_script(_HOOK_PAGE_JS) or {}
         result["images"]          = data.get("images", [])[:6]
         result["price_box"]       = data.get("price")
@@ -241,8 +241,27 @@ def capture_hook_product(asin, td, ffmpeg):
         result["orig_price_text"] = data.get("origPriceText", "")
         result["title_text"]      = data.get("titleText", "")
         result["bullets"]         = data.get("bullets", [])
-        log(f"  Images: {len(result['images'])} | price: {result['price_text']} | orig: {result['orig_price_text']}")
+        log(f"  Images via JS: {len(result['images'])} | price: {result['price_text']} | orig: {result['orig_price_text']}")
         log(f"  Title: {result['title_text'][:70]}")
+
+        # Fallback: if JS found no images, parse raw HTML for Amazon CDN image URLs
+        if not result["images"]:
+            log("  JS found 0 images — trying HTML regex fallback...")
+            html = driver.page_source
+            seen_ids = set()
+            fallback_imgs = []
+            for m in re.finditer(
+                    r'(https://[^"\'<>\s]*(?:media-amazon|images-amazon)\.com/images/I/'
+                    r'[A-Za-z0-9%+._-]+\.[A-Za-z0-9._%-]+)', html):
+                url    = m.group(1)
+                img_id = re.search(r'images/I/([A-Za-z0-9%+._-]+)\.', url)
+                if img_id and img_id.group(1) not in seen_ids:
+                    seen_ids.add(img_id.group(1))
+                    # Prefer larger versions: replace size suffix with _SL500_
+                    clean = re.sub(r'\._[^.]+_\.', '._SL500_.', url)
+                    fallback_imgs.append(clean)
+            result["images"] = fallback_imgs[:6]
+            log(f"  HTML fallback: {len(result['images'])} images")
 
         # Full-page screenshot via CDP (2× device scale = sharper)
         metrics = driver.execute_cdp_cmd("Page.getLayoutMetrics", {})
