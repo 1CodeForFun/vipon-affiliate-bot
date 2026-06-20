@@ -69,38 +69,27 @@ _DEALS_FALLBACK_URL = "https://www.amazon.com/deals"  # fallback with JS filter
 def log(m): print(m, flush=True)
 
 # ── DEALS SCRAPING ────────────────────────────────────────────────────────────
-# JS that works for both the goldbox page and the regular deals page.
-_DEALS_JS = r"""
-(function() {
-    const results = [];
-    const seen = new Set();
-    document.querySelectorAll('a[href*="/dp/"]').forEach(a => {
-        const m = a.href.match(/\/dp\/([A-Z0-9]{10})/);
-        if (!m || seen.has(m[1])) return;
-        // Walk up to find the deal card container
-        const card = a.closest(
-            '[data-deal-id], [data-asin], [class*="DealCard"], [class*="dealCard"], ' +
-            '[class*="gridItem"], [class*="GridItem"], [class*="deal-card"], ' +
-            'li, article'
-        ) || a.parentElement;
-        if (!card) return;
-        const txt = card.textContent || '';
-        const pctM = txt.match(/(\d+)%\s*off/i);
-        if (!pctM) return;
-        const pct = parseInt(pctM[1]);
-        const titleEl = card.querySelector(
-            'h2, h3, [class*="title"], [class*="Title"], [class*="name"], [class*="Name"]'
-        );
-        seen.add(m[1]);
-        results.push({
-            asin:  m[1],
-            pct:   pct,
-            title: titleEl ? titleEl.textContent.trim().slice(0, 120) : '',
-        });
-    });
-    return results;
-})();
-"""
+def _parse_deals_from_html(html):
+    """Extract deal cards from rendered HTML using regex on page source.
+    Looks for /dp/ASIN occurrences and finds 'X% off' in the surrounding HTML."""
+    results = []
+    seen = set()
+    for m in re.finditer(r'/dp/([A-Z0-9]{10})', html):
+        asin = m.group(1)
+        if asin in seen:
+            continue
+        # Check ±600 chars around the ASIN link for a discount badge
+        ctx = html[max(0, m.start() - 600): m.start() + 600]
+        pct_m = re.search(r'(\d+)%\s*off', ctx, re.I)
+        if not pct_m:
+            continue
+        pct = int(pct_m.group(1))
+        # Best-effort title: strip tags from the text before the ASIN
+        raw = re.sub(r'<[^>]+>', ' ', html[max(0, m.start() - 300): m.start()])
+        title = re.sub(r'\s+', ' ', raw).strip()[-120:]
+        seen.add(asin)
+        results.append({'asin': asin, 'pct': pct, 'title': title})
+    return results
 
 
 def _init_driver():
@@ -123,10 +112,13 @@ def _scrape_url(url):
     driver = _init_driver()
     try:
         driver.get(url)
-        time.sleep(7)
+        time.sleep(8)
         driver.execute_script("window.scrollTo(0, 2000)"); time.sleep(2)
-        driver.execute_script("window.scrollTo(0, 4000)"); time.sleep(1)
-        return driver.execute_script(_DEALS_JS) or []
+        driver.execute_script("window.scrollTo(0, 4000)"); time.sleep(2)
+        driver.execute_script("window.scrollTo(0, 6000)"); time.sleep(1)
+        html = driver.page_source
+        log(f"  Page source: {len(html):,} chars")
+        return _parse_deals_from_html(html)
     finally:
         try: driver.quit()
         except: pass
