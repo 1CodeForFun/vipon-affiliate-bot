@@ -264,22 +264,23 @@ def capture_hook_product(asin, td, ffmpeg):
         log(f"  Images via JS: {len(result['images'])} | price: {result['price_text']} | orig: {result['orig_price_text']}")
         log(f"  Title: {result['title_text'][:70]}")
 
-        # Fallback: if JS found no images, parse raw HTML for Amazon CDN image URLs
+        # Fallback: if JS found no images, parse raw HTML for Amazon CDN image URLs.
+        # In JSON blobs the URLs are \/-escaped (https:\/\/...) so we skip the protocol
+        # and match on the CDN domain + image ID directly, then reconstruct clean URLs.
         if not result["images"]:
             log("  JS found 0 images — trying HTML regex fallback...")
             html = driver.page_source
             seen_ids = set()
             fallback_imgs = []
             for m in re.finditer(
-                    r'(https://[^"\'<>\s]*(?:media-amazon|images-amazon)\.com/images/I/'
-                    r'[A-Za-z0-9%+._-]+\.[A-Za-z0-9._%-]+)', html):
-                url    = m.group(1)
-                img_id = re.search(r'images/I/([A-Za-z0-9%+._-]+)\.', url)
-                if img_id and img_id.group(1) not in seen_ids:
-                    seen_ids.add(img_id.group(1))
-                    # Prefer larger versions: replace size suffix with _SL500_
-                    clean = re.sub(r'\._[^.]+_\.', '._SL500_.', url)
-                    fallback_imgs.append(clean)
+                    r'(?:media-amazon|images-amazon)\.com(?:\\?/)images(?:\\?/)I(?:\\?/)'
+                    r'([A-Za-z0-9%+._-]{10,})\._', html):
+                img_id = m.group(1)
+                if img_id not in seen_ids:
+                    seen_ids.add(img_id)
+                    fallback_imgs.append(
+                        f"https://m.media-amazon.com/images/I/{img_id}._SL500_.jpg"
+                    )
             result["images"] = fallback_imgs[:6]
             log(f"  HTML fallback: {len(result['images'])} images")
 
@@ -312,11 +313,14 @@ def capture_hook_product(asin, td, ffmpeg):
 
 
 # ── VEO HOOK ─────────────────────────────────────────────────────────────────
-def generate_veo_hook(deal, key, output_path):
-    """Generate 6s Veo hook video. Returns path on success, None on failure."""
+def generate_veo_hook(deal, keys, output_path):
+    """Generate 6s Veo hook video. Tries keys[1], [2], [3] in sequence (billing key
+    position varies depending on whether geminipro.txt is present in CI). Returns path
+    on success, None if all candidates are rate-limited or fail."""
     bullets = "; ".join(deal.get("bullets", [])[:3])
     title   = deal.get("title_text") or deal.get("title", "product")
 
+    # Use any key for the cheap text prompt
     veo_prompt = gemini_text(
         f'Write a 1-sentence visual description for a 6-second cinematic hook VIDEO (no speech, no text overlays).\n'
         f'Product: "{title}"\n'
@@ -327,7 +331,7 @@ def generate_veo_hook(deal, key, output_path):
         '- Dramatic, high-energy, photorealistic, 9:16 vertical\n'
         '- Feel like a thriller or documentary B-roll\n'
         'Output ONLY the video prompt sentence.',
-        [key], max_tokens=120,
+        keys, max_tokens=120,
     )
     if not veo_prompt:
         veo_prompt = (
@@ -336,28 +340,44 @@ def generate_veo_hook(deal, key, output_path):
         )
     log(f"  Veo prompt: {veo_prompt[:100]}")
 
-    try:
-        client    = genai.Client(api_key=key)
-        operation = client.models.generate_videos(
-            model=VEO_MODEL,
-            prompt=veo_prompt,
-            config=gtypes.GenerateVideosConfig(
-                aspect_ratio="9:16",
-                duration_seconds=HOOK_SECS,
-            ),
-        )
-        log("  Veo: waiting for generation (polls every 20s)...")
-        while not operation.done:
-            time.sleep(20)
-            operation = client.operations.get(operation)
-        vid = operation.response.generated_videos[0]
-        client.files.download(file=vid.video)
-        vid.video.save(str(output_path))
-        log(f"  Veo: saved {os.path.getsize(output_path):,} bytes → {output_path}")
-        return output_path
-    except Exception as e:
-        log(f"  Veo failed: {e}")
-        return None
+    # Try billing-candidate keys in order (indices 1, 2, 3).
+    # geminipro.txt (if present) occupies index 0, which is NOT the Veo billing key;
+    # the billing key sits at index 1 locally (no geminipro.txt) or index 2 in CI.
+    candidates = [k for k in keys[1:4] if k]
+    if not candidates:
+        candidates = keys[:1]
+
+    for idx, key in enumerate(candidates):
+        log(f"  Veo: trying candidate key {idx + 1}/{len(candidates)}...")
+        try:
+            client    = genai.Client(api_key=key)
+            operation = client.models.generate_videos(
+                model=VEO_MODEL,
+                prompt=veo_prompt,
+                config=gtypes.GenerateVideosConfig(
+                    aspect_ratio="9:16",
+                    duration_seconds=HOOK_SECS,
+                ),
+            )
+            log("  Veo: waiting for generation (polls every 20s)...")
+            while not operation.done:
+                time.sleep(20)
+                operation = client.operations.get(operation)
+            vid = operation.response.generated_videos[0]
+            client.files.download(file=vid.video)
+            vid.video.save(str(output_path))
+            log(f"  Veo: saved {os.path.getsize(output_path):,} bytes → {output_path}")
+            return output_path
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                log(f"  Veo key {idx + 1} rate-limited — trying next...")
+                continue
+            log(f"  Veo failed: {e}")
+            return None
+
+    log("  Veo: all candidate keys rate-limited")
+    return None
 
 
 # ── KEN BURNS SEGMENT ─────────────────────────────────────────────────────────
@@ -722,8 +742,6 @@ def main():
     if not keys:
         raise RuntimeError("No Gemini keys found — check ~/geminikey.txt and ~/geminipro.txt")
 
-    veo_key = keys[1] if len(keys) > 1 else keys[0]   # second key in list is the billing key
-
     with tempfile.TemporaryDirectory(prefix="hook_reel_") as td:
 
         # 1. Pick a deal
@@ -738,10 +756,10 @@ def main():
             if page_data.get("bullets"):     deal["bullets"]       = page_data["bullets"]
             if page_data.get("price_text"):  deal["price_text"]    = page_data["price_text"]
 
-        # 3. Veo hook
+        # 3. Veo hook (passes all keys; generate_veo_hook tries indices 1, 2, 3 in order)
         log("\n[3] Generating Veo 6s hook...")
         veo_out  = os.path.join(td, "hook.mp4")
-        veo_path = generate_veo_hook(deal, veo_key, veo_out)
+        veo_path = generate_veo_hook(deal, keys, veo_out)
         if not veo_path:
             log("  Veo failed — will publish carousel-only reel")
 
