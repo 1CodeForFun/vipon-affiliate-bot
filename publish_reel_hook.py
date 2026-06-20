@@ -104,16 +104,7 @@ _DEALS_JS = r"""
 
 
 def _init_driver():
-    """Return a headless Selenium driver (undetected-chromedriver preferred)."""
-    try:
-        import undetected_chromedriver as uc
-        opts = uc.ChromeOptions()
-        for a in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
-                  "--disable-gpu", "--window-size=1280,900"):
-            opts.add_argument(a)
-        return uc.Chrome(options=opts)
-    except ImportError:
-        pass
+    """Return a headless Selenium driver using the system chromium + chromedriver."""
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service

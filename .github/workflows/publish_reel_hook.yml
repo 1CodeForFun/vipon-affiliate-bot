@@ -40,7 +40,6 @@ jobs:
             requests \
             pillow \
             selenium \
-            undetected-chromedriver \
             google-genai \
             google-auth \
             google-auth-oauthlib \
