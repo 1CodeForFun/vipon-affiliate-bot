@@ -113,9 +113,12 @@ def _scrape_url(url):
     try:
         driver.get(url)
         time.sleep(8)
-        driver.execute_script("window.scrollTo(0, 2000)"); time.sleep(2)
-        driver.execute_script("window.scrollTo(0, 4000)"); time.sleep(2)
-        driver.execute_script("window.scrollTo(0, 6000)"); time.sleep(1)
+        # Scroll progressively so lazy-loaded cards further down the page render
+        for px in (1500, 3000, 5000, 7000, 9000, 12000):
+            driver.execute_script(f"window.scrollTo(0, {px})")
+            time.sleep(1.5)
+        driver.execute_script("window.scrollTo(0, 0)")
+        time.sleep(1)
         html = driver.page_source
         log(f"  Page source: {len(html):,} chars")
         return _parse_deals_from_html(html)
@@ -124,24 +127,41 @@ def _scrape_url(url):
         except: pass
 
 
+# Products whose images could be explicit or inappropriate for family-friendly feeds
+_EXPLICIT_KEYWORDS = {
+    "bra", "bras", "bikini", "bikinis", "panty", "panties", "underwear",
+    "lingerie", "thong", "thongs", "corset", "negligee", "g-string",
+    "camisole", "shapewear", "swimsuit", "swimwear", "bodysuit",
+}
+
+def _is_safe(deal):
+    """Return False if the deal title contains any explicit/adult keyword."""
+    words = set(re.findall(r'\b\w+\b', deal.get("title", "").lower()))
+    blocked = words & _EXPLICIT_KEYWORDS
+    if blocked:
+        log(f"  Skipping {deal['asin']} — blocked keyword(s): {blocked}")
+        return False
+    return True
+
+
 def scrape_amazon_deals(min_pct=DEAL_MIN_DISCOUNT):
     """Return a randomly chosen deal dict {asin, pct, title} with ≥ min_pct% off."""
     log(f"Scraping goldbox (60%+ pre-filtered URL)...")
     deals = _scrape_url(_GOLDBOX_URL)
-    qualified = [d for d in deals if d.get("pct", 0) >= min_pct]
-    log(f"  {len(deals)} deals found, {len(qualified)} at {min_pct}%+")
+    qualified = [d for d in deals if d.get("pct", 0) >= min_pct and _is_safe(d)]
+    log(f"  {len(deals)} deals found, {len(qualified)} at {min_pct}%+ and safe")
 
     if not qualified:
-        log(f"  Goldbox yielded nothing — falling back to amazon.com/deals with JS filter...")
+        log(f"  Goldbox yielded nothing — falling back to amazon.com/deals...")
         deals = _scrape_url(_DEALS_FALLBACK_URL)
-        qualified = [d for d in deals if d.get("pct", 0) >= min_pct]
-        log(f"  Fallback: {len(deals)} deals, {len(qualified)} at {min_pct}%+")
+        qualified = [d for d in deals if d.get("pct", 0) >= min_pct and _is_safe(d)]
+        log(f"  Fallback: {len(deals)} deals, {len(qualified)} at {min_pct}%+ and safe")
 
     if not qualified:
         if not deals:
             raise RuntimeError("No deals found — check Selenium / network")
-        log(f"  No deals at {min_pct}%+ today — picking from all available deals")
-        qualified = deals
+        log(f"  No deals at {min_pct}%+ today — picking from all safe deals")
+        qualified = [d for d in deals if _is_safe(d)] or deals
 
     pick = random.choice(qualified)
     log(f"  Selected ASIN={pick['asin']} ({pick['pct']}% off) — {pick['title'][:60]}")
