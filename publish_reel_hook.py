@@ -15,7 +15,7 @@ Triggered by cron-job.org via GitHub Actions workflow_dispatch.
 Runs independently of vipon_publisher.py — does NOT touch the Google Sheet.
 """
 
-import base64, json, math, os, random, re, subprocess, tempfile, time
+import json, os, random, re, subprocess, tempfile, time
 from pathlib import Path
 
 import requests
@@ -27,7 +27,7 @@ import google.genai.types as gtypes
 from reel_concept_test import (
     cloud_upload, _read_gemini_keys, _which_ffmpeg, _find_font,
     gemini_text, gemini_tts, gen_beats, probe_duration, pcm_to_wav,
-    _esc, _chrome_bits,
+    _esc, _chrome_bits, capture_page,
     VIDEO_W, VIDEO_H, FPS, _FF_LOG, _FF_ENCODE,
 )
 from vipon_publisher import (
@@ -168,159 +168,14 @@ def scrape_amazon_deals(min_pct=DEAL_MIN_DISCOUNT):
     return pick
 
 
-# ── PRODUCT PAGE CAPTURE ──────────────────────────────────────────────────────
-_HOOK_PAGE_JS = r"""
-(function() {
-    const out = {
-        images: [], price: null, reviews: null, title: null,
-        priceText: '', origPriceText: '', titleText: '', bullets: []
-    };
-    function abs(el) {
-        if (!el) return null;
-        const r = el.getBoundingClientRect();
-        if (r.width < 8 || r.height < 4) return null;
-        return {x: r.left + window.scrollX, y: r.top + window.scrollY, w: r.width, h: r.height};
-    }
-    // Gallery images (same filter as reel_concept_test)
-    const seen = new Set();
-    function add(s) {
-        if (!s) return;
-        const m = s.match(/images\/I\/([A-Za-z0-9%+._-]+)\./);
-        if (m && s.includes('media-amazon') && !seen.has(m[1])) {
-            seen.add(m[1]); out.images.push(s);
-        }
-    }
-    document.querySelectorAll('img').forEach(im => {
-        const r = im.getBoundingClientRect();
-        const ar = r.height > 0 ? r.width / r.height : 99;
-        if (ar > 2.2 || ar < 0.45) return;
-        if (im.closest('[data-cel-widget*="sp_"], [class*="adholder"]')) return;
-        const dyn = im.getAttribute('data-a-dynamic-image');
-        if (dyn) { try { Object.keys(JSON.parse(dyn)).forEach(add); } catch(e) {} }
-        add(im.getAttribute('data-old-hires'));
-        add(im.src);
-    });
-    // Bounding boxes for crop animations
-    out.title   = abs(document.querySelector('#title, #productTitle, #titleSection'));
-    out.price   = abs(document.querySelector('.priceToPay, .a-price, #corePrice_feature_div, #price'));
-    out.reviews = abs(document.querySelector('#averageCustomerReviews, #acrPopover'));
-    // Price text values
-    const pw = document.querySelector('.a-price-whole');
-    const pf = document.querySelector('.a-price-fraction');
-    const ps = document.querySelector('.a-price-symbol');
-    out.priceText = pw
-        ? ((ps ? ps.textContent : '$') + pw.textContent.replace(/[^\d]/g,'') + '.' + (pf ? pf.textContent : '00'))
-        : '';
-    const orig = document.querySelector('.basisPrice .a-offscreen, .a-text-price .a-offscreen');
-    out.origPriceText = orig ? orig.textContent.trim() : '';
-    out.titleText = ((document.querySelector('#productTitle, #title') || {innerText: ''}).innerText || '').trim();
-    // Feature bullets
-    const bulletEls = document.querySelectorAll('#feature-bullets li span.a-list-item');
-    out.bullets = Array.from(bulletEls).slice(0, 4).map(e => e.textContent.trim()).filter(Boolean);
-    return out;
-})();
-"""
-
-
-def capture_hook_product(asin, td, ffmpeg):
-    """Capture product page: gallery images, screenshot, price boxes + price text."""
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.chrome.service import Service
-
-    binary, drv = _chrome_bits()
-    opts = Options()
-    for a in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-              "--hide-scrollbars", "--lang=en-US", "--window-size=440,950"):
-        opts.add_argument(a)
-    opts.add_argument(
-        "--user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
-    if binary: opts.binary_location = binary
-    driver = webdriver.Chrome(
-        service=(Service(executable_path=drv) if drv else Service()), options=opts)
-
-    shot = os.path.join(td, "page.png")
-    result = {
-        "images": [], "screenshot": None, "img_w": 0, "img_h": 0,
-        "price_box": None, "reviews_box": None, "title_box": None,
-        "price_text": "", "orig_price_text": "", "title_text": "", "bullets": [],
-    }
-    try:
-        driver.set_window_size(440, 950)
-        driver.get(f"https://www.amazon.com/dp/{asin}?th=1&psc=1")
-        time.sleep(7)
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight*0.55)"); time.sleep(1.5)
-        driver.execute_script("window.scrollTo(0,0)"); time.sleep(1.0)
-        data = driver.execute_script(_HOOK_PAGE_JS) or {}
-        result["images"]          = data.get("images", [])[:6]
-        result["price_box"]       = data.get("price")
-        result["reviews_box"]     = data.get("reviews")
-        result["title_box"]       = data.get("title")
-        result["price_text"]      = data.get("priceText", "")
-        result["orig_price_text"] = data.get("origPriceText", "")
-        result["title_text"]      = data.get("titleText", "")
-        result["bullets"]         = data.get("bullets", [])
-        log(f"  Images via JS: {len(result['images'])} | price: {result['price_text']} | orig: {result['orig_price_text']}")
-        log(f"  Title: {result['title_text'][:70]}")
-
-        # Fallback: if JS found no images, parse raw HTML for Amazon CDN image URLs.
-        # In JSON blobs the URLs are \/-escaped (https:\/\/...) so we skip the protocol
-        # and match on the CDN domain + image ID directly, then reconstruct clean URLs.
-        if not result["images"]:
-            log("  JS found 0 images — trying HTML regex fallback...")
-            html = driver.page_source
-            seen_ids = set()
-            fallback_imgs = []
-            for m in re.finditer(
-                    r'(?:media-amazon|images-amazon)\.com(?:\\?/)images(?:\\?/)I(?:\\?/)'
-                    r'([A-Za-z0-9%+._-]{10,})\._', html):
-                img_id = m.group(1)
-                if img_id not in seen_ids:
-                    seen_ids.add(img_id)
-                    fallback_imgs.append(
-                        f"https://m.media-amazon.com/images/I/{img_id}._SL500_.jpg"
-                    )
-            result["images"] = fallback_imgs[:6]
-            log(f"  HTML fallback: {len(result['images'])} images")
-
-        # Full-page screenshot via CDP (2× device scale = sharper)
-        metrics = driver.execute_cdp_cmd("Page.getLayoutMetrics", {})
-        pw = math.ceil(metrics["cssContentSize"]["width"])
-        ph = min(math.ceil(metrics["cssContentSize"]["height"]), 7000)
-        driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
-            "mobile": True, "width": pw, "height": ph, "deviceScaleFactor": 2,
-            "screenWidth": pw, "screenHeight": ph})
-        res = driver.execute_cdp_cmd("Page.captureScreenshot",
-                                     {"captureBeyondViewport": True, "fromSurface": True, "format": "png"})
-        with open(shot, "wb") as f: f.write(base64.b64decode(res["data"]))
-        pw2, ph2 = pw * 2, ph * 2
-        # Scale all bounding boxes to match the 2× screenshot
-        for key in ("price_box", "reviews_box", "title_box"):
-            b = result[key]
-            if b:
-                for k in list(b.keys()): b[k] *= 2
-        result["screenshot"] = shot if os.path.exists(shot) else None
-        result["img_w"] = pw2
-        result["img_h"] = ph2
-        log(f"  Screenshot: {pw2}×{ph2}")
-    except Exception as e:
-        log(f"  capture_hook_product failed: {e}")
-    finally:
-        try: driver.quit()
-        except: pass
-    return result
-
 
 # ── VEO HOOK ─────────────────────────────────────────────────────────────────
-def generate_veo_hook(deal, keys, output_path):
-    """Generate 6s Veo hook video. Tries keys[1], [2], [3] in sequence (billing key
-    position varies depending on whether geminipro.txt is present in CI). Returns path
-    on success, None if all candidates are rate-limited or fail."""
+def generate_veo_hook(deal, veo_key, keys, output_path):
+    """Generate 6s Veo hook video using veo_key (billing key from ~/geminikey.txt index 1).
+    keys is used only for the cheap text prompt. Returns path on success, None on failure."""
     bullets = "; ".join(deal.get("bullets", [])[:3])
     title   = deal.get("title_text") or deal.get("title", "product")
 
-    # Use any key for the cheap text prompt
     veo_prompt = gemini_text(
         f'Write a 1-sentence visual description for a 6-second cinematic hook VIDEO (no speech, no text overlays).\n'
         f'Product: "{title}"\n'
@@ -340,44 +195,28 @@ def generate_veo_hook(deal, keys, output_path):
         )
     log(f"  Veo prompt: {veo_prompt[:100]}")
 
-    # Try billing-candidate keys in order (indices 1, 2, 3).
-    # geminipro.txt (if present) occupies index 0, which is NOT the Veo billing key;
-    # the billing key sits at index 1 locally (no geminipro.txt) or index 2 in CI.
-    candidates = [k for k in keys[1:4] if k]
-    if not candidates:
-        candidates = keys[:1]
-
-    for idx, key in enumerate(candidates):
-        log(f"  Veo: trying candidate key {idx + 1}/{len(candidates)}...")
-        try:
-            client    = genai.Client(api_key=key)
-            operation = client.models.generate_videos(
-                model=VEO_MODEL,
-                prompt=veo_prompt,
-                config=gtypes.GenerateVideosConfig(
-                    aspect_ratio="9:16",
-                    duration_seconds=HOOK_SECS,
-                ),
-            )
-            log("  Veo: waiting for generation (polls every 20s)...")
-            while not operation.done:
-                time.sleep(20)
-                operation = client.operations.get(operation)
-            vid = operation.response.generated_videos[0]
-            client.files.download(file=vid.video)
-            vid.video.save(str(output_path))
-            log(f"  Veo: saved {os.path.getsize(output_path):,} bytes → {output_path}")
-            return output_path
-        except Exception as e:
-            err = str(e)
-            if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                log(f"  Veo key {idx + 1} rate-limited — trying next...")
-                continue
-            log(f"  Veo failed: {e}")
-            return None
-
-    log("  Veo: all candidate keys rate-limited")
-    return None
+    try:
+        client    = genai.Client(api_key=veo_key)
+        operation = client.models.generate_videos(
+            model=VEO_MODEL,
+            prompt=veo_prompt,
+            config=gtypes.GenerateVideosConfig(
+                aspect_ratio="9:16",
+                duration_seconds=HOOK_SECS,
+            ),
+        )
+        log("  Veo: waiting for generation (polls every 20s)...")
+        while not operation.done:
+            time.sleep(20)
+            operation = client.operations.get(operation)
+        vid = operation.response.generated_videos[0]
+        client.files.download(file=vid.video)
+        vid.video.save(str(output_path))
+        log(f"  Veo: saved {os.path.getsize(output_path):,} bytes → {output_path}")
+        return output_path
+    except Exception as e:
+        log(f"  Veo failed: {e}")
+        return None
 
 
 # ── KEN BURNS SEGMENT ─────────────────────────────────────────────────────────
@@ -731,6 +570,17 @@ def publish_platforms(video_url, deal, script):
         log("\n✓ All US platforms posted successfully")
 
 
+def _load_veo_key():
+    """Load the Veo billing key from ~/geminikey.txt index 1 (0-based) — mirrors test_veo_reel.py."""
+    p = os.path.expanduser("~/geminikey.txt")
+    if not os.path.exists(p):
+        return None
+    lines = [l.strip() for l in open(p) if l.strip()]
+    key = lines[1] if len(lines) > 1 else (lines[0] if lines else None)
+    log(f"  Veo billing key: geminikey.txt index 1 of {len(lines)} lines")
+    return key
+
+
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     log("=== publish_reel_hook.py starting ===")
@@ -742,24 +592,36 @@ def main():
     if not keys:
         raise RuntimeError("No Gemini keys found — check ~/geminikey.txt and ~/geminipro.txt")
 
+    # Load Veo billing key the same way test_veo_reel.py does:
+    # ~/geminikey.txt line 2 (index 1). This is independent of how geminipro.txt
+    # or geminikeys.txt shift the main key list.
+    veo_key = _load_veo_key() or (keys[1] if len(keys) > 1 else keys[0])
+
     with tempfile.TemporaryDirectory(prefix="hook_reel_") as td:
 
         # 1. Pick a deal
         log("\n[1] Scraping Amazon deals (60%+ off)...")
         deal = scrape_amazon_deals()
 
-        # 2. Capture product page
+        # 2. Capture product page — reuse capture_page() from reel_concept_test (proven in prod)
         log(f"\n[2] Capturing product page — ASIN {deal['asin']}...")
-        page_data = capture_hook_product(deal["asin"], td, ffmpeg)
-        if page_data:
-            if page_data.get("title_text"):  deal["title_text"]    = page_data["title_text"]
-            if page_data.get("bullets"):     deal["bullets"]       = page_data["bullets"]
-            if page_data.get("price_text"):  deal["price_text"]    = page_data["price_text"]
+        imgs, shot, pw, ph, price_box, rev_box, title_box, social = capture_page(
+            deal["asin"], td, ffmpeg
+        )
+        page_data = {
+            "images":     imgs,
+            "screenshot": shot,
+            "img_w":      pw,
+            "img_h":      ph,
+            "price_box":  price_box,
+            "title_box":  title_box,
+        }
+        log(f"  Gallery images: {len(imgs)} | price_box: {'y' if price_box else 'n'}")
 
-        # 3. Veo hook (passes all keys; generate_veo_hook tries indices 1, 2, 3 in order)
+        # 3. Veo hook — billing key loaded from ~/geminikey.txt index 1 (same as test_veo_reel.py)
         log("\n[3] Generating Veo 6s hook...")
         veo_out  = os.path.join(td, "hook.mp4")
-        veo_path = generate_veo_hook(deal, keys, veo_out)
+        veo_path = generate_veo_hook(deal, veo_key, keys, veo_out)
         if not veo_path:
             log("  Veo failed — will publish carousel-only reel")
 
