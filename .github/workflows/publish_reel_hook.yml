@@ -1,0 +1,59 @@
+name: Hook Reel Publisher
+
+# Publishes one Veo-hooked reel per trigger to US platforms (FreshDeals + Ultafind FB/IG/YT).
+# Source: amazon.com/gp/goldbox pre-filtered to 60%+ deals — no Google Sheet dependency.
+# Triggered by cron-job.org via workflow_dispatch (recommended: 10 AM CT and 7 PM CT).
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90   # Veo generation can take ~10 min; allow plenty of headroom
+
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Checkout secrets repo
+        uses: actions/checkout@v4
+        with:
+          repository: 1CodeForFun/vipon-secrets
+          token: ${{ secrets.SECRETS_PAT }}
+          path: secrets
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg chromium-browser chromium-chromedriver
+
+      - name: Install Python dependencies
+        run: |
+          pip install \
+            gspread \
+            oauth2client \
+            requests \
+            pillow \
+            selenium \
+            undetected-chromedriver \
+            google-genai \
+            google-auth \
+            google-auth-oauthlib \
+            google-api-python-client
+
+      - name: Copy credential files
+        run: |
+          cp secrets/cloudinary.json     ~/cloudinary.json
+          [ -f secrets/geminipro.txt  ]  && cp secrets/geminipro.txt  ~/geminipro.txt  || true
+          [ -f secrets/geminikey.txt  ]  && cp secrets/geminikey.txt  ~/geminikey.txt  || true
+          [ -f secrets/geminikeys.txt ]  && cp secrets/geminikeys.txt ~/geminikeys.txt || true
+
+      - name: Run hook reel publisher
+        env:
+          SECRETS_DIR: secrets
+        run: python publish_reel_hook.py
