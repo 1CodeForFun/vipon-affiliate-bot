@@ -40,7 +40,6 @@ jobs:
             requests \
             pillow \
             selenium \
-            six \
             google-genai \
             google-auth \
             google-auth-oauthlib \
@@ -69,3 +68,12 @@ jobs:
         env:
           SECRETS_DIR: secrets
         run: python publish_reel_hook.py
+
+      - name: Upload reel artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hook-reel-output
+          path: reel_output/
+          if-no-files-found: ignore
+          retention-days: 7

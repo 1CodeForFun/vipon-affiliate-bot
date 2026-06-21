@@ -15,7 +15,7 @@ Triggered by cron-job.org via GitHub Actions workflow_dispatch.
 Runs independently of vipon_publisher.py — does NOT touch the Google Sheet.
 """
 
-import json, os, random, re, subprocess, tempfile, time
+import json, os, random, re, subprocess, time
 from pathlib import Path
 
 import requests
@@ -598,7 +598,10 @@ def main():
     # or geminikeys.txt shift the main key list.
     veo_key = _load_veo_key() or (keys[1] if len(keys) > 1 else keys[0])
 
-    with tempfile.TemporaryDirectory(prefix="hook_reel_") as td:
+    td = os.path.join(os.getcwd(), "reel_output")
+    os.makedirs(td, exist_ok=True)
+    log(f"Output folder: {td}")
+    if True:
 
         # 1. Pick a deal
         log("\n[1] Scraping Amazon deals (60%+ off)...")
