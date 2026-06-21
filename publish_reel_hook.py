@@ -408,13 +408,11 @@ def generate_hook_vo(deal, keys):
 
 
 # ── REEL ASSEMBLY ─────────────────────────────────────────────────────────────
-def build_hook_reel(deal, page_data, veo_path, keys, ffmpeg, font, td):
+def build_hook_reel(deal, page_data, veo_path, script, wav_bytes, ffmpeg, font, td):
     """Assemble the full reel. Returns local mp4 path or None on failure."""
     disc_label = f"{deal['pct']}% OFF"
 
-    # 1. VO audio
-    log("  Generating VO...")
-    script, wav_bytes = generate_hook_vo(deal, keys)
+    # 1. VO audio (script + wav_bytes pre-generated in main() before Veo)
     deal["_vo_script"] = script   # saved for captions
     vo_aac, vo_dur = None, 0.0
     if wav_bytes:
@@ -623,33 +621,42 @@ def main():
             "title_box":  title_box,
         }
         log(f"  Images: {len(imgs)} | price_box: {'y' if price_box else 'n'}")
+        if not imgs:
+            raise RuntimeError("No product images retrieved — aborting before Veo to avoid wasted spend")
 
-        # 3. Veo hook — billing key loaded from ~/geminikey.txt index 1 (same as test_veo_reel.py)
-        log("\n[3] Generating Veo 6s hook...")
+        # 3. Generate VO script + TTS audio (must succeed before spending on Veo)
+        log("\n[3] Generating VO script + TTS...")
+        script, wav_bytes = generate_hook_vo(deal, keys)
+        if not wav_bytes:
+            raise RuntimeError("VO TTS generation failed — aborting before Veo to avoid wasted spend")
+        log(f"  VO: confirmed ({len(wav_bytes):,} bytes)")
+
+        # 4. Veo hook — only runs after images AND VO are confirmed
+        log("\n[4] Generating Veo 6s hook...")
         veo_out  = os.path.join(td, "hook.mp4")
         veo_path = generate_veo_hook(deal, veo_key, keys, veo_out)
         if not veo_path:
             log("  Veo failed — will publish carousel-only reel")
 
-        # 4. Build reel (carousel + VO + stitch)
-        log("\n[4] Building hook reel...")
-        final_path = build_hook_reel(deal, page_data, veo_path, keys, ffmpeg, font, td)
+        # 5. Build reel (carousel + VO + stitch)
+        log("\n[5] Building hook reel...")
+        final_path = build_hook_reel(deal, page_data, veo_path, script, wav_bytes, ffmpeg, font, td)
         if not final_path:
             raise RuntimeError("Reel build failed — no output produced")
 
-        # 5. Upload
-        log("\n[5] Uploading to Cloudinary...")
+        # 6. Upload
+        log("\n[6] Uploading to Cloudinary...")
         pub_id    = f"vipon_hook_reels/{deal['asin']}_{int(time.time())}"
         video_url = cloud_upload(final_path, pub_id)
         if not video_url:
             raise RuntimeError("Cloudinary upload failed")
         log(f"  URL: {video_url}")
 
-        # 6. Publish
-        script = deal.get("_vo_script", f"This deal on {deal.get('title','this product')[:40]} is real. "
-                                         f"{deal['pct']}% off — limited time, link below!")
-        log("\n[6] Publishing to platforms...")
-        publish_platforms(video_url, deal, script)
+        # 7. Publish
+        vo_script = deal.get("_vo_script", f"This deal on {deal.get('title','this product')[:40]} is real. "
+                                            f"{deal['pct']}% off — limited time, link below!")
+        log("\n[7] Publishing to platforms...")
+        publish_platforms(video_url, deal, vo_script)
 
     log("=== publish_reel_hook.py done ===")
 
