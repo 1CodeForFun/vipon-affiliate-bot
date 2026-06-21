@@ -33,7 +33,17 @@ jobs:
           sudo apt-get install -y ffmpeg chromium-browser chromium-chromedriver
 
       - name: Install Python dependencies
-        run: pip install gspread oauth2client requests selenium google-auth google-auth-oauthlib google-api-python-client
+        run: pip install gspread oauth2client requests selenium six google-auth google-auth-oauthlib google-api-python-client
+
+      - name: Install Amazon PA-API SDK from secrets repo
+        run: |
+          if [ -f secrets/paapi5_sdk.zip ]; then
+            mkdir -p paapi5_python_sdk
+            unzip -qo secrets/paapi5_sdk.zip -d paapi5_python_sdk
+            echo "paapi5_python_sdk extracted successfully"
+          else
+            echo "WARNING: paapi5_sdk.zip not found — Amazon PA-API images will be skipped"
+          fi
 
       - name: Copy credential files for the video builder
         run: |
