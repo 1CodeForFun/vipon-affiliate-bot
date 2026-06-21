@@ -55,16 +55,20 @@ GALLERY_SECS     = 3.0    # seconds per gallery image
 CIRCLE_SECS      = 2.5    # seconds for the price-circle slide
 DEAL_MIN_DISCOUNT = 60
 
-# Goldbox URL: the Amazon deals page with the 60% discount filter already applied in the URL.
-# (This is what amazon.com/deals looks like after moving the Discount slider to 60%.)
-# Avoids Selenium having to find and drag the slider — page loads pre-filtered.
-_GOLDBOX_URL = (
-    "https://www.amazon.com/gp/goldbox/"
-    "?discounts-widget=%22%7B%22state%22%3A%7B%22rangeRefinementFilters%22"
-    "%3A%22%7B%22discountPercentage%22%3A%7B%22rangeRefinementFilters%22"
-    "%3A%22%7B%22l%22%3A%2260%22%7D%22%7D%22%7D%22%7D%22"
-)
-_DEALS_FALLBACK_URL = "https://www.amazon.com/deals"  # fallback with JS filter
+# Goldbox URL with a working percentOff discount filter, built programmatically.
+# Reverse-engineered from the live deals-page slider URL: the discounts-widget value
+# is a JSON object, json-stringified again (escaped quotes), then double URL-encoded.
+def _build_goldbox_url(min_pct=DEAL_MIN_DISCOUNT, max_pct=100):
+    from urllib.parse import quote
+    obj = {"state": {"rangeRefinementFilters": {"percentOff": {"min": min_pct, "max": max_pct}}},
+           "version": 1}
+    inner        = json.dumps(obj, separators=(",", ":"))
+    widget_value = json.dumps(inner)                        # wrap + escape inner quotes
+    encoded      = quote(quote(widget_value, safe=""), safe="")  # double URL-encode
+    return f"https://www.amazon.com/gp/goldbox/?discounts-widget={encoded}"
+
+_GOLDBOX_URL        = _build_goldbox_url(DEAL_MIN_DISCOUNT, 100)
+_DEALS_FALLBACK_URL = "https://www.amazon.com/deals"  # fallback (unfiltered)
 
 def log(m): print(m, flush=True)
 
@@ -82,34 +86,37 @@ def _parse_deals_from_html(html):
     results = []
     seen = set()
 
-    # Each deal card is an <a href="/ProductName/dp/ASIN?..."> that contains
-    # a <span class="a-size-mini">X% off</span> discount badge inside it.
-    for a_tag in soup.find_all('a', href=re.compile(r'/dp/[A-Z0-9]{10}')):
-        href = a_tag.get('href', '')
-        m = re.search(r'/dp/([A-Z0-9]{10})', href)
-        if not m:
-            continue
-        asin = m.group(1)
-        if asin in seen:
+    # Iterate deal cards. Each <div data-testid="product-card" data-asin="ASIN">
+    # contains a <span class="a-size-mini">X% off</span> badge and a /dp/ASIN link.
+    # (Walking the card — not the <a> — avoids html.parser mangling Amazon's
+    # invalid nesting of block <div>s inside <a>.)
+    cards = soup.find_all('div', attrs={'data-testid': 'product-card'})
+    if not cards:
+        cards = soup.find_all('div', attrs={'data-asin': True})
+
+    for c in cards:
+        asin = c.get('data-asin', '').strip()
+        if not asin or not re.match(r'^[A-Z0-9]{10}$', asin):
+            link0 = c.find('a', href=re.compile(r'/dp/([A-Z0-9]{10})'))
+            mm = re.search(r'/dp/([A-Z0-9]{10})', link0.get('href', '')) if link0 else None
+            asin = mm.group(1) if mm else ''
+        if not asin or asin in seen:
             continue
 
-        # Discount: span.a-size-mini inside this <a> tag
-        badge = a_tag.find('span', class_=re.compile(r'\ba-size-mini\b'))
+        badge = c.find('span', class_=re.compile(r'\ba-size-mini\b'),
+                       string=re.compile(r'\d+\s*%\s*off', re.I))
         if not badge:
             continue
-        pct_m = re.match(r'^(\d+)\s*%\s*off', badge.get_text(strip=True), re.I)
-        if not pct_m:
-            continue
-        pct = int(pct_m.group(1))
+        pct = int(re.match(r'(\d+)', badge.get_text(strip=True)).group(1))
 
-        # Title from URL slug — always clean (e.g. /Blink-Outdoor-2KPlus/dp/... → "Blink Outdoor 2KPlus")
-        slug = re.match(r'/([^/]+)/dp/', href)
+        link  = c.find('a', href=re.compile(r'/dp/[A-Z0-9]{10}'))
+        href  = link.get('href', '') if link else ''
+        slug  = re.search(r'amazon\.com/([^/]+)/dp/', href) or re.match(r'/([^/]+)/dp/', href)
         title = slug.group(1).replace('-', ' ')[:120] if slug else asin
 
         seen.add(asin)
         results.append({'asin': asin, 'pct': pct, 'title': title})
 
-    log(f"  BeautifulSoup: {len(results)} deals with discount badges")
     return results
 
 
@@ -150,19 +157,26 @@ def _init_driver():
 
 
 def _scrape_url(url):
+    """Scroll the deals page collecting a page-source SNAPSHOT at each position.
+    The page virtualizes (off-screen cards are removed from the DOM), so the final
+    page_source alone misses most deals. Merge unique deals across all snapshots."""
     driver = _init_driver()
     try:
         driver.get(url)
         time.sleep(8)
-        # Scroll progressively so lazy-loaded cards further down the page render
-        for px in (1500, 3000, 5000, 7000, 9000, 12000):
+        snapshots = [driver.page_source]
+        for px in (1500, 3000, 5000, 7000, 9000, 12000, 15000, 18000):
             driver.execute_script(f"window.scrollTo(0, {px})")
             time.sleep(1.5)
-        driver.execute_script("window.scrollTo(0, 0)")
-        time.sleep(1)
-        html = driver.page_source
-        log(f"  Page source: {len(html):,} chars")
-        return _parse_deals_from_html(html)
+            snapshots.append(driver.page_source)
+        log(f"  Captured {len(snapshots)} snapshots ({sum(len(s) for s in snapshots):,} chars)")
+
+        merged = {}
+        for snap in snapshots:
+            for d in _parse_deals_from_html(snap):
+                if d['asin'] not in merged or d['pct'] > merged[d['asin']]['pct']:
+                    merged[d['asin']] = d
+        return list(merged.values())
     finally:
         try: driver.quit()
         except: pass
@@ -170,9 +184,9 @@ def _scrape_url(url):
 
 # Products whose images could be explicit or inappropriate for family-friendly feeds
 _EXPLICIT_KEYWORDS = {
-    "bra", "bras", "bikini", "bikinis", "panty", "panties", "underwear",
-    "lingerie", "thong", "thongs", "corset", "negligee", "g-string",
-    "camisole", "shapewear", "swimsuit", "swimwear", "bodysuit",
+    "bra", "bras", "bralette", "bikini", "bikinis", "panty", "panties", "underwear",
+    "underwire", "lingerie", "thong", "thongs", "corset", "negligee", "g-string",
+    "camisole", "shapewear", "swimsuit", "swimwear", "bodysuit", "boyshort", "boyshorts",
 }
 
 def _is_safe(deal):
@@ -201,8 +215,14 @@ def scrape_amazon_deals(min_pct=DEAL_MIN_DISCOUNT):
     if not qualified:
         if not deals:
             raise RuntimeError("No deals found — check Selenium / network")
-        log(f"  No deals at {min_pct}%+ today — picking from all safe deals")
-        qualified = [d for d in deals if _is_safe(d)] or deals
+        # Fallback: pick from the highest-discount safe deals (top 5 to avoid repetition)
+        safe = sorted((d for d in deals if _is_safe(d)), key=lambda x: -x.get("pct", 0))
+        if safe:
+            top_pct = safe[0]["pct"]
+            log(f"  No deals at {min_pct}%+ today — using highest available ({top_pct}%)")
+            qualified = safe[:5]
+        else:
+            qualified = deals
 
     pick = random.choice(qualified)
     log(f"  Selected ASIN={pick['asin']} ({pick['pct']}% off) — {pick['title'][:60]}")

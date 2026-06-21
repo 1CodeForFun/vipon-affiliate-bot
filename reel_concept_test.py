@@ -406,10 +406,10 @@ def paapi_get_product_info(asin, tld="com"):
             marketplace=f"www.amazon.{tld}",
             item_ids=[asin],
             resources=[
-                GetItemsResource.ITEM_INFO_TITLE,
-                GetItemsResource.ITEM_INFO_FEATURES,
+                GetItemsResource.ITEMINFO_TITLE,
+                GetItemsResource.ITEMINFO_FEATURES,
                 GetItemsResource.OFFERS_LISTINGS_PRICE,
-                GetItemsResource.OFFERS_LISTINGS_SAVING_BASIS,
+                GetItemsResource.OFFERS_LISTINGS_SAVINGBASIS,
             ],
         )
         response = client.get_items(request)
