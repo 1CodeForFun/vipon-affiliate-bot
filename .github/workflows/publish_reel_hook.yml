@@ -40,7 +40,6 @@ jobs:
             requests \
             pillow \
             selenium \
-            beautifulsoup4 \
             google-genai \
             google-auth \
             google-auth-oauthlib \
@@ -48,7 +47,9 @@ jobs:
 
       - name: Copy credential files
         run: |
-          cp secrets/cloudinary.json     ~/cloudinary.json
+          cp secrets/cloudinary.json       ~/cloudinary.json
+          cp secrets/PAAPI.csv             ~/PAAPI.csv
+          cp secrets/billed_gemini.txt     ~/billed_gemini.txt
           [ -f secrets/geminipro.txt  ]  && cp secrets/geminipro.txt  ~/geminipro.txt  || true
           [ -f secrets/geminikey.txt  ]  && cp secrets/geminikey.txt  ~/geminikey.txt  || true
           [ -f secrets/geminikeys.txt ]  && cp secrets/geminikeys.txt ~/geminikeys.txt || true

@@ -168,63 +168,72 @@ def scrape_amazon_deals(min_pct=DEAL_MIN_DISCOUNT):
     return pick
 
 
-# ── PRODUCT IMAGE FETCH (requests, no Selenium) ───────────────────────────────
-_DESKTOP_UA = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-}
+# ── PRODUCT IMAGES via Amazon PA API (same as vipon26.py) ────────────────────
+_PAAPI_CLIENT = None
 
-def _clean_amz_img(url):
-    return re.sub(r'\._[A-Z0-9_,]+_\.', '.', url)
+def _get_paapi_client():
+    global _PAAPI_CLIENT
+    if _PAAPI_CLIENT is not None:
+        return _PAAPI_CLIENT
+    try:
+        import csv
+        from paapi5_python_sdk.api.default_api import DefaultApi
+        csv_path = os.path.expanduser("~/PAAPI.csv")
+        with open(csv_path) as f:
+            row = next(csv.DictReader(f))
+            access = row["Access Key"].strip()
+            secret = row["Secret Key"].strip()
+        _PAAPI_CLIENT = DefaultApi(
+            access_key=access,
+            secret_key=secret,
+            host="webservices.amazon.com",
+            region="us-east-1",
+        )
+        return _PAAPI_CLIENT
+    except Exception as e:
+        log(f"  PA-API client init failed: {e}")
+        return None
 
 def _fetch_product_images(asin, max_imgs=6):
-    """Fetch Amazon product images from static HTML — same approach as test_veo_reel.py."""
+    """Fetch product images via Amazon PA API — no scraping, no IP blocking."""
+    client = _get_paapi_client()
+    if not client:
+        return []
     try:
-        from bs4 import BeautifulSoup
-    except ImportError:
-        log("  beautifulsoup4 not installed — pip install beautifulsoup4"); return []
+        from paapi5_python_sdk.get_items_request import GetItemsRequest
+        from paapi5_python_sdk.get_items_resource import GetItemsResource
+        from paapi5_python_sdk.partner_type import PartnerType
 
-    url = f"https://www.amazon.com/dp/{asin}?th=1&psc=1"
-    try:
-        resp = requests.get(url, headers=_DESKTOP_UA, timeout=20)
-        resp.raise_for_status()
+        log(f"  PA-API: fetching images for {asin}")
+        request = GetItemsRequest(
+            partner_tag=AFF_TAG_FB,
+            partner_type=PartnerType.ASSOCIATES,
+            marketplace="www.amazon.com",
+            item_ids=[asin],
+            resources=[
+                GetItemsResource.IMAGES_PRIMARY_LARGE,
+                GetItemsResource.IMAGES_VARIANTS_LARGE,
+            ],
+        )
+        response = client.get_items(request)
+        if not response or not response.items_result or not response.items_result.items:
+            log(f"  PA-API: no items returned for {asin}")
+            return []
+        item = response.items_result.items[0]
+        imgs = []
+        if item.images and item.images.primary and item.images.primary.large:
+            imgs.append(item.images.primary.large.url)
+        if item.images and item.images.variants:
+            for v in item.images.variants:
+                if v.large and v.large.url and v.large.url not in imgs:
+                    imgs.append(v.large.url)
+                if len(imgs) >= max_imgs:
+                    break
+        log(f"  PA-API: {len(imgs)} images")
+        return imgs[:max_imgs]
     except Exception as e:
-        log(f"  requests fetch failed: {e}"); return []
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    images = []
-
-    main = soup.select_one("#landingImage, #imgTagWrappingDiv img")
-    if main:
-        src = main.get("data-old-hires") or main.get("src", "")
-        if src and "amazon" in src:
-            images.append(_clean_amz_img(src))
-
-    for img in soup.select("#altImages ul li.item img"):
-        src = img.get("src", "")
-        if src and "amazon" in src:
-            full = _clean_amz_img(src)
-            if full not in images:
-                images.append(full)
-        if len(images) >= max_imgs:
-            break
-
-    for script in soup.find_all("script", type="text/javascript"):
-        text = script.string or ""
-        if "colorImages" in text or "hiRes" in text:
-            for hi in re.findall(r'"hiRes"\s*:\s*"([^"]+)"', text):
-                if hi not in images:
-                    images.append(hi)
-            if len(images) >= max_imgs:
-                break
-
-    images = [i for i in images if i][:max_imgs]
-    log(f"  requests image fetch: {len(images)} images")
-    return images
+        log(f"  PA-API fetch failed: {e}")
+        return []
 
 
 # ── VEO HOOK ─────────────────────────────────────────────────────────────────
@@ -629,14 +638,14 @@ def publish_platforms(video_url, deal, script):
 
 
 def _load_veo_key():
-    """Load the Veo billing key from ~/geminikey.txt index 1 (0-based) — mirrors test_veo_reel.py."""
-    p = os.path.expanduser("~/geminikey.txt")
+    """Load the Veo billing key from ~/billed_gemini.txt (standalone file in secrets repo)."""
+    p = os.path.expanduser("~/billed_gemini.txt")
     if not os.path.exists(p):
+        log("  ~/billed_gemini.txt not found — check secrets repo")
         return None
-    lines = [l.strip() for l in open(p) if l.strip()]
-    key = lines[1] if len(lines) > 1 else (lines[0] if lines else None)
-    log(f"  Veo billing key: geminikey.txt index 1 of {len(lines)} lines")
-    return key
+    key = open(p).read().strip()
+    log(f"  Veo billing key: loaded from billed_gemini.txt")
+    return key or None
 
 
 # ── MAIN ─────────────────────────────────────────────────────────────────────
