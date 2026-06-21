@@ -324,14 +324,83 @@ out.rating_count = txt(document.querySelector('#acrCustomerReviewText'));
 return out;
 """
 
+# ─── PA API CLIENT (primary image source — no scraping, no IP blocking) ─────
+_PAAPI_CLIENT = None
+
+def _get_paapi_client():
+    global _PAAPI_CLIENT
+    if _PAAPI_CLIENT is not None:
+        return _PAAPI_CLIENT
+    try:
+        import csv
+        from paapi5_python_sdk.api.default_api import DefaultApi
+        csv_path = os.path.expanduser("~/PAAPI.csv")
+        with open(csv_path) as f:
+            row = next(csv.DictReader(f))
+            access = row["Access Key"].strip()
+            secret = row["Secret Key"].strip()
+        _PAAPI_CLIENT = DefaultApi(
+            access_key=access,
+            secret_key=secret,
+            host="webservices.amazon.com",
+            region="us-east-1",
+        )
+        return _PAAPI_CLIENT
+    except Exception as e:
+        log(f"  PA-API client init failed: {e}")
+        return None
+
+def _paapi_get_images(asin, tld="com", max_imgs=6):
+    """Primary image source: Amazon PA API. Returns [] on any failure."""
+    client = _get_paapi_client()
+    if not client:
+        return []
+    try:
+        from paapi5_python_sdk.get_items_request import GetItemsRequest
+        from paapi5_python_sdk.get_items_resource import GetItemsResource
+        from paapi5_python_sdk.partner_type import PartnerType
+        partner_tag = "fdcanada00-20" if tld == "ca" else "freshdeal00cc-20"
+        request = GetItemsRequest(
+            partner_tag=partner_tag,
+            partner_type=PartnerType.ASSOCIATES,
+            marketplace=f"www.amazon.{tld}",
+            item_ids=[asin],
+            resources=[
+                GetItemsResource.IMAGES_PRIMARY_LARGE,
+                GetItemsResource.IMAGES_VARIANTS_LARGE,
+            ],
+        )
+        response = client.get_items(request)
+        if not response or not response.items_result or not response.items_result.items:
+            return []
+        item = response.items_result.items[0]
+        imgs = []
+        if item.images and item.images.primary and item.images.primary.large:
+            imgs.append(item.images.primary.large.url)
+        if item.images and item.images.variants:
+            for v in item.images.variants:
+                if v.large and v.large.url and v.large.url not in imgs:
+                    imgs.append(v.large.url)
+                if len(imgs) >= max_imgs:
+                    break
+        log(f"  PA-API images: {len(imgs)}")
+        return imgs[:max_imgs]
+    except Exception as e:
+        log(f"  PA-API fetch failed: {e}")
+        return []
+
+
 def capture_page(asin, td, ffmpeg, tld="com"):
     """Return (gallery_image_urls, screenshot_path, img_w, img_h, price_box, reviews_box)."""
+    # PA API is primary for images — reliable, no bot-detection
+    imgs = _paapi_get_images(asin, tld)
+
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
         from selenium.webdriver.chrome.service import Service
     except ImportError:
-        log("  selenium missing"); return [], None, 0, 0, None, None
+        log("  selenium missing"); return imgs, None, 0, 0, None, None, None, {}
     binary, drv = _chrome_bits()
     opts = Options()
     for a in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
@@ -342,7 +411,7 @@ def capture_page(asin, td, ffmpeg, tld="com"):
     if binary: opts.binary_location = binary
     driver = webdriver.Chrome(service=(Service(executable_path=drv) if drv else Service()), options=opts)
     shot = os.path.join(td, "page.png")
-    imgs, pw, ph, price_box, rev_box, title_box = [], 0, 0, None, None, None
+    pw, ph, price_box, rev_box, title_box = 0, 0, None, None, None
     social = {"bought": "", "rating": "", "rating_count": ""}
     try:
         driver.set_window_size(440, 950)
@@ -351,7 +420,9 @@ def capture_page(asin, td, ffmpeg, tld="com"):
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight*0.55);"); time.sleep(1.3)
         driver.execute_script("window.scrollTo(0,0);"); time.sleep(0.7)
         data = driver.execute_script(_GALLERY_JS) or {}
-        imgs = data.get("images", [])[:6]
+        if not imgs:  # PA API failed — fall back to Selenium images
+            imgs = data.get("images", [])[:6]
+            log(f"  Selenium fallback images: {len(imgs)}")
         price_box, rev_box, title_box = data.get("price"), data.get("reviews"), data.get("title")
         social = {"bought": data.get("bought", ""), "rating": data.get("rating", ""),
                   "rating_count": data.get("rating_count", "")}

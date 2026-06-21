@@ -168,72 +168,6 @@ def scrape_amazon_deals(min_pct=DEAL_MIN_DISCOUNT):
     return pick
 
 
-# ── PRODUCT IMAGES via Amazon PA API (same as vipon26.py) ────────────────────
-_PAAPI_CLIENT = None
-
-def _get_paapi_client():
-    global _PAAPI_CLIENT
-    if _PAAPI_CLIENT is not None:
-        return _PAAPI_CLIENT
-    try:
-        import csv
-        from paapi5_python_sdk.api.default_api import DefaultApi
-        csv_path = os.path.expanduser("~/PAAPI.csv")
-        with open(csv_path) as f:
-            row = next(csv.DictReader(f))
-            access = row["Access Key"].strip()
-            secret = row["Secret Key"].strip()
-        _PAAPI_CLIENT = DefaultApi(
-            access_key=access,
-            secret_key=secret,
-            host="webservices.amazon.com",
-            region="us-east-1",
-        )
-        return _PAAPI_CLIENT
-    except Exception as e:
-        log(f"  PA-API client init failed: {e}")
-        return None
-
-def _fetch_product_images(asin, max_imgs=6):
-    """Fetch product images via Amazon PA API — no scraping, no IP blocking."""
-    client = _get_paapi_client()
-    if not client:
-        return []
-    try:
-        from paapi5_python_sdk.get_items_request import GetItemsRequest
-        from paapi5_python_sdk.get_items_resource import GetItemsResource
-        from paapi5_python_sdk.partner_type import PartnerType
-
-        log(f"  PA-API: fetching images for {asin}")
-        request = GetItemsRequest(
-            partner_tag=AFF_TAG_FB,
-            partner_type=PartnerType.ASSOCIATES,
-            marketplace="www.amazon.com",
-            item_ids=[asin],
-            resources=[
-                GetItemsResource.IMAGES_PRIMARY_LARGE,
-                GetItemsResource.IMAGES_VARIANTS_LARGE,
-            ],
-        )
-        response = client.get_items(request)
-        if not response or not response.items_result or not response.items_result.items:
-            log(f"  PA-API: no items returned for {asin}")
-            return []
-        item = response.items_result.items[0]
-        imgs = []
-        if item.images and item.images.primary and item.images.primary.large:
-            imgs.append(item.images.primary.large.url)
-        if item.images and item.images.variants:
-            for v in item.images.variants:
-                if v.large and v.large.url and v.large.url not in imgs:
-                    imgs.append(v.large.url)
-                if len(imgs) >= max_imgs:
-                    break
-        log(f"  PA-API: {len(imgs)} images")
-        return imgs[:max_imgs]
-    except Exception as e:
-        log(f"  PA-API fetch failed: {e}")
-        return []
 
 
 # ── VEO HOOK ─────────────────────────────────────────────────────────────────
@@ -672,10 +606,9 @@ def main():
 
         # 2. Capture product page
         log(f"\n[2] Capturing product page — ASIN {deal['asin']}...")
-        # Images: use requests + BeautifulSoup on static HTML (same as test_veo_reel.py — proven)
-        imgs = _fetch_product_images(deal["asin"])
-        # Screenshot + price_box: still need Selenium for the full-page CDP screenshot
-        _, shot, pw, ph, price_box, _, title_box, _ = capture_page(
+        # PA API is primary for images; capture_page runs Selenium for screenshot +
+        # price_box and also provides Selenium images as automatic fallback if PA API fails
+        imgs, shot, pw, ph, price_box, _, title_box, _ = capture_page(
             deal["asin"], td, ffmpeg
         )
         page_data = {

@@ -38,6 +38,7 @@ jobs:
       - name: Copy credential files for the video builder
         run: |
           cp secrets/cloudinary.json ~/cloudinary.json
+          cp secrets/PAAPI.csv       ~/PAAPI.csv
           [ -f secrets/geminipro.txt  ] && cp secrets/geminipro.txt  ~/geminipro.txt  || true
           [ -f secrets/geminikey.txt  ] && cp secrets/geminikey.txt  ~/geminikey.txt  || true
           [ -f secrets/geminikeys.txt ] && cp secrets/geminikeys.txt ~/geminikeys.txt || true
