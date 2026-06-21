@@ -351,7 +351,7 @@ def _yt_upload(req) -> dict:
 
 
 def post_youtube_short(video_url: str, title: str, description: str,
-                       yt_token_file: str = None) -> str:
+                       yt_token_file: str = None, thumbnail_path: str = None) -> str:
     video_bytes = _download_video(video_url)
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
@@ -390,6 +390,20 @@ def post_youtube_short(video_url: str, title: str, description: str,
         response = _yt_upload(req)
         video_id = response.get("id", "")
         log(f"YT: Short uploaded ->video_id={video_id}")
+
+        # Set custom thumbnail (frame from Veo hook) if provided
+        if thumbnail_path and os.path.exists(thumbnail_path) and video_id:
+            try:
+                log("YT: setting thumbnail...")
+                youtube.thumbnails().set(
+                    videoId=video_id,
+                    media_body=googleapiclient.http.MediaFileUpload(
+                        thumbnail_path, mimetype="image/jpeg", chunksize=-1, resumable=False)
+                ).execute()
+                log("YT: thumbnail set")
+            except Exception as e:
+                log(f"YT: thumbnail set failed (non-fatal): {e}")
+
         return video_id
     finally:
         try:

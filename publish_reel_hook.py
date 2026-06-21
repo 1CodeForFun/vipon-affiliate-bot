@@ -82,28 +82,29 @@ def _parse_deals_from_html(html):
     results = []
     seen = set()
 
-    # data-asin is present on deal card containers in the rendered Selenium HTML.
-    # Search within each card's full text for the discount badge ("X% off").
-    for el in soup.find_all(attrs={'data-asin': True}):
-        asin = el.get('data-asin', '').strip()
-        if not asin or len(asin) != 10 or not re.match(r'^[A-Z0-9]{10}$', asin) or asin in seen:
-            continue
-
-        card_text = el.get_text(' ', strip=True)
-        m = re.search(r'(\d+)\s*%\s*off', card_text, re.I)
+    # Each deal card is an <a href="/ProductName/dp/ASIN?..."> that contains
+    # a <span class="a-size-mini">X% off</span> discount badge inside it.
+    for a_tag in soup.find_all('a', href=re.compile(r'/dp/[A-Z0-9]{10}')):
+        href = a_tag.get('href', '')
+        m = re.search(r'/dp/([A-Z0-9]{10})', href)
         if not m:
             continue
-        pct = int(m.group(1))
+        asin = m.group(1)
+        if asin in seen:
+            continue
 
-        # Title: prefer h2/h3 heading, then product link text
-        title = ''
-        h = el.find(['h2', 'h3'])
-        if h:
-            title = re.sub(r'\s+', ' ', h.get_text(' ', strip=True))[:120]
-        if not title:
-            link = el.find('a', href=re.compile(r'/dp/'))
-            if link:
-                title = re.sub(r'\s+', ' ', link.get_text(' ', strip=True))[:120]
+        # Discount: span.a-size-mini inside this <a> tag
+        badge = a_tag.find('span', class_=re.compile(r'\ba-size-mini\b'))
+        if not badge:
+            continue
+        pct_m = re.match(r'^(\d+)\s*%\s*off', badge.get_text(strip=True), re.I)
+        if not pct_m:
+            continue
+        pct = int(pct_m.group(1))
+
+        # Title from URL slug — always clean (e.g. /Blink-Outdoor-2KPlus/dp/... → "Blink Outdoor 2KPlus")
+        slug = re.match(r'/([^/]+)/dp/', href)
+        title = slug.group(1).replace('-', ' ')[:120] if slug else asin
 
         seen.add(asin)
         results.append({'asin': asin, 'pct': pct, 'title': title})
@@ -216,6 +217,23 @@ def scrape_amazon_deals(min_pct=DEAL_MIN_DISCOUNT):
 
 
 # ── VEO HOOK ─────────────────────────────────────────────────────────────────
+def _extract_hook_thumbnail(hook_path, td, ffmpeg):
+    """Extract the frame at 3s from the Veo hook clip as a JPEG for YouTube thumbnail."""
+    thumb = os.path.join(td, "hook_thumb.jpg")
+    try:
+        subprocess.run([ffmpeg, "-y"] + _FF_LOG + [
+            "-ss", "3", "-i", str(hook_path), "-vframes", "1",
+            "-vf", f"scale={VIDEO_W}:{VIDEO_H}:force_original_aspect_ratio=increase,crop={VIDEO_W}:{VIDEO_H}",
+            "-q:v", "2", thumb],
+            check=True, timeout=30)
+        if os.path.exists(thumb):
+            log(f"  Thumbnail: extracted frame@3s ({os.path.getsize(thumb):,} bytes)")
+            return thumb
+    except Exception as e:
+        log(f"  Thumbnail extract failed: {e}")
+    return None
+
+
 def generate_veo_hook(deal, veo_key, keys, output_path):
     """Generate 6s Veo hook video using veo_key (billing key from ~/geminikey.txt index 1).
     keys is used only for the cheap text prompt. Returns path on success, None on failure."""
@@ -737,7 +755,7 @@ def build_hook_reel(deal, page_data, veo_path, script, wav_bytes, ffmpeg, font, 
 
 
 # ── PUBLISHING ────────────────────────────────────────────────────────────────
-def publish_platforms(video_url, deal, script):
+def publish_platforms(video_url, deal, script, thumbnail_path=None):
     """Post the reel to FreshDeals + Ultafind on FB / IG / YT."""
     title   = (deal.get("title_text") or deal.get("title") or "Deal Alert!")[:100]
     asin    = deal["asin"]
@@ -775,7 +793,8 @@ def publish_platforms(video_url, deal, script):
         if not os.path.exists(yt_file):
             log(f"  {yt_file} not found — skipping"); continue
         try:
-            post_youtube_short(video_url, title, yt_desc, yt_token_file=yt_file)
+            post_youtube_short(video_url, title, yt_desc, yt_token_file=yt_file,
+                               thumbnail_path=thumbnail_path)
         except Exception as e:
             log(f"ERROR YT {label}: {e}"); errors.append(f"YT-{label}: {e}")
 
@@ -849,9 +868,12 @@ def main():
 
         # 4. Veo hook — only runs after images AND VO are confirmed
         log("\n[4] Generating Veo 6s hook...")
-        veo_out  = os.path.join(td, "hook.mp4")
-        veo_path = generate_veo_hook(deal, veo_key, keys, veo_out)
-        if not veo_path:
+        veo_out    = os.path.join(td, "hook.mp4")
+        veo_path   = generate_veo_hook(deal, veo_key, keys, veo_out)
+        thumb_path = None
+        if veo_path:
+            thumb_path = _extract_hook_thumbnail(veo_path, td, ffmpeg)
+        else:
             log("  Veo failed — will publish carousel-only reel")
 
         # 5. Build reel (carousel + VO + stitch)
@@ -872,7 +894,7 @@ def main():
         vo_script = deal.get("_vo_script", f"This deal on {deal.get('title','this product')[:40]} is real. "
                                             f"{deal['pct']}% off — limited time, link below!")
         log("\n[7] Publishing to platforms...")
-        publish_platforms(video_url, deal, vo_script)
+        publish_platforms(video_url, deal, vo_script, thumbnail_path=thumb_path)
 
     log("=== publish_reel_hook.py done ===")
 
