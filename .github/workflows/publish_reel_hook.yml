@@ -40,6 +40,7 @@ jobs:
             requests \
             pillow \
             selenium \
+            beautifulsoup4 \
             google-genai \
             google-auth \
             google-auth-oauthlib \

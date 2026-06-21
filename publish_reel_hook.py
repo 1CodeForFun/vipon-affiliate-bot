@@ -27,7 +27,7 @@ import google.genai.types as gtypes
 from reel_concept_test import (
     cloud_upload, _read_gemini_keys, _which_ffmpeg, _find_font,
     gemini_text, gemini_tts, gen_beats, probe_duration, pcm_to_wav,
-    _esc, _chrome_bits, capture_page,
+    _esc, _chrome_bits, capture_page, paapi_get_product_info,
     VIDEO_W, VIDEO_H, FPS, _FF_LOG, _FF_ENCODE,
 )
 from vipon_publisher import (
@@ -70,21 +70,75 @@ def log(m): print(m, flush=True)
 
 # ── DEALS SCRAPING ────────────────────────────────────────────────────────────
 def _parse_deals_from_html(html):
-    """Extract deal cards from rendered HTML using regex on page source.
-    Looks for /dp/ASIN occurrences and finds 'X% off' in the surrounding HTML."""
+    """Parse deal cards from rendered HTML using BeautifulSoup (regex fallback).
+    Targets data-csa-c-item-type='deal' cards — same structure Amazon uses on /deals."""
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        log("  beautifulsoup4 not installed — using regex fallback")
+        return _parse_deals_regex(html)
+
+    soup = BeautifulSoup(html, 'html.parser')
+    results = []
+    seen = set()
+
+    # Primary: deal card containers (data-csa-c-item-type="deal")
+    cards = soup.find_all(attrs={'data-csa-c-item-type': 'deal'})
+    if not cards:
+        # Fallback: any element that has both data-asin and a /dp/ link inside
+        cards = [el for el in soup.find_all(attrs={'data-asin': True})
+                 if el.find('a', href=re.compile(r'/dp/'))]
+
+    for card in cards:
+        asin = card.get('data-asin', '').strip()
+        if not asin or len(asin) != 10 or not re.match(r'^[A-Z0-9]{10}$', asin) or asin in seen:
+            continue
+
+        # Discount %: look for "X% off" in span text within the card
+        pct = 0
+        for span in card.find_all('span'):
+            t = (span.get_text(strip=True) or '')
+            m = re.match(r'^(\d+)\s*%\s*off', t, re.I)
+            if m:
+                pct = int(m.group(1))
+                break
+        if not pct:
+            m = re.search(r'(\d+)\s*%\s*off', card.get_text(' ', strip=True), re.I)
+            if m:
+                pct = int(m.group(1))
+        if not pct:
+            continue
+
+        # Title: prefer h2/h3 heading, then link text
+        title = ''
+        h = card.find(['h2', 'h3', 'h1'])
+        if h:
+            title = re.sub(r'\s+', ' ', h.get_text(' ', strip=True))[:120]
+        if not title:
+            link = card.find('a', href=re.compile(r'/dp/' + asin))
+            if link:
+                title = re.sub(r'\s+', ' ', link.get_text(' ', strip=True))[:120]
+
+        seen.add(asin)
+        results.append({'asin': asin, 'pct': pct, 'title': title})
+
+    log(f"  BeautifulSoup: {len(results)} deals with discount badges")
+    return results
+
+
+def _parse_deals_regex(html):
+    """Regex fallback for deal parsing (used when BeautifulSoup not installed)."""
     results = []
     seen = set()
     for m in re.finditer(r'/dp/([A-Z0-9]{10})', html):
         asin = m.group(1)
         if asin in seen:
             continue
-        # Check ±600 chars around the ASIN link for a discount badge
-        ctx = html[max(0, m.start() - 600): m.start() + 600]
+        ctx = html[max(0, m.start() - 1200): m.start() + 1200]
         pct_m = re.search(r'(\d+)%\s*off', ctx, re.I)
         if not pct_m:
             continue
         pct = int(pct_m.group(1))
-        # Best-effort title: strip tags from the text before the ASIN
         raw = re.sub(r'<[^>]+>', ' ', html[max(0, m.start() - 300): m.start()])
         title = re.sub(r'\s+', ' ', raw).strip()[-120:]
         seen.add(asin)
@@ -165,6 +219,11 @@ def scrape_amazon_deals(min_pct=DEAL_MIN_DISCOUNT):
 
     pick = random.choice(qualified)
     log(f"  Selected ASIN={pick['asin']} ({pick['pct']}% off) — {pick['title'][:60]}")
+
+    # Enrich with clean title + bullet points + price from PA API
+    log("  Fetching product details via PA API...")
+    info = paapi_get_product_info(pick["asin"])
+    pick.update(info)   # adds title_text, bullets, price_text, orig_price_text if available
     return pick
 
 
@@ -178,21 +237,23 @@ def generate_veo_hook(deal, veo_key, keys, output_path):
     title   = deal.get("title_text") or deal.get("title", "product")
 
     veo_prompt = gemini_text(
-        f'Write a 1-sentence visual description for a 6-second cinematic hook VIDEO (no speech, no text overlays).\n'
+        f'Write a 1-sentence visual description for a 6-second cinematic hook VIDEO.\n'
         f'Product: "{title}"\n'
-        f'Discount: {deal["pct"]}% off\n'
-        f'Key benefits: {bullets}\n\n'
-        'Rules:\n'
-        '- Show the PAIN POINT this product solves — no product in frame yet\n'
-        '- Dramatic, high-energy, photorealistic, 9:16 vertical\n'
-        '- Feel like a thriller or documentary B-roll\n'
-        'Output ONLY the video prompt sentence.',
-        keys, max_tokens=120,
+        f'Key features: {bullets or "useful everyday product"}\n\n'
+        'Rules (ALL are mandatory):\n'
+        '- Show the product being USED in a real-life moment — product must appear in frame\n'
+        '- FACELESS: show only hands, wrists, or body from the shoulders/back — NO faces, NO eyes\n'
+        '- SILENT: no speech, no dialogue, no subtitles — cinematic ambient sound only\n'
+        '- Photorealistic, high-energy, 9:16 vertical, documentary B-roll style\n'
+        '- Match the product category: cameras → hands mounting on a wall outside; '
+        'headphones → hands unboxing; kitchen → hands using it; fitness → hands gripping it\n'
+        'Output ONLY the 1-sentence video prompt.',
+        keys[2:] if len(keys) > 2 else keys, max_tokens=120,
     )
     if not veo_prompt:
         veo_prompt = (
-            f"Dramatic cinematic close-up of someone struggling with the everyday problem "
-            f"that {title.split(',')[0]} solves, photorealistic, 9:16 vertical"
+            f"Close-up of hands confidently using {title.split(',')[0]}, "
+            f"cinematic lighting, photorealistic, faceless, 9:16 vertical, no speech"
         )
     log(f"  Veo prompt: {veo_prompt[:100]}")
 
@@ -368,6 +429,140 @@ def make_price_circle_clip(page_data, dst, td, ffmpeg, disc_label, font, secs=CI
     return True
 
 
+# ── PRICE CARD (fallback when no screenshot/price_box) ───────────────────────
+def make_price_card_clip(deal, gallery_urls, dst, td, ffmpeg, font, secs=CIRCLE_SECS):
+    """Price slide built entirely from deal data + PA API product image.
+    No screenshot or price_box needed. Animated red oval + strikethrough + flashing new price."""
+    from PIL import ImageFont
+    price_text = deal.get("price_text") or ""
+    orig_price = deal.get("orig_price_text") or ""
+    pct        = deal.get("pct", 0)
+    disc_label = f"{pct}% OFF"
+
+    if not price_text:
+        log("  price card: no price_text in deal — skipping"); return False
+    if not gallery_urls:
+        log("  price card: no images for background — skipping"); return False
+
+    # Background: first product image center-cropped to 9:16
+    bg_path = os.path.join(td, "price_bg.jpg")
+    try:
+        r = requests.get(gallery_urls[0], timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        open(bg_path, "wb").write(r.content)
+    except Exception as e:
+        log(f"  price card bg download failed: {e}"); return False
+
+    bg = Image.open(bg_path).convert("RGB")
+    bg_w, bg_h = bg.size
+    target_ar  = VIDEO_W / VIDEO_H
+    if bg_w / bg_h > target_ar:
+        crop_w = int(bg_h * target_ar)
+        bg = bg.crop(((bg_w - crop_w) // 2, 0, (bg_w + crop_w) // 2, bg_h))
+    else:
+        crop_h = int(bg_w / target_ar)
+        bg = bg.crop((0, (bg_h - crop_h) // 2, bg_w, (bg_h + crop_h) // 2))
+    bg = bg.resize((VIDEO_W, VIDEO_H), Image.LANCZOS)
+
+    # Dim the background so text is readable
+    dim = Image.new("RGBA", (VIDEO_W, VIDEO_H), (0, 0, 0, 140))
+    bg = Image.alpha_composite(bg.convert("RGBA"), dim).convert("RGB")
+
+    # Fonts
+    try:
+        sz_old   = 54
+        sz_new   = 96
+        sz_badge = 52
+        fnt_old   = ImageFont.truetype(font, sz_old)   if font else ImageFont.load_default()
+        fnt_new   = ImageFont.truetype(font, sz_new)   if font else ImageFont.load_default()
+        fnt_badge = ImageFont.truetype(font, sz_badge) if font else ImageFont.load_default()
+    except Exception:
+        fnt_old = fnt_new = fnt_badge = ImageFont.load_default()
+
+    # Price text areas (centered in middle of frame)
+    y_orig  = int(VIDEO_H * 0.38)
+    y_new   = int(VIDEO_H * 0.52)
+    y_badge = int(VIDEO_H * 0.74)
+
+    # Oval bounds (around the price area, will animate)
+    pad = 30
+    oval = (pad, y_orig - pad, VIDEO_W - pad, y_new + sz_new + pad)
+
+    total_frames = max(int(secs * FPS), 15)
+    draw_frames  = total_frames // 2   # first half: oval draws in
+    frames_dir   = os.path.join(td, "price_card_frames")
+    os.makedirs(frames_dir, exist_ok=True)
+
+    for i in range(total_frames):
+        frame = bg.copy()
+        draw  = ImageDraw.Draw(frame)
+
+        # Animated red oval
+        progress  = min(i / max(draw_frames, 1), 1.0)
+        end_angle = -90 + progress * 360
+        for w_off in range(4):
+            o = [oval[0]-w_off, oval[1]-w_off, oval[2]+w_off, oval[3]+w_off]
+            if i < draw_frames:
+                draw.arc(o, start=-90, end=end_angle, fill=(220, 20, 20), width=max(1, 7 - w_off*2))
+            else:
+                draw.ellipse(o, outline=(220, 20, 20), width=max(1, 7 - w_off*2))
+
+        # Original price with strikethrough (shown from first frame, strikethrough after oval completes)
+        if orig_price:
+            try:
+                bb = draw.textbbox((0, 0), orig_price, font=fnt_old)
+                tw = bb[2] - bb[0]
+            except Exception:
+                tw = VIDEO_W // 3
+            tx = (VIDEO_W - tw) // 2
+            draw.text((tx, y_orig), orig_price, font=fnt_old, fill=(200, 200, 200))
+            if i >= draw_frames:
+                mid_y = y_orig + sz_old // 2
+                draw.line([(tx - 5, mid_y), (tx + tw + 5, mid_y)], fill=(220, 20, 20), width=5)
+
+        # New price — flash on/off after oval completes
+        show_new = i < draw_frames or (((i - draw_frames) // 5) % 2 == 0)
+        if show_new:
+            try:
+                bb2 = draw.textbbox((0, 0), price_text, font=fnt_new)
+                tw2 = bb2[2] - bb2[0]
+            except Exception:
+                tw2 = VIDEO_W // 2
+            tx2 = (VIDEO_W - tw2) // 2
+            draw.text((tx2, y_new), price_text, font=fnt_new, fill=(255, 255, 255),
+                      stroke_width=3, stroke_fill=(0, 0, 0))
+
+        # Discount badge at bottom
+        badge_w, badge_h = 200, 60
+        bx0 = (VIDEO_W - badge_w) // 2
+        bx1 = bx0 + badge_w
+        by0 = y_badge - badge_h // 2
+        by1 = y_badge + badge_h // 2
+        draw.rectangle([(bx0, by0), (bx1, by1)], fill=(204, 12, 57))
+        try:
+            bb3 = draw.textbbox((0, 0), disc_label, font=fnt_badge)
+            bl_w = bb3[2] - bb3[0]
+            draw.text(((VIDEO_W - bl_w) // 2, by0 + 5), disc_label, font=fnt_badge, fill=(255, 255, 255))
+        except Exception:
+            draw.text((bx0 + 10, by0 + 5), disc_label, font=fnt_badge, fill=(255, 255, 255))
+
+        frame.save(os.path.join(frames_dir, f"pc_{i:05d}.png"))
+
+    raw = os.path.join(td, "price_card_raw.mp4")
+    try:
+        subprocess.run([ffmpeg, "-y"] + _FF_LOG + [
+            "-framerate", str(FPS),
+            "-i", os.path.join(frames_dir, "pc_%05d.png"),
+            "-pix_fmt", "yuv420p"] + _FF_ENCODE + ["-an", raw],
+            check=True, timeout=120)
+    except Exception as e:
+        log(f"  price card frames→video failed: {e}"); return False
+
+    os.rename(raw, dst)
+    log(f"  ✓ price card clip ({secs:.1f}s, {os.path.getsize(dst):,} bytes)")
+    return True
+
+
 # ── VO GENERATION ─────────────────────────────────────────────────────────────
 def generate_hook_vo(deal, keys):
     """Generate humorous VO script and Gemini TTS audio. Returns (script, wav_bytes)."""
@@ -379,21 +574,34 @@ def generate_hook_vo(deal, keys):
         if deal.get("orig_price_text"):
             price_info += f" (was {deal['orig_price_text']})"
 
+    # Pick a random style so each run sounds different even for the same product
+    style = random.choice([
+        "SARCASTIC and self-aware — like you can't believe how good this deal is",
+        "OVER-THE-TOP infomercial parody — think 90s late-night TV but self-aware",
+        "DEADPAN and dry — deliver the deal like it's the most obvious thing in the world",
+        "STORYTELLING — set up a relatable 1-sentence scenario, then reveal the deal",
+        "DISBELIEVING — you found this price and you're still not sure it's real",
+        "HIGH-ENERGY HYPE — short punchy sentences, maximum excitement",
+    ])
+
+    # Use keys[2:] for text + TTS to avoid depleted key[0] and Veo billing key[1]
+    text_keys = keys[2:] if len(keys) > 2 else keys
+
     script = gemini_text(
         f'Product: "{title}"\n'
         f'{price_info}\n'
         f'Discount: {deal["pct"]}% off — LIMITED TIME DEAL\n'
         f'Features:\n{bullets}\n\n'
-        "Write a 40-55 word voiceover script for a social media reel.\n"
-        "Style: HUMOROUS and WITTY — make the viewer laugh AND want to buy.\n"
+        f"Write a 40-55 word voiceover script for a social media reel.\n"
+        f"Style: {style}\n"
         "Rules:\n"
-        "- Open with a funny relatable hook (not 'Are you looking for')\n"
-        "- Mention the product and its main benefit in a punchy, fun way\n"
-        "- End with urgency CTA: something like 'limited time deal — link below!'\n"
-        "- Write for speech: smooth, comma-separated, reads in ~12 seconds\n"
+        "- Open with a hook that is NOT 'Are you looking for'\n"
+        "- Name the product and its main benefit in a punchy way\n"
+        "- End with urgency CTA: e.g. 'limited time — link below!'\n"
+        "- Write for speech: smooth pacing, reads in ~12 seconds\n"
         "- No hashtags, no URLs, no discount codes\n"
         "Return ONLY the script text.",
-        keys, max_tokens=200,
+        text_keys, max_tokens=200,
     )
     if not script:
         short = title.split(",")[0]
@@ -403,7 +611,7 @@ def generate_hook_vo(deal, keys):
             f"and never again. Limited time — link below before it's gone!"
         )
     log(f"  VO: {script[:80]}…")
-    wav = gemini_tts(script, keys)
+    wav = gemini_tts(script, text_keys)
     return script, wav
 
 
@@ -450,9 +658,16 @@ def build_hook_reel(deal, page_data, veo_path, script, wav_bytes, ffmpeg, font, 
     if not segs:
         log("  ⚠️ All gallery segments failed"); return None
 
-    # Price circle slide
+    # Price circle slide — try screenshot-based first, fall back to data-driven card
     circle_dst = os.path.join(td, "price_circle.mp4")
+    circle_ok  = False
     if page_data and make_price_circle_clip(page_data, circle_dst, td, ffmpeg, disc_label, font):
+        circle_ok = True
+    if not circle_ok:
+        # Fallback: build price card from deal data + first product image (no screenshot needed)
+        if make_price_card_clip(deal, gallery_urls, circle_dst, td, ffmpeg, font):
+            circle_ok = True
+    if circle_ok:
         segs.append(circle_dst)
 
     # 3. Concatenate carousel
@@ -464,6 +679,21 @@ def build_hook_reel(deal, page_data, veo_path, script, wav_bytes, ffmpeg, font, 
                    + ["-f", "concat", "-safe", "0", "-i", list_f, "-c", "copy", carousel],
                    check=True, timeout=120)
     carousel_dur = probe_duration(carousel, ffmpeg)
+
+    # Extend carousel if VO is longer — freeze last frame rather than cutting the VO
+    if vo_dur and carousel_dur < vo_dur - 0.5:
+        deficit  = vo_dur - carousel_dur + 1.0   # 1s breathing room after VO ends
+        log(f"  VO ({vo_dur:.1f}s) > carousel ({carousel_dur:.1f}s) — extending by {deficit:.1f}s")
+        extended = os.path.join(td, "carousel_ext.mp4")
+        subprocess.run([ffmpeg, "-y"] + _FF_LOG + [
+            "-i", carousel,
+            "-filter_complex", f"[0:v]tpad=stop_mode=clone:stop_duration={deficit:.2f}[v]",
+            "-map", "[v]",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p", "-an",
+            extended], check=True, timeout=120)
+        carousel     = extended
+        carousel_dur = probe_duration(carousel, ffmpeg)
+        log(f"  Extended carousel: {carousel_dur:.1f}s")
 
     # 4. Mix VO over carousel
     c_audio = os.path.join(td, "carousel_audio.mp4")

@@ -390,6 +390,53 @@ def _paapi_get_images(asin, tld="com", max_imgs=6):
         return []
 
 
+def paapi_get_product_info(asin, tld="com"):
+    """Fetch clean title + bullet features + price from PA API. Returns dict (empty on failure)."""
+    client = _get_paapi_client()
+    if not client:
+        return {}
+    try:
+        from paapi5_python_sdk.get_items_request import GetItemsRequest
+        from paapi5_python_sdk.get_items_resource import GetItemsResource
+        from paapi5_python_sdk.partner_type import PartnerType
+        partner_tag = "fdcanada00-20" if tld == "ca" else "freshdeal00cc-20"
+        request = GetItemsRequest(
+            partner_tag=partner_tag,
+            partner_type=PartnerType.ASSOCIATES,
+            marketplace=f"www.amazon.{tld}",
+            item_ids=[asin],
+            resources=[
+                GetItemsResource.ITEM_INFO_TITLE,
+                GetItemsResource.ITEM_INFO_FEATURES,
+                GetItemsResource.OFFERS_LISTINGS_PRICE,
+                GetItemsResource.OFFERS_LISTINGS_SAVING_BASIS,
+            ],
+        )
+        response = client.get_items(request)
+        if not response or not response.items_result or not response.items_result.items:
+            return {}
+        item = response.items_result.items[0]
+        info = {}
+        if item.item_info and item.item_info.title:
+            info['title_text'] = (item.item_info.title.display_value or '').strip()
+        if item.item_info and item.item_info.features:
+            info['bullets'] = [f for f in (item.item_info.features.display_values or []) if f][:5]
+        # Current price
+        try:
+            listing = item.offers.listings[0]
+            info['price_text'] = listing.price.display_amount or ''
+            if listing.saving_basis:
+                info['orig_price_text'] = listing.saving_basis.display_amount or ''
+        except Exception:
+            pass
+        log(f"  PA-API info: title={'yes' if info.get('title_text') else 'no'} | "
+            f"bullets={len(info.get('bullets', []))} | price={info.get('price_text', '-')}")
+        return info
+    except Exception as e:
+        log(f"  PA-API product info failed: {e}")
+        return {}
+
+
 def capture_page(asin, td, ffmpeg, tld="com"):
     """Return (gallery_image_urls, screenshot_path, img_w, img_h, price_box, reviews_box)."""
     # PA API is primary for images — reliable, no bot-detection
