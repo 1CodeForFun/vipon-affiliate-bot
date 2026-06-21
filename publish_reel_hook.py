@@ -82,40 +82,26 @@ def _parse_deals_from_html(html):
     results = []
     seen = set()
 
-    # Primary: deal card containers (data-csa-c-item-type="deal")
-    cards = soup.find_all(attrs={'data-csa-c-item-type': 'deal'})
-    if not cards:
-        # Fallback: any element that has both data-asin and a /dp/ link inside
-        cards = [el for el in soup.find_all(attrs={'data-asin': True})
-                 if el.find('a', href=re.compile(r'/dp/'))]
-
-    for card in cards:
-        asin = card.get('data-asin', '').strip()
+    # data-asin is present on deal card containers in the rendered Selenium HTML.
+    # Search within each card's full text for the discount badge ("X% off").
+    for el in soup.find_all(attrs={'data-asin': True}):
+        asin = el.get('data-asin', '').strip()
         if not asin or len(asin) != 10 or not re.match(r'^[A-Z0-9]{10}$', asin) or asin in seen:
             continue
 
-        # Discount %: look for "X% off" in span text within the card
-        pct = 0
-        for span in card.find_all('span'):
-            t = (span.get_text(strip=True) or '')
-            m = re.match(r'^(\d+)\s*%\s*off', t, re.I)
-            if m:
-                pct = int(m.group(1))
-                break
-        if not pct:
-            m = re.search(r'(\d+)\s*%\s*off', card.get_text(' ', strip=True), re.I)
-            if m:
-                pct = int(m.group(1))
-        if not pct:
+        card_text = el.get_text(' ', strip=True)
+        m = re.search(r'(\d+)\s*%\s*off', card_text, re.I)
+        if not m:
             continue
+        pct = int(m.group(1))
 
-        # Title: prefer h2/h3 heading, then link text
+        # Title: prefer h2/h3 heading, then product link text
         title = ''
-        h = card.find(['h2', 'h3', 'h1'])
+        h = el.find(['h2', 'h3'])
         if h:
             title = re.sub(r'\s+', ' ', h.get_text(' ', strip=True))[:120]
         if not title:
-            link = card.find('a', href=re.compile(r'/dp/' + asin))
+            link = el.find('a', href=re.compile(r'/dp/'))
             if link:
                 title = re.sub(r'\s+', ' ', link.get_text(' ', strip=True))[:120]
 
