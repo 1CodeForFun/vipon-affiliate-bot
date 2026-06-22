@@ -75,58 +75,39 @@ def is_safe(deal):
 # Tightened for: FACELESS, MID-ACTION TENSION, PRODUCT-IN-USE, NO SPEECH,
 # and a thumbnail-worthy curiosity peak.
 # ─────────────────────────────────────────────────────────────────────────────
-META_PROMPT = """You are a viral short-form video director writing a Veo video prompt for the \
-OPENING HOOK of a product deal reel. The hook must make someone STOP scrolling in the first second.
+META_PROMPT = """You are a viral short-form video director writing a Veo video prompt for the OPENING HOOK of a product deal reel. The hook must make someone STOP scrolling within the first second.
 
 PRODUCT: "{title}"
 {features}
 
-Write the Veo prompt in the EXACT STRUCTURED FORMAT below. Do NOT collapse it into one flowing \
-sentence — Veo follows labeled, structured prompts far more reliably. Fill every field with vivid, \
-concrete, photorealistic detail specific to THIS product. The "Avoid" block is MANDATORY and must \
-appear verbatim with the listed items.
+Write the Veo prompt in the EXACT STRUCTURED FORMAT below. Do NOT collapse it into one flowing sentence — Veo follows labeled, structured prompts far more reliably. Fill every field with vivid, concrete, photorealistic detail specific to THIS product. Open IN MEDIAS RES: the clip must START already mid-action at the peak of a developing situation — never a calm, static or establishing shot. The "Avoid" block is MANDATORY and must appear verbatim with the listed items.
 
 OUTPUT THIS EXACT TEMPLATE (keep the labels):
 
-Scene: <a charged real-life moment where the product is actively in use; describe the setting, the \
-faceless person, and the product clearly>
-Peak moment (~3s): <the single most dramatic, curiosity-driving instant — the frame that must work \
-as a thumbnail; freeze-worthy tension, something happening or about to>
-Subject framing: faceless — <choose: shot from directly behind / over-the-shoulder / hands and \
-wrists only / silhouette / cropped at the shoulders>; the product is held or used by the hands
-Camera: <specific movement and framing that keeps the face hidden — e.g. tight handheld push-in, \
-low over-shoulder, fast whip-pan into the action>
+Scene: <a charged real-life moment where the product is actively in use; describe the setting, the faceless person, and the product clearly>
+First frame (0s): <the literal opening frame — already mid-motion at a moment of peak tension, something actively happening or about to snap; NO calm setup, NO establishing wide, NO product sitting still>
+Peak moment (~3s): <the single most dramatic, curiosity-driving instant — the frame that must work as a thumbnail; freeze-worthy tension, something happening or about to>
+Subject framing: faceless — <choose: shot from directly behind / over-the-shoulder / hands and wrists only / silhouette / cropped at the shoulders>; the product is held or used by the hands
+Camera: <specific movement and framing that keeps the face hidden — e.g. tight handheld push-in, low over-shoulder, fast whip-pan into the action>
 Lighting & mood: <dramatic, specific lighting that heightens tension>
-Opening sound (0-1s): <a sudden, weird, LOUD non-musical sound effect that fits the scene and jolts \
-a scrolling viewer to stop — e.g. a sharp whoosh, glass shatter, metallic clang, deep bass boom, \
-record scratch, snapping/cracking; it must NOT be speech>
-Pacing: fast, escalating tension across 6 seconds, peaking around second 3
-Avoid: human faces, eyes or facial expressions; on-screen text, captions or subtitles; dialogue, \
-speech or talking; calm, static or staged "lifestyle" shots; brand logos or watermarks; the product \
-sitting unused
-Style: photorealistic, cinematic, 9:16 vertical; loud striking sound design with a jarring sound in \
-the first second; no spoken words
+Opening sound (0-2s): <a sudden, weird, LOUD non-musical sound effect in the first one to two seconds that fits the scene and jolts a scrolling viewer to stop — e.g. a sharp whoosh, glass shatter, metallic clang, deep bass boom, record scratch, snapping/cracking; it must NOT be speech>
+Pacing: start HOT on the very first frame, then escalate across 6 seconds and peak around second 3 — no slow build-up
+Avoid: human faces, eyes or facial expressions; on-screen text, captions or subtitles; dialogue, speech or talking; calm, static or staged "lifestyle" shots; brand logos or watermarks; the product sitting unused
+Style: photorealistic, cinematic, 9:16 vertical; loud striking sound design with a jarring sound in the first second; no spoken words
 
 GOOD EXAMPLE (Outdoor security camera):
-Scene: A homeowner at dusk on a quiet suburban porch, hands pressing a small white security camera \
-onto the wall beside the front door as the street darkens behind them.
-Peak moment (~3s): The camera's motion spotlight SNAPS on, harshly lighting a hooded figure frozen \
-mid-step at the open back gate, caught in the act.
-Subject framing: faceless — low over-the-shoulder from directly behind the homeowner; their hands \
-mount and angle the camera.
+Scene: A homeowner at dusk on a quiet suburban porch, hands pressing a small white security camera onto the wall beside the front door as the street darkens behind them.
+First frame (0s): hands already jamming the camera against the wall, knuckles tense, the mounting bracket half-twisted mid-turn.
+Peak moment (~3s): The camera's motion spotlight SNAPS on, harshly lighting a hooded figure frozen mid-step at the open back gate, caught in the act.
+Subject framing: faceless — low over-the-shoulder from directly behind the homeowner; their hands mount and angle the camera.
 Camera: tight handheld over-the-shoulder, a quick push-in toward the gate as the light triggers.
 Lighting & mood: deep blue dusk, then a harsh white spotlight burst; tense, alarming.
-Opening sound (0-1s): a sudden loud electronic ALARM CHIRP and motion-sensor beep bursting out of \
-near silence.
-Pacing: fast, escalating tension across 6 seconds, peaking around second 3.
-Avoid: human faces, eyes or facial expressions; on-screen text, captions or subtitles; dialogue, \
-speech or talking; calm, static or staged "lifestyle" shots; brand logos or watermarks; the product \
-sitting unused.
-Style: photorealistic, cinematic, 9:16 vertical; loud striking sound design with a jarring sound in \
-the first second; no spoken words.
+Opening sound (0-2s): a sudden loud electronic ALARM CHIRP and motion-sensor beep bursting out of near silence.
+Pacing: start HOT on the very first frame, then escalate across 6 seconds and peak around second 3.
+Avoid: human faces, eyes or facial expressions; on-screen text, captions or subtitles; dialogue, speech or talking; calm, static or staged "lifestyle" shots; brand logos or watermarks; the product sitting unused.
+Style: photorealistic, cinematic, 9:16 vertical; loud striking sound design with a jarring sound in the first second; no spoken words.
 
-Now produce the structured prompt for the PRODUCT above. Output ONLY the filled template — \
-no preamble, no explanation, no markdown bold."""
+Now produce the structured prompt for the PRODUCT above. Output ONLY the filled template — no preamble, no explanation, no markdown bold."""
 
 
 BUILD_KEY_INDEX = 1   # geminikey.txt line 2 = Veo/build key — skip it for free text gen
