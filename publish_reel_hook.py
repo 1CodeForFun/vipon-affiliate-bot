@@ -185,16 +185,32 @@ def _scrape_url(url):
 # Products whose images could be explicit or inappropriate for family-friendly feeds
 _EXPLICIT_KEYWORDS = {
     "bra", "bras", "bralette", "bikini", "bikinis", "panty", "panties", "underwear",
-    "underwire", "lingerie", "thong", "thongs", "corset", "negligee", "g-string",
-    "camisole", "shapewear", "swimsuit", "swimwear", "bodysuit", "boyshort", "boyshorts",
+    "underwire", "underwired", "wirefree", "wirefree", "brassiere", "lingerie",
+    "thong", "thongs", "corset", "negligee", "g-string", "camisole", "shapewear",
+    "swimsuit", "swimwear", "bodysuit", "boyshort", "boyshorts",
 }
 
+# Over-saturated categories — the deals page is flooded with the security-camera /
+# doorbell cluster (Blink, Arlo, Ring, etc.), so blocking them stops the random picker
+# from statistically over-selecting the same product type every run.
+_SKIP_CATEGORY_KEYWORDS = {
+    "doorbell", "blink", "floodlight", "arlo", "wyze", "eufy", "surveillance", "cctv",
+}
+_CAM_WORDS = {"camera", "cameras", "cam", "cams"}
+
 def _is_safe(deal):
-    """Return False if the deal title contains any explicit/adult keyword."""
+    """Return False if the title has a restricted (explicit) keyword OR belongs to an
+    over-saturated category (doorbell / security camera / floodlight cam)."""
     words = set(re.findall(r'\b\w+\b', deal.get("title", "").lower()))
     blocked = words & _EXPLICIT_KEYWORDS
     if blocked:
-        log(f"  Skipping {deal['asin']} — blocked keyword(s): {blocked}")
+        log(f"  Skipping {deal['asin']} — restricted keyword(s): {blocked}")
+        return False
+    over = words & _SKIP_CATEGORY_KEYWORDS
+    if not over and "security" in words and (words & _CAM_WORDS):
+        over = {"security camera"}
+    if over:
+        log(f"  Skipping {deal['asin']} — over-saturated category: {over}")
         return False
     return True
 
@@ -749,7 +765,9 @@ def build_hook_reel(deal, page_data, veo_path, script, wav_bytes, ffmpeg, font, 
                           "-c:v", "copy", "-c:a", "aac", "-shortest", c_audio],
                        check=True, timeout=120)
 
-    # 5. Stitch: Veo hook (FX@15%) + carousel+VO
+    # 5. Stitch: Veo hook then carousel. Audio is SEQUENTIAL — the hook's own Veo
+    #    audio plays at 100% (the jarring pattern-interrupt sound that stops the
+    #    scroll), THEN the carousel/VO audio at 100%. No ducking/overlap.
     out = os.path.join(td, "final.mp4")
     if veo_path and os.path.exists(str(veo_path)):
         hook_dur  = probe_duration(veo_path, ffmpeg)
@@ -758,13 +776,18 @@ def build_hook_reel(deal, page_data, veo_path, script, wav_bytes, ffmpeg, font, 
             "-i", str(veo_path), "-i", c_audio,
             "-filter_complex",
             "[0:v][1:v]concat=n=2:v=1:a=0[vout];"
-            f"[0:a]apad=whole_dur={total_dur:.2f},volume=0.15[fx];"
-            "[1:a]volume=1.0[ca];"
-            "[fx][ca]amix=inputs=2:duration=longest[aout]",
+            # hook audio @100%, trimmed/padded to exactly the hook length
+            f"[0:a]aformat=sample_rates=44100:channel_layouts=stereo,apad,"
+            f"atrim=end={hook_dur:.3f},asetpts=PTS-STARTPTS,volume=1.0[ha];"
+            # carousel+VO audio @100%
+            "[1:a]aformat=sample_rates=44100:channel_layouts=stereo,"
+            "asetpts=PTS-STARTPTS,volume=1.0[ca];"
+            # play hook audio first, then VO audio; pad/trim to full video length
+            f"[ha][ca]concat=n=2:v=0:a=1,apad,atrim=end={total_dur:.3f}[aout]",
             "-map", "[vout]", "-map", "[aout]",
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
             "-c:a", "aac", "-b:a", "128k",
-            "-pix_fmt", "yuv420p", "-shortest", out],
+            "-pix_fmt", "yuv420p", out],
             check=True, timeout=300)
     else:
         log("  ⚠️ No Veo hook — publishing carousel only")

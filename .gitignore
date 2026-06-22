@@ -24,3 +24,14 @@ venv/
 *.wav
 /tmp/
 temp/
+
+# Loose credential files (never commit)
+client_secret.json
+token_youtube_ultafind.json
+
+# Local test output dirs + helpers (not part of the repo)
+reel_output/
+hook_test_output/
+scraper_test_output/
+localfont.ttf
+paapi5_python_sdk/
