@@ -270,25 +270,79 @@ def _extract_hook_thumbnail(hook_path, td, ffmpeg):
     return None
 
 
+# Meta-prompt that tells Gemini how to write the actual Veo video prompt. Iterated
+# locally in test_hook_prompt.py until the output was consistently strong, then ported
+# here verbatim. Tightened for: FACELESS, MID-ACTION TENSION, PRODUCT-IN-USE, NO SPEECH,
+# a loud opening pattern-interrupt sound, and a thumbnail-worthy curiosity peak (~3s).
+# Keep in sync with test_hook_prompt.py::META_PROMPT.
+_VEO_META_PROMPT = """You are a viral short-form video director writing a Veo video prompt for the \
+OPENING HOOK of a product deal reel. The hook must make someone STOP scrolling in the first second.
+
+PRODUCT: "{title}"
+{features}
+
+Write the Veo prompt in the EXACT STRUCTURED FORMAT below. Do NOT collapse it into one flowing \
+sentence — Veo follows labeled, structured prompts far more reliably. Fill every field with vivid, \
+concrete, photorealistic detail specific to THIS product. The "Avoid" block is MANDATORY and must \
+appear verbatim with the listed items.
+
+OUTPUT THIS EXACT TEMPLATE (keep the labels):
+
+Scene: <a charged real-life moment where the product is actively in use; describe the setting, the \
+faceless person, and the product clearly>
+Peak moment (~3s): <the single most dramatic, curiosity-driving instant — the frame that must work \
+as a thumbnail; freeze-worthy tension, something happening or about to>
+Subject framing: faceless — <choose: shot from directly behind / over-the-shoulder / hands and \
+wrists only / silhouette / cropped at the shoulders>; the product is held or used by the hands
+Camera: <specific movement and framing that keeps the face hidden — e.g. tight handheld push-in, \
+low over-shoulder, fast whip-pan into the action>
+Lighting & mood: <dramatic, specific lighting that heightens tension>
+Opening sound (0-1s): <a sudden, weird, LOUD non-musical sound effect that fits the scene and jolts \
+a scrolling viewer to stop — e.g. a sharp whoosh, glass shatter, metallic clang, deep bass boom, \
+record scratch, snapping/cracking; it must NOT be speech>
+Pacing: fast, escalating tension across 6 seconds, peaking around second 3
+Avoid: human faces, eyes or facial expressions; on-screen text, captions or subtitles; dialogue, \
+speech or talking; calm, static or staged "lifestyle" shots; brand logos or watermarks; the product \
+sitting unused
+Style: photorealistic, cinematic, 9:16 vertical; loud striking sound design with a jarring sound in \
+the first second; no spoken words
+
+GOOD EXAMPLE (Outdoor security camera):
+Scene: A homeowner at dusk on a quiet suburban porch, hands pressing a small white security camera \
+onto the wall beside the front door as the street darkens behind them.
+Peak moment (~3s): The camera's motion spotlight SNAPS on, harshly lighting a hooded figure frozen \
+mid-step at the open back gate, caught in the act.
+Subject framing: faceless — low over-the-shoulder from directly behind the homeowner; their hands \
+mount and angle the camera.
+Camera: tight handheld over-the-shoulder, a quick push-in toward the gate as the light triggers.
+Lighting & mood: deep blue dusk, then a harsh white spotlight burst; tense, alarming.
+Opening sound (0-1s): a sudden loud electronic ALARM CHIRP and motion-sensor beep bursting out of \
+near silence.
+Pacing: fast, escalating tension across 6 seconds, peaking around second 3.
+Avoid: human faces, eyes or facial expressions; on-screen text, captions or subtitles; dialogue, \
+speech or talking; calm, static or staged "lifestyle" shots; brand logos or watermarks; the product \
+sitting unused.
+Style: photorealistic, cinematic, 9:16 vertical; loud striking sound design with a jarring sound in \
+the first second; no spoken words.
+
+Now produce the structured prompt for the PRODUCT above. Output ONLY the filled template — \
+no preamble, no explanation, no markdown bold."""
+
+
 def generate_veo_hook(deal, veo_key, keys, output_path):
     """Generate 6s Veo hook video using veo_key (billing key from ~/geminikey.txt index 1).
     keys is used only for the cheap text prompt. Returns path on success, None on failure."""
     bullets = "; ".join(deal.get("bullets", [])[:3])
     title   = deal.get("title_text") or deal.get("title", "product")
+    features = f"KEY FEATURES: {bullets}" if bullets else ""
 
+    # Structured meta-prompt (ported from test_hook_prompt.py). A labeled, multi-field
+    # template — NOT one flowing sentence — because Veo follows structured prompts far
+    # more reliably, and it lets us pin the mandatory "Avoid" block (faces / speech /
+    # on-screen text) plus a thumbnail-worthy peak moment around second 3.
     veo_prompt = gemini_text(
-        f'Write a 1-sentence visual description for a 6-second cinematic hook VIDEO.\n'
-        f'Product: "{title}"\n'
-        f'Key features: {bullets or "useful everyday product"}\n\n'
-        'Rules (ALL are mandatory):\n'
-        '- Show the product being USED in a real-life moment — product must appear in frame\n'
-        '- FACELESS: show only hands, wrists, or body from the shoulders/back — NO faces, NO eyes\n'
-        '- SILENT: no speech, no dialogue, no subtitles — cinematic ambient sound only\n'
-        '- Photorealistic, high-energy, 9:16 vertical, documentary B-roll style\n'
-        '- Match the product category: cameras → hands mounting on a wall outside; '
-        'headphones → hands unboxing; kitchen → hands using it; fitness → hands gripping it\n'
-        'Output ONLY the 1-sentence video prompt.',
-        keys[2:] if len(keys) > 2 else keys, max_tokens=120,
+        _VEO_META_PROMPT.format(title=title, features=features),
+        keys[2:] if len(keys) > 2 else keys, max_tokens=700,
     )
     if not veo_prompt:
         veo_prompt = (
