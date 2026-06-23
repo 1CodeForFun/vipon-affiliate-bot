@@ -321,6 +321,10 @@ out.reviews = abs(document.querySelector('#averageCustomerReviews')
 out.rating       = txt(document.querySelector("[data-hook='rating-out-of-text']")
                  || document.querySelector('#acrPopover'));
 out.rating_count = txt(document.querySelector('#acrCustomerReviewText'));
+// Diagnostic: when price_box is missing, what did Amazon actually serve to this IP?
+// (interstitial / "continue shopping" / robot-check vs. a normal product page)
+out.doc_title = (document.title || '').slice(0, 120);
+out.body_head = (document.body ? (document.body.innerText || '').slice(0, 300) : '');
 return out;
 """
 
@@ -474,6 +478,9 @@ def capture_page(asin, td, ffmpeg, tld="com"):
         social = {"bought": data.get("bought", ""), "rating": data.get("rating", ""),
                   "rating_count": data.get("rating_count", "")}
         log(f"  gallery imgs: {len(imgs)} | price box: {'y' if price_box else 'n'} | reviews box: {'y' if rev_box else 'n'}")
+        if not price_box:
+            log(f"  ⚠️ price_box MISSING — page served: title={data.get('doc_title','')!r} | "
+                f"body[:140]={(data.get('body_head','') or '')[:140]!r}")
         log(f"  social: bought='{social['bought']}' rating='{social['rating']}' count='{social['rating_count']}'")
         metrics = driver.execute_cdp_cmd("Page.getLayoutMetrics", {})
         pw = math.ceil(metrics["cssContentSize"]["width"])

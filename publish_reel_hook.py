@@ -990,6 +990,17 @@ def main():
         log("\n[7] Publishing to platforms...")
         publish_platforms(video_url, deal, vo_script, thumbnail_path=thumb_path)
 
+        # 8. Extend to TikTok + Pinterest via Buffer. Fully fail-safe: wrapped so any
+        #    Buffer error (auth, schema, rate limit) can NEVER affect the FB/IG/YT posts
+        #    above. Disable by setting POST_BUFFER=0.
+        if os.environ.get("POST_BUFFER", "1") != "0":
+            log("\n[8] Publishing to TikTok + Pinterest via Buffer...")
+            try:
+                from buffer_publish import post_to_buffer
+                post_to_buffer(video_url, deal, vo_script)
+            except Exception as e:
+                log(f"  Buffer step skipped (non-fatal): {e}")
+
     log("=== publish_reel_hook.py done ===")
 
 

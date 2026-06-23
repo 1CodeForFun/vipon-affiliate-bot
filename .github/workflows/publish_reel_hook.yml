@@ -64,6 +64,7 @@ jobs:
           [ -f secrets/geminipro.txt  ]  && cp secrets/geminipro.txt  ~/geminipro.txt  || true
           [ -f secrets/geminikey.txt  ]  && cp secrets/geminikey.txt  ~/geminikey.txt  || true
           [ -f secrets/geminikeys.txt ]  && cp secrets/geminikeys.txt ~/geminikeys.txt || true
+          [ -f secrets/buffer_API_Key.txt ] && cp secrets/buffer_API_Key.txt ~/buffer_API_Key.txt || true
 
       - name: Run hook reel publisher
         env:
