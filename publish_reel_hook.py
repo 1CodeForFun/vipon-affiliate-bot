@@ -28,6 +28,7 @@ from reel_concept_test import (
     cloud_upload, _read_gemini_keys, _which_ffmpeg, _find_font,
     gemini_text, gemini_tts, gen_beats, probe_duration, pcm_to_wav,
     _esc, _chrome_bits, capture_page, paapi_get_product_info,
+    _handle_continue_shopping,
     VIDEO_W, VIDEO_H, FPS, _FF_LOG, _FF_ENCODE,
 )
 from vipon_publisher import (
@@ -164,6 +165,7 @@ def _scrape_url(url):
     try:
         driver.get(url)
         time.sleep(8)
+        _handle_continue_shopping(driver, url, settle=8)   # click past the 'continue shopping' gate
         snapshots = [driver.page_source]
         for px in (1500, 3000, 5000, 7000, 9000, 12000, 15000, 18000):
             driver.execute_script(f"window.scrollTo(0, {px})")

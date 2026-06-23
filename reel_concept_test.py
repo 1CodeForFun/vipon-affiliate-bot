@@ -441,6 +441,47 @@ def paapi_get_product_info(asin, tld="com"):
         return {}
 
 
+def _handle_continue_shopping(driver, url, settle=5, tries=2):
+    """Amazon intermittently serves a 'Click the button below to continue shopping'
+    interstitial (especially to datacenter IPs) instead of the requested page — it has
+    no price element and no product cards, which is why price_box / deals come back empty.
+    Click the button (it submits a form that clears the gate / sets a cookie), then
+    re-request `url`. Returns True if it had to intervene. Safe no-op on a normal page."""
+    from selenium.webdriver.common.by import By
+    intervened = False
+    for _ in range(tries):
+        try:
+            body = (driver.find_element(By.TAG_NAME, "body").text or "")[:400].lower()
+        except Exception:
+            body = ""
+        if "continue shopping" not in body:
+            break
+        intervened = True
+        log("  ↪ 'Continue shopping' interstitial — clicking through")
+        for by, sel in (
+            (By.CSS_SELECTOR, "button[alt='Continue shopping']"),
+            (By.XPATH, "//button[contains(normalize-space(.),'Continue shopping')]"),
+            (By.XPATH, "//a[contains(normalize-space(.),'Continue shopping')]"),
+            (By.CSS_SELECTOR, "form button, .a-button-input, button.a-button-text"),
+        ):
+            els = driver.find_elements(by, sel)
+            if els:
+                try:
+                    els[0].click()
+                except Exception:
+                    try:
+                        driver.execute_script("arguments[0].click();", els[0])
+                    except Exception:
+                        continue
+                break
+        time.sleep(2)
+        try:
+            driver.get(url); time.sleep(settle)
+        except Exception:
+            pass
+    return intervened
+
+
 def capture_page(asin, td, ffmpeg, tld="com"):
     """Return (gallery_image_urls, screenshot_path, img_w, img_h, price_box, reviews_box)."""
     # PA API is primary for images — reliable, no bot-detection
@@ -466,8 +507,10 @@ def capture_page(asin, td, ffmpeg, tld="com"):
     social = {"bought": "", "rating": "", "rating_count": ""}
     try:
         driver.set_window_size(440, 950)
-        driver.get(f"https://www.amazon.{tld}/dp/{asin}?th=1&psc=1")
+        url = f"https://www.amazon.{tld}/dp/{asin}?th=1&psc=1"
+        driver.get(url)
         time.sleep(5)
+        _handle_continue_shopping(driver, url)   # click past the 'continue shopping' gate
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight*0.55);"); time.sleep(1.3)
         driver.execute_script("window.scrollTo(0,0);"); time.sleep(0.7)
         data = driver.execute_script(_GALLERY_JS) or {}
