@@ -309,15 +309,6 @@ Style: photorealistic, cinematic, 9:16 vertical; loud striking sound design with
 
 Now produce the structured prompt for the PRODUCT above. Output ONLY the filled template — no preamble, no explanation, no markdown bold."""
 
-# Model-level reinforcement of the Avoid block — passed to Veo as negative_prompt so the
-# constraints hold even if the generated text prompt softens them.
-_VEO_NEGATIVE_PROMPT = (
-    "human faces, eyes, facial expressions; on-screen text, captions, subtitles; "
-    "dialogue, speech, talking, voiceover; brand logos, watermarks; "
-    "calm, static or staged lifestyle shots; the product sitting unused; "
-    "slow establishing shot, empty opening frame"
-)
-
 
 def generate_veo_hook(deal, veo_key, keys, output_path):
     """Generate 6s Veo hook video using veo_key (billing key from ~/geminikey.txt index 1).
@@ -341,18 +332,32 @@ def generate_veo_hook(deal, veo_key, keys, output_path):
         )
     log(f"  Veo prompt: {veo_prompt[:100]}")
 
+    # veo-3.1-lite rejects some optional config fields server-side even though the SDK
+    # accepts them (e.g. negative_prompt → 400 INVALID_ARGUMENT). Try the cost-optimized
+    # config first (resolution="720p"), then fall back to the minimal known-good config so
+    # one unsupported field can never silently lose the whole hook.
+    veo_configs = [
+        gtypes.GenerateVideosConfig(
+            aspect_ratio="9:16", duration_seconds=HOOK_SECS, resolution="720p",
+        ),
+        gtypes.GenerateVideosConfig(
+            aspect_ratio="9:16", duration_seconds=HOOK_SECS,
+        ),
+    ]
     try:
         client    = genai.Client(api_key=veo_key)
-        operation = client.models.generate_videos(
-            model=VEO_MODEL,
-            prompt=veo_prompt,
-            config=gtypes.GenerateVideosConfig(
-                aspect_ratio="9:16",
-                duration_seconds=HOOK_SECS,
-                resolution="720p",          # Lite defaults to 1080p — 720p halves the per-second cost
-                negative_prompt=_VEO_NEGATIVE_PROMPT,
-            ),
-        )
+        operation = None
+        for i, cfg in enumerate(veo_configs):
+            try:
+                operation = client.models.generate_videos(
+                    model=VEO_MODEL, prompt=veo_prompt, config=cfg)
+                break
+            except Exception as e:
+                last = (i == len(veo_configs) - 1)
+                if "INVALID_ARGUMENT" in str(e) and not last:
+                    log(f"  Veo config rejected ({str(e)[:120]}) — retrying minimal config")
+                    continue
+                raise
         log("  Veo: waiting for generation (polls every 20s)...")
         while not operation.done:
             time.sleep(20)
