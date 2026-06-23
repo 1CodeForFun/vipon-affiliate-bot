@@ -986,6 +986,17 @@ def main():
             raise RuntimeError("Cloudinary upload failed")
         log(f"  URL: {video_url}")
 
+        # Upload the hook's peak frame (3s) as a public image so EVERY platform shows the
+        # same peak-of-hook still: YouTube thumbnail (set in publish_platforms), TikTok
+        # cover, and Pinterest cover. Falls back to a product image only if no hook frame.
+        thumb_url = None
+        if thumb_path and os.path.exists(thumb_path):
+            try:
+                thumb_url = cloud_upload(thumb_path, f"{pub_id}_thumb", kind="image")
+                log(f"  Peak-frame thumbnail → {thumb_url}")
+            except Exception as e:
+                log(f"  Peak-frame thumb upload failed (non-fatal): {e}")
+
         # 7. Publish
         vo_script = deal.get("_vo_script", f"This deal on {deal.get('title','this product')[:40]} is real. "
                                             f"{deal['pct']}% off — limited time, link below!")
@@ -999,8 +1010,11 @@ def main():
             log("\n[8] Publishing to TikTok + Pinterest via Buffer...")
             try:
                 from buffer_publish import post_to_buffer
-                cover = (page_data.get("images") or [None])[0]  # Pinterest needs an image
-                post_to_buffer(video_url, deal, vo_script, image_url=cover)
+                # Same peak-frame still as the TikTok cover + Pinterest cover (product
+                # image only as a last-resort fallback if the hook frame is missing).
+                cover = thumb_url or (page_data.get("images") or [None])[0]
+                post_to_buffer(video_url, deal, vo_script,
+                               thumbnail_url=thumb_url, image_url=cover)
             except Exception as e:
                 log(f"  Buffer step skipped (non-fatal): {e}")
 
