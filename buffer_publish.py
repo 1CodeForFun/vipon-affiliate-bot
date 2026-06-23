@@ -123,27 +123,31 @@ mutation($input: CreatePostInput!) {
 """
 
 
-def _create_post(key, channel_id, text, video_url, metadata, thumbnail_url=None):
-    video_asset = {"url": video_url}
-    if thumbnail_url:
-        video_asset["thumbnailUrl"] = thumbnail_url
+def _create_post_assets(key, channel_id, text, assets, metadata):
+    """Low-level createPost with an explicit assets array (shareNow / immediate)."""
     inp = {
         "channelId": channel_id,
         "schedulingType": "automatic",
         "mode": "shareNow",          # publish immediately when this run executes
         "text": text,
-        "assets": [{"video": video_asset}],
+        "assets": assets,
         "metadata": metadata,
     }
     res = _gql(key, _CREATE_POST, {"input": inp})
     cp = res.get("createPost") or {}
     if cp.get("message"):
         raise RuntimeError(f"createPost rejected: {cp['message']}")
-    post_id = (cp.get("post") or {}).get("id")
-    return post_id
+    return (cp.get("post") or {}).get("id")
 
 
-def post_to_buffer(video_url, deal, script, thumbnail_url=None):
+def _create_post(key, channel_id, text, video_url, metadata, thumbnail_url=None):
+    video_asset = {"url": video_url}
+    if thumbnail_url:
+        video_asset["thumbnailUrl"] = thumbnail_url
+    return _create_post_assets(key, channel_id, text, [{"video": video_asset}], metadata)
+
+
+def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
     """Publish the (already-hosted) reel to TikTok + Pinterest via Buffer.
     Each channel is attempted independently; a failure on one never blocks the other,
     and the caller wraps this whole call so Buffer can never break FB/IG/YT."""
@@ -190,9 +194,31 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None):
                 raise RuntimeError("no Pinterest boards available on channel")
             meta = {"pinterest": {"title": title[:95], "url": pin_link,
                                   "boardServiceId": board_id}}
-            pid = _create_post(key, pin["id"], pin_text, video_url,
-                               metadata=meta, thumbnail_url=thumbnail_url)
-            log(f"  ✓ Buffer Pinterest: posted (id={pid})")
+            # Buffer's Pinterest requires an image (a bare video asset is rejected).
+            # Prefer a video pin WITH a cover image; if Pinterest is image-only, fall
+            # back to a static image pin so it still publishes. image_url is a public
+            # product image from the page capture.
+            asset_options = []
+            if image_url:
+                asset_options.append([{"video": {"url": video_url, "thumbnailUrl": image_url}}])
+                asset_options.append([{"image": {"url": image_url}}])
+            else:
+                asset_options.append([{"video": {"url": video_url}}])
+            pid, last_err = None, None
+            for assets in asset_options:
+                try:
+                    pid = _create_post_assets(key, pin["id"], pin_text, assets, meta)
+                    break
+                except Exception as e:
+                    last_err = e
+                    if "image" in str(e).lower():
+                        log(f"  Buffer Pinterest: {e} — falling back to image pin")
+                        continue
+                    raise
+            if pid:
+                log(f"  ✓ Buffer Pinterest: posted (id={pid})")
+            else:
+                log(f"  ✗ Buffer Pinterest failed: {last_err}")
         except Exception as e:
             log(f"  ✗ Buffer Pinterest failed: {e}")
     else:

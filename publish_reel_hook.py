@@ -999,7 +999,8 @@ def main():
             log("\n[8] Publishing to TikTok + Pinterest via Buffer...")
             try:
                 from buffer_publish import post_to_buffer
-                post_to_buffer(video_url, deal, vo_script)
+                cover = (page_data.get("images") or [None])[0]  # Pinterest needs an image
+                post_to_buffer(video_url, deal, vo_script, image_url=cover)
             except Exception as e:
                 log(f"  Buffer step skipped (non-fatal): {e}")
 
