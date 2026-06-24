@@ -2547,6 +2547,9 @@ def main():
 
     global _account_index
     _account_index = _read_account_state(ws.spreadsheet)
+    log(f"══════════════════════════════════════════════════════════════")
+    log(f"  STARTING ACCOUNT: {_account_index + 1}/{len(VIPON_ACCOUNTS)} — {_current_account()['username']}")
+    log(f"══════════════════════════════════════════════════════════════")
 
     # Top-up: fill each sheet UP TO PRODUCT_LIMIT rather than always scraping a fresh
     # full batch. After a short run, a rerun completes the day to 24/sheet without
@@ -2698,10 +2701,16 @@ def main():
             ca_switched = switch_to_canada(driver)
             if not ca_switched:
                 log("⚠️  Canada switch failed — skipping CA scrape to avoid writing US products to Sheet2")
+            if ca_switched and len(VIPON_ACCOUNTS) > 1:
+                # Always start CA on a fresh account so it doesn't inherit an account that
+                # already burned through its daily quota during the US phase.
+                log(f"  ↺ CA: rotating to fresh account (was {_current_account()['username']})…")
+                _do_rotate()
+                account_scraped = 0
             ca_tiles = collect_promo_tiles_random(driver, wait, start_url=PROMO_URL_CA) if ca_switched else []
         ca_count = 0
-        ca_fails = 0
-        CA_THROTTLE_STOP = 8   # consecutive no-code CA results → IP throttled, stop cleanly
+        ca_consecutive_fails = 0     # throttle fails since last CA rotation
+        ca_rotations_no_success = 0  # how many CA accounts have been tried with 0 codes
         for pid, _, _ in ca_tiles:
             if ca_count >= ca_target:
                 break
@@ -2717,12 +2726,11 @@ def main():
                 log(f"  ⚠️ CA PID {pid} error: {e.__class__.__name__} — skip")
                 data_ca = SKIP_THROTTLE
 
-            # Legit skips don't count against the throttle stop.
+            # Legit skips don't count against the throttle.
             if data_ca in (SKIP_DEAL_ONLY, SKIP_BLOCKED, SKIP_ONETIME):
                 continue
 
             if data_ca == SKIP_THROTTLE or data_ca is None:
-                # Outer retry for CA too.
                 log(f"  🔄 CA throttle on PID {pid} — retrying once after {REVEAL_PACE_SEC}s…")
                 time.sleep(REVEAL_PACE_SEC)
                 try:
@@ -2732,16 +2740,29 @@ def main():
                 if data_ca in (SKIP_DEAL_ONLY, SKIP_BLOCKED, SKIP_ONETIME):
                     continue
                 if data_ca == SKIP_THROTTLE or not isinstance(data_ca, dict):
-                    ca_fails += 1
-                    if ca_fails >= CA_THROTTLE_STOP:
-                        log(f"  ⛔ CA throttle: {ca_fails} real fails — stopping CA at {ca_count}.")
+                    ca_consecutive_fails += 1
+                    if ca_consecutive_fails >= ROTATION_THRESHOLD and len(VIPON_ACCOUNTS) > 1:
+                        # Mirror US behaviour: rotate on consecutive throttle fails instead of stopping.
+                        log(f"  ↺ CA: {ca_consecutive_fails} consecutive fails — rotating to next account…")
+                        _do_rotate()
+                        ca_consecutive_fails = 0
+                        account_scraped = 0
+                        ca_rotations_no_success += 1
+                        if ca_rotations_no_success >= len(VIPON_ACCOUNTS):
+                            log(f"  ⛔ CA: cycled all {len(VIPON_ACCOUNTS)} accounts — "
+                                f"stopping at {ca_count} products.")
+                            break
+                    elif len(VIPON_ACCOUNTS) == 1 and ca_consecutive_fails >= 8:
+                        log(f"  ⛔ CA throttle: {ca_consecutive_fails} fails (single account) — "
+                            f"stopping at {ca_count}.")
                         break
                     continue
 
             if not isinstance(data_ca, dict):
                 continue
 
-            ca_fails = 0
+            ca_consecutive_fails = 0
+            ca_rotations_no_success = 0
             account_scraped += 1
             scraped_ca.append(data_ca)
             ca_count += 1
@@ -2749,6 +2770,7 @@ def main():
             if account_scraped >= PROACTIVE_ROTATE_AFTER and len(VIPON_ACCOUNTS) > 1 and ca_count < ca_target:
                 log(f"  📊 Proactive rotation after {account_scraped} code(s) — spreading load evenly")
                 _do_rotate()
+                account_scraped = 0
             try:
                 _write_product_row(ws2, data_ca, tld=AMAZON_TLD_CA)
             except Exception as e:
