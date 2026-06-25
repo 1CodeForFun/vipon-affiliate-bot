@@ -1925,9 +1925,26 @@ def scrape_product_page(driver, wait, pid, tld="com", allow_deal_only=False):
     image_url = resolve_cover_image_url(driver)
     log(f"  ↳ cover image: {image_url or 'NONE'}")
 
-    src  = driver.page_source or ""
-    m    = ASIN_RE.search(src)
-    asin = m.group(0).upper() if m else ""
+    src = driver.page_source or ""
+    if tld == "ca":
+        # For CA: extract ASIN specifically from Amazon.ca links.
+        # If the page has no amazon.ca context at all, it's a US product that Vipon listed
+        # in its CA section — using its ASIN for amazon.ca would give "Page Not Found".
+        ca_m = re.search(r'amazon\.ca/(?:dp|product)/([A-Z0-9]{10})', src, re.I)
+        if ca_m:
+            asin = ca_m.group(1).upper()
+        elif "amazon.ca" not in src.lower():
+            log(f"  ⚠️ PID {pid}: no Amazon.ca link found — US product in CA section, skipping")
+            return SKIP_BLOCKED
+        else:
+            # amazon.ca mentioned but no /dp/ASIN in source — fall back to any ASIN
+            m = ASIN_RE.search(src)
+            asin = m.group(0).upper() if m else ""
+            if asin:
+                log(f"  ℹ PID {pid}: using fallback ASIN {asin} (no explicit .ca/dp/ URL found)")
+    else:
+        m    = ASIN_RE.search(src)
+        asin = m.group(0).upper() if m else ""
 
     images = []
     if asin:
@@ -2693,10 +2710,6 @@ def main():
                 break
             if str(pid).strip() in us_pids:
                 continue                 # already on the sheet — don't re-scrape
-            if count >= EARLY_STOP_MIN_PRODUCTS and _time_up():
-                log(f"  ⏳ Early stop: {count} US products in "
-                    f"{int((time.time()-scrape_start)/60)} min — writing what we have.")
-                break
             # Fixed pace between reveals (rate-limit protection).
             time.sleep(REVEAL_PACE_SEC)
             try:
@@ -2761,10 +2774,6 @@ def main():
         if ca_target <= 0:
             log(f"  ✓ Sheet2 already has {ca_existing} (≥ {PRODUCT_LIMIT}) — skipping CA scrape.")
             ca_tiles = []
-        elif _time_up() and len(scraped) >= EARLY_STOP_MIN_PRODUCTS:
-            log(f"  ⏳ Time budget reached with {len(scraped)} US products — "
-                f"skipping CA scrape and writing now.")
-            ca_tiles = []
         else:
             ca_switched = switch_to_canada(driver)
             if not ca_switched:
@@ -2784,9 +2793,6 @@ def main():
                 break
             if str(pid).strip() in ca_pids:
                 continue
-            if len(scraped) >= EARLY_STOP_MIN_PRODUCTS and _time_up():
-                log(f"  ⏳ Early stop: time budget reached — {ca_count} CA products, writing now.")
-                break
             time.sleep(REVEAL_PACE_SEC)
             try:
                 data_ca = scrape_product_page(driver, wait, pid, tld=AMAZON_TLD_CA,
