@@ -511,6 +511,7 @@ BLOCKED_TITLE_KEYWORDS = [
     "panty", "panties", "underwear", "bra", "skirt",
     "sexy", "lace", "wig",
     "nightgown", "blouse", "dress", "dressy",
+    "waist shaper", "waist trainer",
     "bikini", "swimsuit", "swimwear", "swim wear",
     "shorts",  # "short" removed (too generic — blocks "short cable" etc.)
 

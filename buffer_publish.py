@@ -122,8 +122,17 @@ mutation($input: CreatePostInput!) {
 }
 """
 
+_CREATE_COMMENT = """
+mutation($input: CreateCommentInput!) {
+  createComment(input: $input) {
+    ... on CommentActionSuccess { comment { id } }
+    ... on MutationError { message }
+  }
+}
+"""
 
-def _create_post_assets(key, channel_id, text, assets, metadata):
+
+def _create_post_assets(key, channel_id, text, assets, metadata, first_comment=None):
     """Low-level createPost with an explicit assets array (shareNow / immediate)."""
     inp = {
         "channelId": channel_id,
@@ -133,6 +142,8 @@ def _create_post_assets(key, channel_id, text, assets, metadata):
         "assets": assets,
         "metadata": metadata,
     }
+    if first_comment:
+        inp["firstComment"] = {"text": first_comment}
     res = _gql(key, _CREATE_POST, {"input": inp})
     cp = res.get("createPost") or {}
     if cp.get("message"):
@@ -140,11 +151,22 @@ def _create_post_assets(key, channel_id, text, assets, metadata):
     return (cp.get("post") or {}).get("id")
 
 
-def _create_post(key, channel_id, text, video_url, metadata, thumbnail_url=None):
+def _create_post(key, channel_id, text, video_url, metadata,
+                 thumbnail_url=None, first_comment=None):
     video_asset = {"url": video_url}
     if thumbnail_url:
         video_asset["thumbnailUrl"] = thumbnail_url
-    return _create_post_assets(key, channel_id, text, [{"video": video_asset}], metadata)
+    return _create_post_assets(key, channel_id, text, [{"video": video_asset}],
+                               metadata, first_comment=first_comment)
+
+
+def _add_comment(key, post_id, text):
+    """Post a follow-up comment on an already-published Buffer post."""
+    res = _gql(key, _CREATE_COMMENT, {"input": {"postId": post_id, "text": text}})
+    cc = res.get("createComment") or {}
+    if cc.get("message"):
+        raise RuntimeError(f"createComment rejected: {cc['message']}")
+    return (cc.get("comment") or {}).get("id")
 
 
 def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
@@ -165,19 +187,34 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
     asin  = deal["asin"]
     pct   = deal.get("pct", 0)
 
-    # ── TikTok (caption carries the affiliate link; account is Business → auto-publish) ──
+    # ── TikTok (Business account → auto-publish; link in comment, code in 2nd comment) ──
     tk = _find_channel(channels, "tiktok")
     if tk:
         tk_link = f"https://www.amazon.com/dp/{asin}?tag={TIKTOK_TAG}"
-        tk_text = (f"{title[:120]}\n\n"
-                   f"🔥 {pct}% OFF — limited time!\n"
-                   f"🛒 {tk_link}\n\n"
-                   f"{DISCLOSURE} Full deals storefront in bio 🔗")
+        code     = (deal.get("code") or "").strip()
+
+        # Caption: hook only — no link cluttering the caption text
+        tk_text = (f"{title[:150]}\n\n"
+                   f"🔥 {pct}% OFF — limited time!\n\n"
+                   f"Full deals & coupons storefront in bio 🔗")
+
+        # First comment: affiliate link + mandatory disclosure
+        tk_first_comment = f"🛒 Shop now: {tk_link}\n\n{DISCLOSURE}"
+
         try:
             pid = _create_post(key, tk["id"], tk_text, video_url,
                                metadata={"tiktok": {"isAiGenerated": True}},
-                               thumbnail_url=thumbnail_url)
+                               thumbnail_url=thumbnail_url,
+                               first_comment=tk_first_comment)
             log(f"  ✓ Buffer TikTok: posted (id={pid})")
+
+            # Second comment: discount code (only when there is one)
+            if pid and code:
+                try:
+                    _add_comment(key, pid, f"Use code 🏷️ {code} at checkout")
+                    log(f"  ✓ Buffer TikTok: code comment added ({code})")
+                except Exception as ce:
+                    log(f"  ℹ Buffer TikTok: code comment skipped (non-fatal): {ce}")
         except Exception as e:
             log(f"  ✗ Buffer TikTok failed: {e}")
     else:
