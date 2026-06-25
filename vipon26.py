@@ -110,6 +110,62 @@ def _write_account_state(ss) -> None:
     except Exception as _e:
         print(f"[account-state] WARNING: could not save state: {_e.__class__.__name__}")
 
+
+def _read_pid_history(ss) -> tuple:
+    """Return (us_historical_pids: set, ca_historical_pids: set) from last 2 days stored
+    in _config A2 as JSON.  Today's PIDs are excluded — those are already in us_pids /
+    ca_pids from _sheet_topup_state and will be deduplicated there."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        cfg = ss.worksheet(_CONFIG_TAB)
+        val = cfg.acell("A2").value
+        if not val:
+            return set(), set()
+        history = json.loads(val)
+        us_pids, ca_pids = set(), set()
+        for entry in history:
+            if entry.get("date") != today:   # today is handled by sheet topup state
+                us_pids.update(str(p) for p in entry.get("us", []))
+                ca_pids.update(str(p) for p in entry.get("ca", []))
+        print(f"[pid-history] loaded {len(us_pids)} US + {len(ca_pids)} CA historical PIDs "
+              f"to exclude (last 2 days, excl. today)")
+        return us_pids, ca_pids
+    except Exception as _e:
+        print(f"[pid-history] could not read history: {_e.__class__.__name__}")
+        return set(), set()
+
+
+def _write_pid_history(ss, today_us: list, today_ca: list) -> None:
+    """Append today's scraped PIDs to the rolling 2-day history in _config A2.
+    Re-runs today MERGE into today's entry (not replace) so early-run PIDs survive."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        cfg = ss.worksheet(_CONFIG_TAB)
+        val = cfg.acell("A2").value
+        history = json.loads(val) if val else []
+        # Find or create today's entry and MERGE (handles re-runs)
+        today_entry = next((e for e in history if e.get("date") == today), None)
+        if today_entry:
+            today_entry["us"] = list(set(today_entry.get("us", []) + [str(p) for p in today_us]))
+            today_entry["ca"] = list(set(today_entry.get("ca", []) + [str(p) for p in today_ca]))
+        else:
+            history.insert(0, {"date": today,
+                               "us": [str(p) for p in today_us],
+                               "ca": [str(p) for p in today_ca]})
+        # Keep only last 2 days
+        seen, kept = set(), []
+        for entry in history:
+            d = entry.get("date", "")
+            if d not in seen:
+                seen.add(d); kept.append(entry)
+            if len(kept) >= 2:
+                break
+        cfg.update("A2", [[json.dumps(kept)]])
+        print(f"[pid-history] saved {len(today_us)} US + {len(today_ca)} CA PIDs for {today} "
+              f"(history covers {len(kept)} day(s))")
+    except Exception as _e:
+        print(f"[pid-history] WARNING: could not save: {_e.__class__.__name__}")
+
 # ── Video dimensions: 720×1280 is valid for all Reels/Shorts, ~56% fewer pixels → much faster ──
 VIDEO_W = 720
 VIDEO_H = 1280
@@ -1770,7 +1826,7 @@ def _check_cap_toast(driver) -> bool:
     return False
 
 
-def scrape_product_page(driver, wait, pid, tld="com"):
+def scrape_product_page(driver, wait, pid, tld="com", allow_deal_only=False):
     """Scrape one product page. Returns a data dict on success, or one of the
     SKIP_* sentinel strings to let the caller distinguish *why* it was skipped:
 
@@ -1794,53 +1850,59 @@ def scrape_product_page(driver, wait, pid, tld="com"):
         time.sleep(2.0)
 
     # ── Deal-only check BEFORE clicking GET CODE ──────────────────
-    # These products have no exclusive code at all — clicking GET CODE would burn a
-    # reveal slot and (on a capped account) waste a quota unit for nothing.
-    if _check_deal_only(driver):
-        log(f"  ⏭ deal-only product (no exclusive code) — skipping PID {pid}")
-        return SKIP_DEAL_ONLY
-
-    try_reveal_code(driver)
-
-    # Poll immediately for the 400-cap toast (appears for ~1.5s right after click).
-    account_capped = _check_cap_toast(driver)
-
-    # Guard: if a reveal click navigated away from vipon (e.g. clicked "Use on Amazon"), come back
-    if "myvipon.com/product/" not in driver.current_url:
-        log(f"  ↩ navigated away during reveal — returning to product page")
-        driver.get(url)
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
-        time.sleep(2.0)
-
-    code = extract_code(driver)
-
-    # Dashed one-time code: exit immediately — no retry, no screenshot, no rotation.
-    if code == _ONETIME_SENTINEL:
-        return SKIP_ONETIME
-
-    # Inner retry — AJAX may still be in flight (not a throttle; just timing).
-    if not code or not is_plausible_code(code, strict=False):
-        time.sleep(3.0)
+    # These products have no exclusive code — clicking GET CODE wastes a reveal quota.
+    # For CA (allow_deal_only=True) we still capture the product with code="" instead
+    # of skipping, because the Amazon deal link alone has affiliate value.
+    _is_deal_only = _check_deal_only(driver)
+    account_capped = False
+    if _is_deal_only:
+        if not allow_deal_only:
+            log(f"  ⏭ deal-only product (no exclusive code) — skipping PID {pid}")
+            return SKIP_DEAL_ONLY
+        log(f"  ↳ deal-only product — capturing with empty code (no quota slot used)")
+        code = ""
+    else:
         try_reveal_code(driver)
+
+        # Poll immediately for the 400-cap toast (appears for ~1.5s right after click).
+        account_capped = _check_cap_toast(driver)
+
+        # Guard: if a reveal click navigated away from vipon (e.g. clicked "Use on Amazon"), come back
         if "myvipon.com/product/" not in driver.current_url:
+            log(f"  ↩ navigated away during reveal — returning to product page")
             driver.get(url)
             wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
             time.sleep(2.0)
+
         code = extract_code(driver)
-        # Dashed code on the retry too — exit cleanly.
+
+        # Dashed one-time code: exit immediately — no retry, no screenshot, no rotation.
         if code == _ONETIME_SENTINEL:
             return SKIP_ONETIME
 
-    code = (code or "").strip().upper()
+        # Inner retry — AJAX may still be in flight (not a throttle; just timing).
+        if not code or not is_plausible_code(code, strict=False):
+            time.sleep(3.0)
+            try_reveal_code(driver)
+            if "myvipon.com/product/" not in driver.current_url:
+                driver.get(url)
+                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
+                time.sleep(2.0)
+            code = extract_code(driver)
+            # Dashed code on the retry too — exit cleanly.
+            if code == _ONETIME_SENTINEL:
+                return SKIP_ONETIME
 
-    # ── Classify the skip reason precisely ───────────────────────
-    if not is_plausible_code(code, strict=False):
-        _capture_code_failure(driver, pid)   # only for genuine throttle/empty reveal
-        if account_capped:
-            log(f"  🚫 no valid code — account at 400/30-day cap → rotate immediately")
+        code = (code or "").strip().upper()
+
+        # ── Classify the skip reason precisely ───────────────────────
+        if not is_plausible_code(code, strict=False):
+            _capture_code_failure(driver, pid)   # only for genuine throttle/empty reveal
+            if account_capped:
+                log(f"  🚫 no valid code — account at 400/30-day cap → rotate immediately")
+                return SKIP_THROTTLE
+            log("  ✗ no valid code — skipping (throttle/empty reveal)")
             return SKIP_THROTTLE
-        log("  ✗ no valid code — skipping (throttle/empty reveal)")
-        return SKIP_THROTTLE
 
     def _safe_css(c):
         try: return (driver.find_element(By.CSS_SELECTOR, c).text or "").strip()
@@ -1898,6 +1960,7 @@ def scrape_product_page(driver, wait, pid, tld="com"):
         "price":          price,
         "image":          image_url,
         "images":         images,
+        "deal_only":      _is_deal_only,
     }
 
 # ════════════════════════════════════════════════════════════════
@@ -2551,12 +2614,17 @@ def main():
     log(f"  STARTING ACCOUNT: {_account_index + 1}/{len(VIPON_ACCOUNTS)} — {_current_account()['username']}")
     log(f"══════════════════════════════════════════════════════════════")
 
+    # Cross-day PID dedup: load PIDs scraped in the last 2 days so repeats are skipped.
+    us_hist_pids, ca_hist_pids = _read_pid_history(ws.spreadsheet)
+
     # Top-up: fill each sheet UP TO PRODUCT_LIMIT rather than always scraping a fresh
     # full batch. After a short run, a rerun completes the day to 24/sheet without
     # re-scraping (and re-burning quota on) products already banked. Existing PIDs are
     # skipped so we never duplicate.
     us_existing, us_pids = _sheet_topup_state(ws)
     ca_existing, ca_pids = _sheet_topup_state(ws2)
+    us_pids |= us_hist_pids   # exclude last-2-days PIDs from this run's tile scan
+    ca_pids |= ca_hist_pids
     us_target = max(0, PRODUCT_LIMIT - us_existing)
     ca_target = max(0, PRODUCT_LIMIT - ca_existing)
     need_scrape = (us_target > 0 or ca_target > 0)
@@ -2721,7 +2789,8 @@ def main():
                 break
             time.sleep(REVEAL_PACE_SEC)
             try:
-                data_ca = scrape_product_page(driver, wait, pid, tld=AMAZON_TLD_CA)
+                data_ca = scrape_product_page(driver, wait, pid, tld=AMAZON_TLD_CA,
+                                              allow_deal_only=True)
             except (TimeoutException, WebDriverException) as e:
                 log(f"  ⚠️ CA PID {pid} error: {e.__class__.__name__} — skip")
                 data_ca = SKIP_THROTTLE
@@ -2763,10 +2832,12 @@ def main():
 
             ca_consecutive_fails = 0
             ca_rotations_no_success = 0
-            account_scraped += 1
+            if not data_ca.get("deal_only"):
+                account_scraped += 1   # deal-only uses no quota slot → don't count for rotation
             scraped_ca.append(data_ca)
             ca_count += 1
-            log(f"✓ CA Scraped {ca_count}/{ca_target} (sheet total {ca_existing+ca_count}/{PRODUCT_LIMIT}): {data_ca['title'][:60]}")
+            code_tag = "" if data_ca.get("deal_only") else f" code={data_ca.get('code','?')}"
+            log(f"✓ CA Scraped {ca_count}/{ca_target} (sheet total {ca_existing+ca_count}/{PRODUCT_LIMIT}){code_tag}: {data_ca['title'][:60]}")
             if account_scraped >= PROACTIVE_ROTATE_AFTER and len(VIPON_ACCOUNTS) > 1 and ca_count < ca_target:
                 log(f"  📊 Proactive rotation after {account_scraped} code(s) — spreading load evenly")
                 _do_rotate()
@@ -2778,6 +2849,11 @@ def main():
 
     finally:
         _write_account_state(ws.spreadsheet)
+        _write_pid_history(
+            ws.spreadsheet,
+            [str(d["pid"]) for d in scraped],
+            [str(d["pid"]) for d in scraped_ca],
+        )
         try:
             driver.quit()
             log("✓ Chrome closed — RAM freed, starting video production…")
