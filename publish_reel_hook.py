@@ -533,7 +533,10 @@ def make_price_card_clip(deal, gallery_urls, dst, td, ffmpeg, font, secs=CIRCLE_
     disc_label = f"{pct}% OFF"
 
     if not price_text:
-        log("  price card: no price_text in deal — skipping"); return False
+        # No buy-box price from PA API or Selenium — use discount % as headline
+        price_text = f"Save {pct}% Today!"
+        orig_price = ""
+        log("  price card: no price_text — showing discount label")
     if not gallery_urls:
         log("  price card: no images for background — skipping"); return False
 

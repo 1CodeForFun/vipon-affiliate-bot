@@ -306,6 +306,7 @@ out.title   = abs(document.querySelector('#title')
             || document.querySelector('#titleSection'));
 // Tight price element (the actual price number) so the zoom + the strike align.
 out.price   = abs(document.querySelector('.priceToPay')
+            || document.querySelector('.apexPriceToPay')
             || document.querySelector('.a-price')
             || document.querySelector('#corePrice_feature_div')
             || document.querySelector('#price'));

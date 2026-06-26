@@ -198,17 +198,26 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
                    f"🔥 {pct}% OFF — limited time!\n\n"
                    f"Full deals & coupons storefront in bio 🔗")
 
-        # First comment: affiliate link + mandatory disclosure
-        tk_first_comment = f"🛒 Shop now: {tk_link}\n\n{DISCLOSURE}"
+        # Link + disclosure as first comment; code as second comment.
+        # Both added via _add_comment AFTER posting — Buffer rejects firstComment
+        # in CreatePostInput for TikTok (HTTP 400 schema validation error).
+        tk_link_comment = f"🛒 Shop now: {tk_link}\n\n{DISCLOSURE}"
 
         try:
             pid = _create_post(key, tk["id"], tk_text, video_url,
                                metadata={"tiktok": {"isAiGenerated": True}},
-                               thumbnail_url=thumbnail_url,
-                               first_comment=tk_first_comment)
+                               thumbnail_url=thumbnail_url)
             log(f"  ✓ Buffer TikTok: posted (id={pid})")
 
-            # Second comment: discount code (only when there is one)
+            # Comment 1: affiliate link + disclosure
+            if pid:
+                try:
+                    _add_comment(key, pid, tk_link_comment)
+                    log(f"  ✓ Buffer TikTok: link comment added")
+                except Exception as ce:
+                    log(f"  ℹ Buffer TikTok: link comment skipped (non-fatal): {ce}")
+
+            # Comment 2: discount code (only when there is one)
             if pid and code:
                 try:
                     _add_comment(key, pid, f"Use code 🏷️ {code} at checkout")
