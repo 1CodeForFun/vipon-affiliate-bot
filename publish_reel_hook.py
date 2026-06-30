@@ -74,9 +74,21 @@ _DEALS_FALLBACK_URL = "https://www.amazon.com/deals"  # fallback (unfiltered)
 def log(m): print(m, flush=True)
 
 # ── DEALS SCRAPING ────────────────────────────────────────────────────────────
+_PCT_RE = re.compile(r'(\d+)\s*%\s*off|save\s+(\d+)\s*%|up\s+to\s+(\d+)\s*%', re.I)
+
+def _extract_pct(text):
+    """Return the first discount % found in text, or None."""
+    m = _PCT_RE.search(text or "")
+    if not m:
+        return None
+    return int(next(g for g in m.groups() if g is not None))
+
+
 def _parse_deals_from_html(html):
     """Parse deal cards from rendered HTML using BeautifulSoup (regex fallback).
-    Targets data-csa-c-item-type='deal' cards — same structure Amazon uses on /deals."""
+    Tries multiple card selectors in priority order so Amazon page redesigns degrade
+    gracefully. Discount % is extracted from full card text — not a single badge span —
+    to catch 'X% off', 'Save X%', 'Up to X% off', 'X% off coupon', etc."""
     try:
         from bs4 import BeautifulSoup
     except ImportError:
@@ -87,13 +99,10 @@ def _parse_deals_from_html(html):
     results = []
     seen = set()
 
-    # Iterate deal cards. Each <div data-testid="product-card" data-asin="ASIN">
-    # contains a <span class="a-size-mini">X% off</span> badge and a /dp/ASIN link.
-    # (Walking the card — not the <a> — avoids html.parser mangling Amazon's
-    # invalid nesting of block <div>s inside <a>.)
-    cards = soup.find_all('div', attrs={'data-testid': 'product-card'})
-    if not cards:
-        cards = soup.find_all('div', attrs={'data-asin': True})
+    # Priority order: specific test-id → CSA component type → any data-asin div
+    cards = (soup.find_all('div', attrs={'data-testid': 'product-card'})
+             or soup.find_all('div', attrs={'data-csa-c-item-type': True})
+             or soup.find_all('div', attrs={'data-asin': True}))
 
     for c in cards:
         asin = c.get('data-asin', '').strip()
@@ -104,11 +113,10 @@ def _parse_deals_from_html(html):
         if not asin or asin in seen:
             continue
 
-        badge = c.find('span', class_=re.compile(r'\ba-size-mini\b'),
-                       string=re.compile(r'\d+\s*%\s*off', re.I))
-        if not badge:
+        # Search full card text — catches all badge text variants Amazon uses
+        pct = _extract_pct(c.get_text(' ', strip=True))
+        if pct is None:
             continue
-        pct = int(re.match(r'(\d+)', badge.get_text(strip=True)).group(1))
 
         link  = c.find('a', href=re.compile(r'/dp/[A-Z0-9]{10}'))
         href  = link.get('href', '') if link else ''
@@ -117,6 +125,10 @@ def _parse_deals_from_html(html):
 
         seen.add(asin)
         results.append({'asin': asin, 'pct': pct, 'title': title})
+
+    if not results:
+        sample = (html or '')[:500]
+        log(f"  [deals-parse] 0 deals (cards={len(cards)}) — HTML[:200]: {sample[:200]!r}")
 
     return results
 
@@ -130,10 +142,9 @@ def _parse_deals_regex(html):
         if asin in seen:
             continue
         ctx = html[max(0, m.start() - 1200): m.start() + 1200]
-        pct_m = re.search(r'(\d+)%\s*off', ctx, re.I)
-        if not pct_m:
+        pct = _extract_pct(ctx)
+        if pct is None:
             continue
-        pct = int(pct_m.group(1))
         raw = re.sub(r'<[^>]+>', ' ', html[max(0, m.start() - 300): m.start()])
         title = re.sub(r'\s+', ' ', raw).strip()[-120:]
         seen.add(asin)
@@ -169,7 +180,7 @@ def _scrape_url(url):
         snapshots = [driver.page_source]
         for px in (1500, 3000, 5000, 7000, 9000, 12000, 15000, 18000):
             driver.execute_script(f"window.scrollTo(0, {px})")
-            time.sleep(1.5)
+            time.sleep(2.5)   # was 1.5 — extra time for lazy-loaded deal cards
             snapshots.append(driver.page_source)
         log(f"  Captured {len(snapshots)} snapshots ({sum(len(s) for s in snapshots):,} chars)")
 
@@ -178,6 +189,9 @@ def _scrape_url(url):
             for d in _parse_deals_from_html(snap):
                 if d['asin'] not in merged or d['pct'] > merged[d['asin']]['pct']:
                     merged[d['asin']] = d
+        if not merged:
+            first = snapshots[0] if snapshots else ''
+            log(f"  [scrape-debug] 0 deals merged — page title: {re.search(r'<title[^>]*>(.*?)</title>', first, re.I | re.S) and re.search(r'<title[^>]*>(.*?)</title>', first, re.I | re.S).group(1)!r}")
         return list(merged.values())
     finally:
         try: driver.quit()
