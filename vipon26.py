@@ -1540,59 +1540,98 @@ def _get_paapi_client():
         return None
 
 
+def _fetch_images_http(asin: str, tld: str = "com", max_imgs: int = 9) -> list:
+    """HTTP-only image fallback: fetch the Amazon product page with requests and extract
+    product image URLs from the embedded JS colorImages JSON. No Selenium, no PA API."""
+    url = f"https://www.amazon.{tld}/dp/{asin}?th=1&psc=1"
+    try:
+        r = requests.get(url, timeout=15, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        })
+        src = r.text
+        seen, imgs = set(), []
+        # Amazon embeds all product images as {"hiRes":"URL",...} in the colorImages JS var
+        for m in re.finditer(r'"hiRes"\s*:\s*"(https://[^"]+\.(?:jpe?g|png))"', src, re.I):
+            u = m.group(1)
+            if u not in seen:
+                seen.add(u); imgs.append(u)
+            if len(imgs) >= max_imgs:
+                break
+        if not imgs:
+            # Broader fallback: any m.media-amazon.com product image (skip tiny thumbnails)
+            for m in re.finditer(
+                    r'(https://m\.media-amazon\.com/images/I/[A-Za-z0-9%._-]{20,}\.(?:jpe?g|png))',
+                    src, re.I):
+                u = m.group(1)
+                if re.search(r'\._S[SX]\d{2,3}_\.', u):   # skip small variants (_SX38_, _SS40_)
+                    continue
+                if u not in seen:
+                    seen.add(u); imgs.append(u)
+                if len(imgs) >= max_imgs:
+                    break
+        log(f"  ↳ HTTP image fallback: {len(imgs)} for {asin}")
+        return imgs[:max_imgs]
+    except Exception as e:
+        log(f"  ⚠️ HTTP image fallback failed for {asin}: {e}")
+        return []
+
+
 def fetch_amazon_images(driver, asin: str, tld: str = "com", max_imgs: int = 9) -> list:
     """
-    Official Amazon Product Advertising API (PA-API 5).
-    No scraping, no IP blocking, no Chrome involved.
-    The 'driver' and 'tld' params are kept for signature compatibility.
+    Primary: PA-API 5. Fallback: lightweight HTTP scrape of the product page.
+    The 'driver' param is kept for signature compatibility but is not used.
     """
     if not asin:
         return []
+    imgs = []
     client = _get_paapi_client()
-    if not client:
-        return []
-    try:
-        from paapi5_python_sdk.get_items_request import GetItemsRequest
-        from paapi5_python_sdk.get_items_resource import GetItemsResource
-        from paapi5_python_sdk.partner_type import PartnerType
-
-        log(f"  ↳ Amazon PA-API: {asin}")
-        request = GetItemsRequest(
-            partner_tag=AFFILIATE_ID_CA if tld == "ca" else AFFILIATE_ID,
-            partner_type=PartnerType.ASSOCIATES,
-            marketplace=f"www.amazon.{tld}",
-            item_ids=[asin],
-            resources=[
-                GetItemsResource.IMAGES_PRIMARY_LARGE,
-                GetItemsResource.IMAGES_VARIANTS_LARGE,
-            ],
-        )
-        response = client.get_items(request)
-        if not response or not response.items_result or not response.items_result.items:
-            log(f"  ⚠️ PA-API returned no items for {asin}")
-            return []
-
-        item = response.items_result.items[0]
-        imgs = []
+    if client:
         try:
-            if item.images and item.images.primary and item.images.primary.large:
-                imgs.append(item.images.primary.large.url)
-        except Exception:
-            pass
-        try:
-            if item.images and item.images.variants:
-                for v in item.images.variants:
-                    if v.large and v.large.url and v.large.url not in imgs:
-                        imgs.append(v.large.url)
-                    if len(imgs) >= max_imgs:
-                        break
-        except Exception:
-            pass
-        log(f"  ↳ PA-API images: {len(imgs)}")
-        return imgs[:max_imgs]
-    except Exception as e:
-        log(f"  ⚠️ PA-API fetch failed for {asin}: {e}")
-        return []
+            from paapi5_python_sdk.get_items_request import GetItemsRequest
+            from paapi5_python_sdk.get_items_resource import GetItemsResource
+            from paapi5_python_sdk.partner_type import PartnerType
+
+            log(f"  ↳ Amazon PA-API: {asin}")
+            request = GetItemsRequest(
+                partner_tag=AFFILIATE_ID_CA if tld == "ca" else AFFILIATE_ID,
+                partner_type=PartnerType.ASSOCIATES,
+                marketplace=f"www.amazon.{tld}",
+                item_ids=[asin],
+                resources=[
+                    GetItemsResource.IMAGES_PRIMARY_LARGE,
+                    GetItemsResource.IMAGES_VARIANTS_LARGE,
+                ],
+            )
+            response = client.get_items(request)
+            if response and response.items_result and response.items_result.items:
+                item = response.items_result.items[0]
+                try:
+                    if item.images and item.images.primary and item.images.primary.large:
+                        imgs.append(item.images.primary.large.url)
+                except Exception:
+                    pass
+                try:
+                    if item.images and item.images.variants:
+                        for v in item.images.variants:
+                            if v.large and v.large.url and v.large.url not in imgs:
+                                imgs.append(v.large.url)
+                            if len(imgs) >= max_imgs:
+                                break
+                except Exception:
+                    pass
+                log(f"  ↳ PA-API images: {len(imgs)}")
+            else:
+                log(f"  ⚠️ PA-API returned no items for {asin}")
+        except Exception as e:
+            log(f"  ⚠️ PA-API fetch failed for {asin}: {e}")
+
+    if not imgs:
+        imgs = _fetch_images_http(asin, tld, max_imgs)
+
+    return imgs[:max_imgs]
 
 # ════════════════════════════════════════════════════════════════
 #  TILE DISCOVERY
