@@ -1,0 +1,37 @@
+name: Post Best Reel to TikTok + Pinterest
+
+# Posts the highest-scored unposted vipon reel to TikTok + Pinterest via Buffer.
+# Run 1 → highest Social Score; Run 2 → second-highest (col T tracks what's done).
+# Schedule 2 triggers/day via cron-job.org (e.g. 11 AM CT and 5 PM CT),
+# after the vipon_publisher runs have already built and posted the reels (col N filled).
+on:
+  workflow_dispatch:
+
+jobs:
+  post-buffer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+
+      - name: Checkout secrets repo
+        uses: actions/checkout@v4
+        with:
+          repository: 1CodeForFun/vipon-secrets
+          token: ${{ secrets.SECRETS_PAT }}
+          path: secrets
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install gspread oauth2client requests
+
+      - name: Run Buffer poster
+        env:
+          SECRETS_DIR: secrets
+        run: python post_best_to_buffer.py
