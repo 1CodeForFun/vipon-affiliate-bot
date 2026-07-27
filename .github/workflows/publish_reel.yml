@@ -52,8 +52,8 @@ jobs:
           [ -f secrets/geminipro.txt      ] && cp secrets/geminipro.txt      ~/geminipro.txt      || true
           [ -f secrets/geminikey.txt      ] && cp secrets/geminikey.txt      ~/geminikey.txt      || true
           [ -f secrets/geminikeys.txt     ] && cp secrets/geminikeys.txt     ~/geminikeys.txt     || true
-          [ -f secrets/cf_worker_url.txt  ] && cp secrets/cf_worker_url.txt  ~/cf_worker_url.txt  || true
-          [ -f secrets/cf_worker_key.txt  ] && cp secrets/cf_worker_key.txt  ~/cf_worker_key.txt  || true
+          [ -f secrets/cf_account_id.txt  ] && cp secrets/cf_account_id.txt  ~/cf_account_id.txt  || true
+          [ -f secrets/cf_api_token.txt   ] && cp secrets/cf_api_token.txt   ~/cf_api_token.txt   || true
 
       - name: Publish reel
         env:

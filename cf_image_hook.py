@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-cf_image_hook.py — Generate 2 AI hook images via Cloudflare Workers AI.
+cf_image_hook.py — Generate 2 AI hook images via Cloudflare Workers AI REST API.
 
-Generates two sequential cinematic images of a persona using the product,
-animates them as a 2-second Ken Burns clip, and returns both the clip and
-the peak-moment image (used as the YouTube + Pinterest thumbnail).
+Calls Cloudflare's AI REST API directly — no Worker deployment required.
+Generates two cinematic persona images, animates them as a 2-second Ken Burns
+clip, and returns both the clip and the peak-moment image (YouTube/Pinterest thumb).
 
 Credentials (loaded from home dir or SECRETS_DIR):
-  cf_worker_url.txt  — full Cloudflare Worker URL, e.g. https://xyz.workers.dev
-  cf_worker_key.txt  — the API_KEY set in the Worker's Environment Variables
+  cf_account_id.txt  — Cloudflare Account ID (from the URL after logging in)
+  cf_api_token.txt   — API token with "Workers AI" permission (workers-ai:read)
 
-Falls back to (None, None) silently if credentials are missing or generation fails,
-so the reel publisher continues without the hook rather than failing entirely.
+Create the token at: dash.cloudflare.com/profile/api-tokens → "Workers AI" template.
+Falls back to (None, None) silently so the reel publisher continues without the hook.
 """
 
-import base64
 import json
 import os
 import re
@@ -65,15 +64,17 @@ def log(m):
     print(m, flush=True)
 
 
+_CF_API_BASE = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
+
 # ── Credentials ───────────────────────────────────────────────────────────────
 
 def _load_cf_creds():
     secrets_dir = os.environ.get("SECRETS_DIR", ".")
     for base in [Path.home(), Path(secrets_dir)]:
-        url_f = base / "cf_worker_url.txt"
-        key_f = base / "cf_worker_key.txt"
-        if url_f.exists() and key_f.exists():
-            return url_f.read_text().strip(), key_f.read_text().strip()
+        acct_f  = base / "cf_account_id.txt"
+        token_f = base / "cf_api_token.txt"
+        if acct_f.exists() and token_f.exists():
+            return acct_f.read_text().strip(), token_f.read_text().strip()
     return None, None
 
 
@@ -100,32 +101,43 @@ def _gemini_concept(title, features, keys):
     return None
 
 
-# ── Cloudflare Worker call ────────────────────────────────────────────────────
+# ── Cloudflare Workers AI REST API ───────────────────────────────────────────
 
-def _cf_generate(worker_url, api_key, prompt, img_b64=None):
-    body = {"prompt": prompt}
-    if img_b64:
-        body["image"] = img_b64
+def _cf_generate(account_id, api_token, prompt, product_img_bytes=None):
+    """Call the Cloudflare Workers AI REST API directly — no Worker deployment needed."""
+    if product_img_bytes:
+        model = "@cf/runwayml/stable-diffusion-v1-5-img2img"
+        body  = {
+            "prompt":    prompt,
+            "image":     list(product_img_bytes),   # uint8 array
+            "strength":  0.65,
+            "num_steps": 20,
+        }
+    else:
+        model = "@cf/stabilityai/stable-diffusion-xl-base-1.0"
+        body  = {"prompt": prompt, "num_steps": 20}
+
+    url = _CF_API_BASE.format(account_id=account_id, model=model)
     r = requests.post(
-        worker_url,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        url,
+        headers={"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"},
         json=body,
         timeout=90,
     )
     r.raise_for_status()
-    ct = r.headers.get("Content-Type", "")
-    if "application/json" in ct:
-        raise RuntimeError(f"CF worker returned error: {r.text[:200]}")
+    if "application/json" in r.headers.get("Content-Type", ""):
+        data = r.json()
+        if not data.get("success"):
+            raise RuntimeError(f"CF API error: {data.get('errors', r.text[:200])}")
     return r.content   # PNG bytes
 
 
-def _fetch_img_b64(url):
-    """Download product image and base64-encode it for img2img."""
+def _fetch_img_bytes(url):
+    """Download the product image for use as img2img reference."""
     try:
-        r = requests.get(url, timeout=15,
-                         headers={"User-Agent": "Mozilla/5.0"})
+        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
-        return base64.b64encode(r.content).decode()
+        return r.content
     except Exception as e:
         log(f"  CF hook: could not fetch product image ({e}) — falling back to text-only")
         return None
@@ -225,9 +237,9 @@ def generate_hook(product, gemini_keys, ffmpeg, td):
 
     Returns (None, None) on any failure — the caller continues without the hook.
     """
-    worker_url, api_key = _load_cf_creds()
-    if not worker_url or not api_key:
-        log("  CF hook: credentials not found (cf_worker_url.txt / cf_worker_key.txt) — skipping")
+    account_id, api_token = _load_cf_creds()
+    if not account_id or not api_token:
+        log("  CF hook: credentials not found (cf_account_id.txt / cf_api_token.txt) — skipping")
         return None, None
 
     title    = (product.get("title") or product.get("title_text") or "").strip()
@@ -242,18 +254,18 @@ def generate_hook(product, gemini_keys, ffmpeg, td):
     log(f"  CF hook img1: {concept['image_1'][:90]}")
     log(f"  CF hook img2: {concept['image_2'][:90]}")
 
-    cover_url = (product.get("cover") or "").strip()
-    img_b64   = _fetch_img_b64(cover_url) if cover_url else None
-    mode      = "img2img" if img_b64 else "text-to-image"
-    log(f"  CF hook: calling Cloudflare Worker ({mode}) for 2 images...")
+    cover_url      = (product.get("cover") or "").strip()
+    prod_img_bytes = _fetch_img_bytes(cover_url) if cover_url else None
+    mode           = "img2img" if prod_img_bytes else "text-to-image"
+    log(f"  CF hook: calling Cloudflare Workers AI REST API ({mode}) for 2 images...")
 
     try:
-        img1_bytes = _cf_generate(worker_url, api_key, concept["image_1"], img_b64)
+        img1_bytes = _cf_generate(account_id, api_token, concept["image_1"], prod_img_bytes)
         img1_path  = os.path.join(td, "cf_hook_1.png")
         Path(img1_path).write_bytes(img1_bytes)
         log(f"  CF hook: image 1 saved ({len(img1_bytes):,} bytes)")
 
-        img2_bytes = _cf_generate(worker_url, api_key, concept["image_2"], img_b64)
+        img2_bytes = _cf_generate(account_id, api_token, concept["image_2"], prod_img_bytes)
         img2_path  = os.path.join(td, "cf_hook_2.png")
         Path(img2_path).write_bytes(img2_bytes)
         log(f"  CF hook: image 2 saved ({len(img2_bytes):,} bytes)")
