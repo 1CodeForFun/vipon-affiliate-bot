@@ -84,7 +84,7 @@ def _gemini_concept(title, features, keys):
     prompt_text = _CONCEPT_PROMPT.format(title=title, features=features or title)
     payload = {
         "contents": [{"parts": [{"text": prompt_text}]}],
-        "generationConfig": {"temperature": 0.8, "maxOutputTokens": 1024},
+        "generationConfig": {"temperature": 0.8, "maxOutputTokens": 2048},
     }
     for key in keys:
         url = f"{_GEMINI_API_BASE}/models/{_GEMINI_MODEL}:generateContent?key={key}"
@@ -93,7 +93,15 @@ def _gemini_concept(title, features, keys):
             if r.status_code == 429:
                 continue
             r.raise_for_status()
-            text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+            # gemini-2.5-flash is a thinking model: parts[0] is the internal
+            # thought (thought=True), the actual response is in a later part.
+            parts = r.json()["candidates"][0]["content"]["parts"]
+            text = next(
+                (p["text"] for p in parts if not p.get("thought") and p.get("text")),
+                None,
+            )
+            if not text:
+                raise ValueError("No text part in Gemini response")
             text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
             return json.loads(text.strip())
         except Exception as e:

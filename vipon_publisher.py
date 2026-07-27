@@ -444,7 +444,7 @@ def post_youtube_short(video_url: str, title: str, description: str,
         log(f"YT: Short uploaded ->video_id={video_id}")
 
         # Set custom thumbnail (frame from Veo hook) if provided
-        if thumbnail_path and os.path.exists(thumbnail_path) and video_id:
+        if thumbnail_path and os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0 and video_id:
             try:
                 log("YT: setting thumbnail...")
                 youtube.thumbnails().set(
