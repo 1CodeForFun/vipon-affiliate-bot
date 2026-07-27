@@ -172,25 +172,16 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
     pct   = deal.get("pct", 0)
 
     # ── TikTok ──
-    # Buffer's GraphQL API has no createComment mutation and rejects firstComment
-    # in CreatePostInput for TikTok. Link + code must live in the caption text.
+    # NOTE: Buffer's GraphQL API has no createComment mutation, and firstComment in
+    # CreatePostInput returned HTTP 400 for TikTok. Pending a confirmed approach for
+    # posting comments, the caption contains only the hook text — no link or code.
     tk = _find_channel(channels, "tiktok")
     if tk:
         tk_link = f"https://www.amazon.com/dp/{asin}?tag={TIKTOK_TAG}"
         code     = (deal.get("code") or "").strip()
 
-        lines = [
-            f"{title[:150]}",
-            "",
-            f"🔥 {pct}% OFF — limited time!",
-            "",
-            f"🛒 {tk_link}",
-            "",
-            DISCLOSURE,
-        ]
-        if code:
-            lines += ["", f"Use code 🏷️ {code} at checkout"]
-        tk_text = "\n".join(lines)
+        tk_text = (f"{title[:150]}\n\n"
+                   f"🔥 {pct}% OFF — limited time!")
 
         try:
             pid = _create_post(key, tk["id"], tk_text, video_url,
