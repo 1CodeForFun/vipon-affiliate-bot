@@ -20,6 +20,7 @@ Connected channels (Free plan): freshdealsusa (TikTok), FreshDeals (Pinterest Bu
 """
 
 import os
+import time
 import requests
 
 BUFFER_ENDPOINT = "https://api.buffer.com"
@@ -170,6 +171,25 @@ def _add_comment(key, post_id, text):
     return (cc.get("comment") or {}).get("id")
 
 
+def _wait_for_published(key, post_id, timeout=90, interval=5):
+    """Poll the post status until Buffer reports it as sent/published (or timeout)."""
+    import json as _json
+    q = f"query {{ post(input: {{ id: {_json.dumps(post_id)} }}) {{ id status }} }}"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            data  = _gql(key, q)
+            status = ((data.get("post") or {}).get("status") or "").lower()
+            log(f"  Buffer: post status = {status}")
+            if status in ("sent", "published", "failed", "error"):
+                return status
+        except Exception as e:
+            log(f"  Buffer: status poll error (retrying): {e}")
+        time.sleep(interval)
+    log(f"  Buffer: timeout waiting for post {post_id} — will try comments anyway")
+    return "timeout"
+
+
 def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
     """Publish the (already-hosted) reel to TikTok + Pinterest via Buffer.
     Each channel is attempted independently; a failure on one never blocks the other,
@@ -194,14 +214,12 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
         tk_link = f"https://www.amazon.com/dp/{asin}?tag={TIKTOK_TAG}"
         code     = (deal.get("code") or "").strip()
 
-        # Caption: hook only — no link cluttering the caption text
         tk_text = (f"{title[:150]}\n\n"
-                   f"🔥 {pct}% OFF — limited time!\n\n"
-                   f"Full deals & coupons storefront in bio 🔗")
+                   f"🔥 {pct}% OFF — limited time!")
 
-        # Link + disclosure as first comment; code as second comment.
-        # Both added via _add_comment AFTER posting — Buffer rejects firstComment
-        # in CreatePostInput for TikTok (HTTP 400 schema validation error).
+        # Link + disclosure go in comment 1; discount code in comment 2.
+        # Added via _add_comment AFTER the post is published — Buffer rejects
+        # firstComment in CreatePostInput for TikTok (HTTP 400).
         tk_link_comment = f"🛒 Shop now: {tk_link}\n\n{DISCLOSURE}"
 
         try:
@@ -210,21 +228,26 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
                                thumbnail_url=thumbnail_url)
             log(f"  ✓ Buffer TikTok: posted (id={pid})")
 
-            # Comment 1: affiliate link + disclosure
             if pid:
-                try:
-                    _add_comment(key, pid, tk_link_comment)
-                    log(f"  ✓ Buffer TikTok: link comment added")
-                except Exception as ce:
-                    log(f"  ℹ Buffer TikTok: link comment skipped (non-fatal): {ce}")
+                # Wait for Buffer to publish the post before adding comments
+                pub_status = _wait_for_published(key, pid)
+                if pub_status == "failed":
+                    log("  ✗ Buffer TikTok: post failed — skipping comments")
+                else:
+                    # Comment 1: affiliate link + disclosure
+                    try:
+                        _add_comment(key, pid, tk_link_comment)
+                        log(f"  ✓ Buffer TikTok: link comment added")
+                    except Exception as ce:
+                        log(f"  ℹ Buffer TikTok: link comment skipped (non-fatal): {ce}")
 
-            # Comment 2: discount code (only when there is one)
-            if pid and code:
-                try:
-                    _add_comment(key, pid, f"Use code 🏷️ {code} at checkout")
-                    log(f"  ✓ Buffer TikTok: code comment added ({code})")
-                except Exception as ce:
-                    log(f"  ℹ Buffer TikTok: code comment skipped (non-fatal): {ce}")
+                    # Comment 2: discount code (only when there is one)
+                    if code:
+                        try:
+                            _add_comment(key, pid, f"Use code 🏷️ {code} at checkout")
+                            log(f"  ✓ Buffer TikTok: code comment added ({code})")
+                        except Exception as ce:
+                            log(f"  ℹ Buffer TikTok: code comment skipped (non-fatal): {ce}")
         except Exception as e:
             log(f"  ✗ Buffer TikTok failed: {e}")
     else:
