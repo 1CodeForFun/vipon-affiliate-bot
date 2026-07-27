@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-post_best_to_buffer.py — Post the highest-ranked unposted vipon reel to TikTok + Pinterest.
+post_best_to_buffer.py — Post the highest-ranked vipon reel to TikTok + Pinterest.
 
-Designed to run 2× per day via cron-job.org → GitHub Actions workflow_dispatch.
-Each run reads Sheet1, picks the top unposted-to-Buffer row by Social Score (col S),
-posts to TikTok + Pinterest via Buffer, then marks col T = "Yes" so the next run
-picks the second-highest reel.
+Each run picks the top unposted-to-Buffer row by Social Score (col S), posts via Buffer,
+then marks col T = "Yes". When ALL eligible rows are already marked, col T is reset for
+all of them so the cycle restarts — meaning you can trigger this as many times as you want.
 
 Prerequisites: vipon_publisher.py must have already run (col N = video URL, col P = "Yes").
 """
@@ -62,7 +61,9 @@ def main():
     ws   = _open_sheet()
     rows = ws.get_all_values()
 
-    cands = []
+    # Collect all rows that are built + have a video URL (regardless of T column)
+    all_eligible = []
+    cands        = []
     for idx, row in enumerate(rows[1:], start=2):
         while len(row) < COL_T_BUFFER:
             row.append("")
@@ -71,8 +72,7 @@ def main():
         video_url = row[COL_N_REEL_URL - 1].strip()
         buf_done  = row[COL_T_BUFFER   - 1].strip().lower()
 
-        # Only rows that have been built + posted by vipon_publisher and not yet on Buffer
-        if posted != "yes" or not video_url or buf_done == "yes":
+        if posted != "yes" or not video_url:
             continue
 
         link = row[COL_A_AFF_LINK - 1].strip()
@@ -83,11 +83,25 @@ def main():
         try:    score = float(row[COL_S_SOCIAL - 1] or 0)
         except: score = 0.0
 
-        cands.append((score, idx, row))
+        all_eligible.append((score, idx, row))
+        if buf_done != "yes":
+            cands.append((score, idx, row))
 
-    if not cands:
-        log("No eligible reels — all rows either unbuilt, already Buffer-posted, or missing video URL.")
+    if not all_eligible:
+        log("No eligible reels — no rows are built + posted with a video URL yet.")
         return
+
+    # When every reel has already been posted, reset T for all of them and cycle
+    if not cands:
+        log(f"  All {len(all_eligible)} reel(s) already Buffer-posted — resetting cycle.")
+        reset_cells = [gspread.utils.rowcol_to_a1(r_idx, COL_T_BUFFER)
+                       for _, r_idx, _ in all_eligible]
+        for cell in reset_cells:
+            try:
+                ws.update_acell(cell, "")
+            except Exception as e:
+                log(f"  ⚠️ Reset {cell} failed: {e}")
+        cands = all_eligible
 
     cands.sort(key=lambda c: c[0], reverse=True)
     score, sheet_row, row = cands[0]

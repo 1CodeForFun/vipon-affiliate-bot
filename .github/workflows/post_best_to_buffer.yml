@@ -1,9 +1,8 @@
 name: Post Best Reel to TikTok + Pinterest
 
 # Posts the highest-scored unposted vipon reel to TikTok + Pinterest via Buffer.
-# Run 1 → highest Social Score; Run 2 → second-highest (col T tracks what's done).
-# Schedule 2 triggers/day via cron-job.org (e.g. 11 AM CT and 5 PM CT),
-# after the vipon_publisher runs have already built and posted the reels (col N filled).
+# Cycles through available reels by Social Score; resets automatically when all are done.
+# Trigger as often as you like via cron-job.org workflow_dispatch.
 on:
   workflow_dispatch:
 
