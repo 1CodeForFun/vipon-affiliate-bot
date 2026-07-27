@@ -20,7 +20,6 @@ Connected channels (Free plan): freshdealsusa (TikTok), FreshDeals (Pinterest Bu
 """
 
 import os
-import time
 import requests
 
 BUFFER_ENDPOINT = "https://api.buffer.com"
@@ -123,15 +122,6 @@ mutation($input: CreatePostInput!) {
 }
 """
 
-_CREATE_COMMENT = """
-mutation($input: CreateCommentInput!) {
-  createComment(input: $input) {
-    ... on CommentActionSuccess { comment { id } }
-    ... on MutationError { message }
-  }
-}
-"""
-
 
 def _create_post_assets(key, channel_id, text, assets, metadata, first_comment=None):
     """Low-level createPost with an explicit assets array (shareNow / immediate)."""
@@ -162,33 +152,6 @@ def _create_post(key, channel_id, text, video_url, metadata,
                                metadata, first_comment=first_comment)
 
 
-def _add_comment(key, post_id, text):
-    """Post a follow-up comment on an already-published Buffer post."""
-    res = _gql(key, _CREATE_COMMENT, {"input": {"postId": post_id, "text": text}})
-    cc = res.get("createComment") or {}
-    if cc.get("message"):
-        raise RuntimeError(f"createComment rejected: {cc['message']}")
-    return (cc.get("comment") or {}).get("id")
-
-
-def _wait_for_published(key, post_id, timeout=90, interval=5):
-    """Poll the post status until Buffer reports it as sent/published (or timeout)."""
-    import json as _json
-    q = f"query {{ post(input: {{ id: {_json.dumps(post_id)} }}) {{ id status }} }}"
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            data  = _gql(key, q)
-            status = ((data.get("post") or {}).get("status") or "").lower()
-            log(f"  Buffer: post status = {status}")
-            if status in ("sent", "published", "failed", "error"):
-                return status
-        except Exception as e:
-            log(f"  Buffer: status poll error (retrying): {e}")
-        time.sleep(interval)
-    log(f"  Buffer: timeout waiting for post {post_id} — will try comments anyway")
-    return "timeout"
-
 
 def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
     """Publish the (already-hosted) reel to TikTok + Pinterest via Buffer.
@@ -208,46 +171,31 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
     asin  = deal["asin"]
     pct   = deal.get("pct", 0)
 
-    # ── TikTok (Business account → auto-publish; link in comment, code in 2nd comment) ──
+    # ── TikTok ──
+    # Buffer's GraphQL API has no createComment mutation and rejects firstComment
+    # in CreatePostInput for TikTok. Link + code must live in the caption text.
     tk = _find_channel(channels, "tiktok")
     if tk:
         tk_link = f"https://www.amazon.com/dp/{asin}?tag={TIKTOK_TAG}"
         code     = (deal.get("code") or "").strip()
 
-        tk_text = (f"{title[:150]}\n\n"
-                   f"🔥 {pct}% OFF — limited time!")
-
-        # Link + disclosure go in comment 1; discount code in comment 2.
-        # Added via _add_comment AFTER the post is published — Buffer rejects
-        # firstComment in CreatePostInput for TikTok (HTTP 400).
-        tk_link_comment = f"🛒 Shop now: {tk_link}\n\n{DISCLOSURE}"
+        lines = [
+            f"{title[:150]}",
+            "",
+            f"🔥 {pct}% OFF — limited time!",
+            "",
+            f"🛒 {tk_link}",
+            "",
+            DISCLOSURE,
+        ]
+        if code:
+            lines += ["", f"Use code 🏷️ {code} at checkout"]
+        tk_text = "\n".join(lines)
 
         try:
             pid = _create_post(key, tk["id"], tk_text, video_url,
-                               metadata={"tiktok": {"isAiGenerated": True}},
-                               thumbnail_url=thumbnail_url)
+                               metadata={"tiktok": {"isAiGenerated": True}})
             log(f"  ✓ Buffer TikTok: posted (id={pid})")
-
-            if pid:
-                # Wait for Buffer to publish the post before adding comments
-                pub_status = _wait_for_published(key, pid)
-                if pub_status == "failed":
-                    log("  ✗ Buffer TikTok: post failed — skipping comments")
-                else:
-                    # Comment 1: affiliate link + disclosure
-                    try:
-                        _add_comment(key, pid, tk_link_comment)
-                        log(f"  ✓ Buffer TikTok: link comment added")
-                    except Exception as ce:
-                        log(f"  ℹ Buffer TikTok: link comment skipped (non-fatal): {ce}")
-
-                    # Comment 2: discount code (only when there is one)
-                    if code:
-                        try:
-                            _add_comment(key, pid, f"Use code 🏷️ {code} at checkout")
-                            log(f"  ✓ Buffer TikTok: code comment added ({code})")
-                        except Exception as ce:
-                            log(f"  ℹ Buffer TikTok: code comment skipped (non-fatal): {ce}")
         except Exception as e:
             log(f"  ✗ Buffer TikTok failed: {e}")
     else:
@@ -268,12 +216,10 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
             # Prefer a video pin WITH a cover image; if Pinterest is image-only, fall
             # back to a static image pin so it still publishes. image_url is a public
             # product image from the page capture.
-            asset_options = []
+            # thumbnailUrl in the video asset is rejected by Buffer for all networks.
+            asset_options = [[{"video": {"url": video_url}}]]
             if image_url:
-                asset_options.append([{"video": {"url": video_url, "thumbnailUrl": image_url}}])
                 asset_options.append([{"image": {"url": image_url}}])
-            else:
-                asset_options.append([{"video": {"url": video_url}}])
             pid, last_err = None, None
             for assets in asset_options:
                 try:
