@@ -9,7 +9,7 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout main repo
@@ -49,9 +49,11 @@ jobs:
         run: |
           cp secrets/cloudinary.json ~/cloudinary.json
           cp secrets/PAAPI.csv       ~/PAAPI.csv
-          [ -f secrets/geminipro.txt  ] && cp secrets/geminipro.txt  ~/geminipro.txt  || true
-          [ -f secrets/geminikey.txt  ] && cp secrets/geminikey.txt  ~/geminikey.txt  || true
-          [ -f secrets/geminikeys.txt ] && cp secrets/geminikeys.txt ~/geminikeys.txt || true
+          [ -f secrets/geminipro.txt      ] && cp secrets/geminipro.txt      ~/geminipro.txt      || true
+          [ -f secrets/geminikey.txt      ] && cp secrets/geminikey.txt      ~/geminikey.txt      || true
+          [ -f secrets/geminikeys.txt     ] && cp secrets/geminikeys.txt     ~/geminikeys.txt     || true
+          [ -f secrets/cf_worker_url.txt  ] && cp secrets/cf_worker_url.txt  ~/cf_worker_url.txt  || true
+          [ -f secrets/cf_worker_key.txt  ] && cp secrets/cf_worker_key.txt  ~/cf_worker_key.txt  || true
 
       - name: Publish reel
         env:

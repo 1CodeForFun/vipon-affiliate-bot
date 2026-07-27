@@ -17,6 +17,7 @@ Environment variable:
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -162,15 +163,66 @@ def select_candidates(ws):
 
 
 def build_and_upload(product, keys, ffmpeg, font, tld="com"):
-    """Build the v4 concept video for a product and upload it to Cloudinary.
-    Returns the public video URL, or '' on failure."""
-    with tempfile.TemporaryDirectory(prefix="reel_build_") as td:
-        path = build_concept_video(product, keys, ffmpeg, font, td,
-                                   vo_text=product.get("vo_text") or None, tld=tld)
-        if not path:
-            return ""
-        pub = f"vipon_reels/{product['asin']}_{int(time.time())}"
-        return cloud_upload(path, pub)
+    """Build the v4 concept video (with AI hook prepended) and upload to Cloudinary.
+
+    Returns (video_url, thumb_url, thumb_local_path):
+      video_url       — Cloudinary URL of the final video (hook + carousel)
+      thumb_url       — Cloudinary URL of the peak-moment hook image (thumbnail)
+      thumb_local_path — local copy of the thumbnail image for YouTube upload;
+                         caller must os.unlink() it after use.
+    Returns ("", None, None) on build failure.
+    """
+    from cf_image_hook import generate_hook, prepend_hook_to_reel
+
+    # Persistent temp file for thumbnail — lives beyond the build temp dir
+    _tfd = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    thumb_local = _tfd.name
+    _tfd.close()
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="reel_build_") as td:
+            # Step 1: Build carousel reel
+            reel_path = build_concept_video(product, keys, ffmpeg, font, td,
+                                            vo_text=product.get("vo_text") or None,
+                                            tld=tld)
+            if not reel_path:
+                return "", None, None
+
+            final_path = reel_path
+            thumb_url  = None
+
+            # Step 2: Generate AI hook images + prepend (non-fatal if it fails)
+            try:
+                hook_clip, thumb_img = generate_hook(product, keys, ffmpeg, td)
+                if hook_clip and thumb_img:
+                    hooked = os.path.join(td, "hooked.mp4")
+                    prepend_hook_to_reel(hook_clip, reel_path, ffmpeg, hooked)
+                    final_path = hooked
+                    shutil.copy2(thumb_img, thumb_local)
+                    log("  CF hook: prepended to reel, thumbnail saved")
+            except Exception as e:
+                log(f"  CF hook failed (non-fatal — posting reel without hook): {e}")
+
+            # Step 3: Upload video
+            pub       = f"vipon_reels/{product['asin']}_{int(time.time())}"
+            video_url = cloud_upload(final_path, pub)
+            if not video_url:
+                return "", None, None
+
+            # Step 4: Upload thumbnail image if we have one
+            if os.path.getsize(thumb_local) > 0:
+                try:
+                    thumb_url = cloud_upload(thumb_local, pub + "_thumb", kind="image")
+                    log(f"  Hook thumbnail → {thumb_url}")
+                except Exception as e:
+                    log(f"  Thumbnail upload failed (non-fatal): {e}")
+
+        return video_url, thumb_url, thumb_local
+
+    except Exception:
+        try: os.unlink(thumb_local)
+        except: pass
+        raise
 
 
 # ─── FACEBOOK TOKEN ──────────────────────────────────────────────────────────
@@ -440,15 +492,20 @@ def main() -> None:
     posted_us = False
     for sheet_row, row, product in cands[:4]:   # try up to 4 until one builds
         log(f"US: building reel for row {sheet_row} — {product['title'][:55]}")
-        video_url = build_and_upload(product, keys, ffmpeg, font, tld="com")
+        video_url, thumb_url, thumb_path = build_and_upload(
+            product, keys, ffmpeg, font, tld="com"
+        )
         if not video_url:
             log(f"US: build failed for row {sheet_row} — trying next candidate")
+            if thumb_path:
+                try: os.unlink(thumb_path)
+                except: pass
             continue
 
-        title    = product["title"] or "Deal Alert!"
-        reel_link = product["reel_link"]   # B → manus00-20 (FB + IG reel descriptions)
-        ig_link   = product["ig_link"]     # C → insinstagram-20 (IG)
-        yt_desc  = _build_yt_description(product["yt_link"], product["code"], product["disc"])
+        title     = product["title"] or "Deal Alert!"
+        reel_link = product["reel_link"]
+        ig_link   = product["ig_link"]
+        yt_desc   = _build_yt_description(product["yt_link"], product["code"], product["disc"])
         errors, yt_success = [], False
 
         for fb_file, fb_label in [(FB_FRESHDEALS_TOKEN, "FreshDeals"), (FB_ULTAFIND_TOKEN, "Ultafind")]:
@@ -475,19 +532,27 @@ def main() -> None:
             if not os.path.exists(yt_file):
                 log(f"  warning: {yt_file} not found — skipping"); continue
             try:
-                post_youtube_short(video_url, title, yt_desc, yt_token_file=yt_file)
+                post_youtube_short(video_url, title, yt_desc, yt_token_file=yt_file,
+                                   thumbnail_path=thumb_path)
                 yt_success = True
             except Exception as e:
                 log(f"ERROR (YT {yt_label}): {e}"); errors.append(f"YT-{yt_label}: {e}")
 
-        # Write-back: wrap individually so a stale row number (sheet was reset by a
-        # concurrent scrape run while we were posting) never crashes a run that
-        # already successfully posted to all platforms.
-        for _cell, _val in [(f"N{sheet_row}", video_url),
-                            (f"P{sheet_row}", "Yes"),
-                            (f"R{sheet_row}", "Yes") if yt_success else (None, None)]:
-            if _cell is None:
-                continue
+        # Clean up local thumbnail after all YouTube uploads
+        if thumb_path:
+            try: os.unlink(thumb_path)
+            except: pass
+
+        # Write-back
+        wb_cells = [
+            (f"N{sheet_row}", video_url),
+            (f"P{sheet_row}", "Yes"),
+        ]
+        if yt_success:
+            wb_cells.append((f"R{sheet_row}", "Yes"))
+        if thumb_url:
+            wb_cells.append((f"L{sheet_row}", thumb_url))   # hook peak-frame → Pinterest cover
+        for _cell, _val in wb_cells:
             try:
                 ws.update_acell(_cell, _val)
             except Exception as _e:
@@ -507,7 +572,12 @@ def main() -> None:
 
     for sheet_row2, row2, product2 in cands2[:4]:
         log(f"CA: building reel for row {sheet_row2} — {product2['title'][:55]}")
-        video_url2 = build_and_upload(product2, keys, ffmpeg, font, tld="ca")
+        video_url2, _thumb_url2, thumb_path2 = build_and_upload(
+            product2, keys, ffmpeg, font, tld="ca"
+        )
+        if thumb_path2:
+            try: os.unlink(thumb_path2)
+            except: pass
         if not video_url2:
             log(f"CA: build failed for row {sheet_row2} — trying next candidate")
             continue
