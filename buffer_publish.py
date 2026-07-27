@@ -153,9 +153,10 @@ def _create_post_assets(key, channel_id, text, assets, metadata, first_comment=N
 
 def _create_post(key, channel_id, text, video_url, metadata,
                  thumbnail_url=None, first_comment=None):
+    # thumbnailUrl in the video asset is rejected by Buffer for all social networks
+    # ("social networks do not accept custom video thumbnail images").
+    # Pinterest/TikTok thumbnail offset must use metadata.thumbnailOffset (ms) instead.
     video_asset = {"url": video_url}
-    if thumbnail_url:
-        video_asset["thumbnailUrl"] = thumbnail_url
     return _create_post_assets(key, channel_id, text, [{"video": video_asset}],
                                metadata, first_comment=first_comment)
 
