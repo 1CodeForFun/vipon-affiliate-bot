@@ -18,7 +18,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 SECRETS_DIR       = os.environ.get("SECRETS_DIR", ".")
-GOOGLE_CREDS_FILE = os.path.join(SECRETS_DIR, "google_credentials.json")
+GOOGLE_CREDS_FILE = os.path.join(SECRETS_DIR, "vipon_google_creds.json")
 GOOGLE_SHEET_NAME = "vipon"
 
 # Column indices (1-based) — must match vipon_publisher.py
