@@ -53,8 +53,12 @@ GEMINI_BASE     = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_MODEL    = "gemini-2.5-flash"
 
 CF_API_BASE     = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
-FLUX_MODEL      = "@cf/black-forest-labs/flux-1-schnell"
 FLUX_W, FLUX_H  = 576, 1024   # 9:16 vertical
+
+FLUX_MODELS = {
+    "schnell": ("@cf/black-forest-labs/flux-1-schnell", 4),   # distilled, 4 steps max
+    "dev":     ("@cf/black-forest-labs/flux-1-dev",     28),  # full model, 20-30 steps
+}
 
 # Sheet columns (1-based, matching vipon_publisher.py)
 COL_A = 1   # affiliate link
@@ -264,15 +268,16 @@ def generate_concept(product, keys):
 
 # ── FLUX.1 Schnell image generation ──────────────────────────────────────────
 
-def flux_generate(account_id, api_token, prompt, label="image"):
-    url  = CF_API_BASE.format(account_id=account_id, model=FLUX_MODEL)
+def flux_generate(account_id, api_token, prompt, model_key="schnell", label="image"):
+    model_id, num_steps = FLUX_MODELS[model_key]
+    url  = CF_API_BASE.format(account_id=account_id, model=model_id)
     body = {
         "prompt":    prompt,
-        "num_steps": 4,          # max for Schnell
+        "num_steps": num_steps,
         "width":     FLUX_W,
         "height":    FLUX_H,
     }
-    log(f"  Cloudflare FLUX.1 Schnell → {label}...")
+    log(f"  Cloudflare FLUX.1 {model_key.capitalize()} ({num_steps} steps) → {label}...")
     r = requests.post(
         url,
         headers={"Authorization": f"Bearer {api_token}",
@@ -303,6 +308,9 @@ def main():
     parser.add_argument("--features", type=str,   help="Features/VO text (with --title)")
     parser.add_argument("--price",    type=str,   default="N/A")
     parser.add_argument("--disc",     type=str,   default="0% off")
+    parser.add_argument("--model",    type=str,   default="schnell",
+                        choices=["schnell", "dev", "both"],
+                        help="schnell (fast, 4 steps) | dev (quality, 28 steps) | both (side-by-side)")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(exist_ok=True)
@@ -342,27 +350,27 @@ def main():
     concept_path.write_text(json.dumps({**concept, "product": product}, indent=2, ensure_ascii=False), encoding="utf-8")
     log(f"\n  Concept saved → {concept_path}")
 
-    # ── 3. FLUX.1 Schnell images ──────────────────────────────────────────────
-    log("\nGenerating images via Cloudflare FLUX.1 Schnell...")
+    # ── 3. FLUX image generation ──────────────────────────────────────────────
+    model_keys = ["schnell", "dev"] if args.model == "both" else [args.model]
     account_id, api_token = _load_cf_creds()
 
-    results = {}
-    for i, (key, label) in enumerate([
-        ("image_1_prompt", "pain-point"),
-        ("image_2_prompt", "relief"),
-    ], 1):
-        prompt = concept.get(key, "")
-        if not prompt:
-            log(f"  Skipping image {i} — no prompt")
-            continue
-        try:
-            img_bytes = flux_generate(account_id, api_token, prompt, label)
-            out_path  = OUTPUT_DIR / f"{slug}_img{i}_{label.replace('-','_')}.png"
-            out_path.write_bytes(img_bytes)
-            log(f"  ✓ Image {i} saved → {out_path}  ({len(img_bytes):,} bytes)")
-            results[f"img{i}"] = str(out_path)
-        except Exception as e:
-            log(f"  ✗ Image {i} failed: {e}")
+    for model_key in model_keys:
+        log(f"\nGenerating images via Cloudflare FLUX.1 {model_key.capitalize()}...")
+        for i, (key, label) in enumerate([
+            ("image_1_prompt", "pain-point"),
+            ("image_2_prompt", "relief"),
+        ], 1):
+            prompt = concept.get(key, "")
+            if not prompt:
+                log(f"  Skipping image {i} — no prompt")
+                continue
+            try:
+                img_bytes = flux_generate(account_id, api_token, prompt, model_key, label)
+                out_path  = OUTPUT_DIR / f"{slug}_{model_key}_img{i}_{label.replace('-','_')}.png"
+                out_path.write_bytes(img_bytes)
+                log(f"  ✓ Saved → {out_path}  ({len(img_bytes):,} bytes)")
+            except Exception as e:
+                log(f"  ✗ Image {i} failed: {e}")
 
     log(f"\n=== Done — output in ./{OUTPUT_DIR}/ ===")
     if results:
