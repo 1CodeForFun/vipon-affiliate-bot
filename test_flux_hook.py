@@ -56,8 +56,8 @@ CF_API_BASE     = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai
 FLUX_W, FLUX_H  = 576, 1024   # 9:16 vertical
 
 FLUX_MODELS = {
-    "schnell": ("@cf/black-forest-labs/flux-1-schnell", 4),   # distilled, 4 steps max
-    "dev":     ("@cf/black-forest-labs/flux-1-dev",     28),  # full model, 20-30 steps
+    "schnell":   ("@cf/black-forest-labs/flux-1-schnell",            4),
+    "lightning": ("@cf/bytedance/stable-diffusion-xl-lightning",     1),   # fastest, lower quality
 }
 
 # Sheet columns (1-based, matching vipon_publisher.py)
@@ -309,8 +309,8 @@ def main():
     parser.add_argument("--price",    type=str,   default="N/A")
     parser.add_argument("--disc",     type=str,   default="0% off")
     parser.add_argument("--model",    type=str,   default="schnell",
-                        choices=["schnell", "dev", "both"],
-                        help="schnell (fast, 4 steps) | dev (quality, 28 steps) | both (side-by-side)")
+                        choices=["schnell", "lightning", "both"],
+                        help="schnell (FLUX.1 Schnell, best quality on CF) | lightning (SDXL Lightning, faster/lower quality) | both")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(exist_ok=True)
@@ -373,11 +373,6 @@ def main():
                 log(f"  ✗ Image {i} failed: {e}")
 
     log(f"\n=== Done — output in ./{OUTPUT_DIR}/ ===")
-    if results:
-        log("Review the images and let me know:")
-        log("  • Quality / realism")
-        log("  • Does the pain point come through?")
-        log("  • Any composition or lighting adjustments needed?")
 
 
 if __name__ == "__main__":
