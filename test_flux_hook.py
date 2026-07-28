@@ -28,7 +28,23 @@ from pathlib import Path
 import requests
 
 # ── Config ────────────────────────────────────────────────────────────────────
-SECRETS_DIR     = os.environ.get("SECRETS_DIR", "secrets")
+def _find_secrets_dir():
+    """Search for vipon_google_creds.json in common local locations."""
+    if "SECRETS_DIR" in os.environ:
+        return os.environ["SECRETS_DIR"]
+    candidates = [
+        "secrets",
+        "..",
+        os.path.join("..", "vipon-secrets"),
+        os.path.join("..", "secrets"),
+        str(Path.home()),
+    ]
+    for d in candidates:
+        if os.path.exists(os.path.join(d, "vipon_google_creds.json")):
+            return d
+    return "secrets"   # fallback — will produce a clear error
+
+SECRETS_DIR     = _find_secrets_dir()
 GOOGLE_CREDS    = os.path.join(SECRETS_DIR, "vipon_google_creds.json")
 SHEET_NAME      = "vipon"
 OUTPUT_DIR      = Path("flux_test_output")
@@ -215,7 +231,11 @@ def generate_concept(product, keys):
     )
     payload = {
         "contents":        [{"parts": [{"text": prompt_text}]}],
-        "generationConfig": {"temperature": 0.85, "maxOutputTokens": 2048},
+        "generationConfig": {
+            "temperature":    0.85,
+            "maxOutputTokens": 2048,
+            "thinkingConfig": {"thinkingBudget": 0},  # disable thinking — not needed for JSON output
+        },
     }
     for i, key in enumerate(keys):
         url = f"{GEMINI_BASE}/models/{GEMINI_MODEL}:generateContent?key={key}"
@@ -319,7 +339,7 @@ def main():
 
     # Save concept JSON for reference / iteration
     concept_path = OUTPUT_DIR / f"{slug}_concept.json"
-    concept_path.write_text(json.dumps({**concept, "product": product}, indent=2, ensure_ascii=False))
+    concept_path.write_text(json.dumps({**concept, "product": product}, indent=2, ensure_ascii=False), encoding="utf-8")
     log(f"\n  Concept saved → {concept_path}")
 
     # ── 3. FLUX.1 Schnell images ──────────────────────────────────────────────

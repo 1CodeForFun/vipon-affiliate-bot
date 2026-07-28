@@ -84,7 +84,11 @@ def _gemini_concept(title, features, keys):
     prompt_text = _CONCEPT_PROMPT.format(title=title, features=features or title)
     payload = {
         "contents": [{"parts": [{"text": prompt_text}]}],
-        "generationConfig": {"temperature": 0.8, "maxOutputTokens": 2048},
+        "generationConfig": {
+            "temperature":    0.8,
+            "maxOutputTokens": 2048,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
     }
     for key in keys:
         url = f"{_GEMINI_API_BASE}/models/{_GEMINI_MODEL}:generateContent?key={key}"
