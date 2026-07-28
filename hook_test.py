@@ -583,8 +583,11 @@ def gen_beat_audio(duration: float, td: str, ffmpeg_bin: str) -> str:
     try:
         bpm = 100
         beat = 60.0 / bpm
-        kicks = "+".join(f"sine=f=60:d=0.08:delay={i*beat:.3f}" for i in range(int(duration/beat)+2))
-        hats  = "+".join(f"sine=f=6000:d=0.02:delay={i*beat/2:.3f}" for i in range(int(duration/beat*2)+2))
+        # aevalsrc takes a sample EXPRESSION, not a filter graph — see the same
+        # fix in reel_concept_test.gen_beats. Decaying tones on a modulo clock
+        # reproduce the intended kick (~80 ms) and hat (~17 ms) hits.
+        kicks = f"sin(2*PI*60*t)*exp(-12*mod(t,{beat:.4f}))"
+        hats  = f"sin(2*PI*6000*t)*exp(-60*mod(t,{beat/2:.4f}))"
         fc = (f"[0][1]amix=inputs=2:duration=shortest,volume=0.2,"
               f"afade=t=out:st={max(0,duration-1):.1f}:d=1")
         subprocess.run([ffmpeg_bin, "-y"] + _FF_LOG + [

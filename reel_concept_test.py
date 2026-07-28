@@ -671,8 +671,13 @@ def seg_price(shot, box, dst, td, ffmpeg, img_w, img_h, disc, code, font, old_tx
 def gen_beats(duration, td, ffmpeg):
     out = os.path.join(td, "beats.aac")
     try:
+        # aevalsrc takes a sample EXPRESSION, not a filter graph — the old
+        # "sine=f=60:d=0.08:delay=..." string made ffmpeg fail with
+        # "Could not set non-existent option 'sine'", so every reel was silent
+        # past the VO. A 60 Hz tone with an exponential decay that resets every
+        # 0.5 s gives the same ~80 ms kick at 120 bpm in one expression.
         beat = 0.5  # 120 bpm
-        kicks = "+".join(f"sine=f=60:d=0.08:delay={i*beat:.3f}" for i in range(int(duration/beat)+2))
+        kicks = f"sin(2*PI*60*t)*exp(-12*mod(t,{beat}))"
         subprocess.run([ffmpeg, "-y"] + _FF_LOG + [
             "-f", "lavfi", "-i", f"aevalsrc='{kicks}':s=44100:c=mono",
             "-af", f"volume=0.18,afade=t=out:st={max(0,duration-1):.1f}:d=1",
