@@ -162,15 +162,19 @@ def select_candidates(ws):
     return [(idx, row, p) for _, idx, row, p in cands]
 
 
-def build_and_upload(product, keys, ffmpeg, font, tld="com"):
+def build_and_upload(product, keys, ffmpeg, font, tld="com", with_hook=True):
     """Build the v4 concept video (with AI hook prepended) and upload to Cloudinary.
 
     Returns (video_url, thumb_url, thumb_local_path):
       video_url       — Cloudinary URL of the final video (hook + carousel)
-      thumb_url       — Cloudinary URL of the peak-moment hook image (thumbnail)
+      thumb_url       — Cloudinary URL of the AI pain-point hook image (thumbnail)
       thumb_local_path — local copy of the thumbnail image for YouTube upload;
                          caller must os.unlink() it after use.
     Returns ("", None, None) on build failure.
+
+    with_hook=False skips AI image generation entirely. Cloudflare's free tier is
+    10,000 Neurons/day and one hook image costs ~1,700, so the hook is US-only —
+    Canada posts to Facebook alone and never uses the thumbnail.
     """
     from cf_image_hook import generate_hook, prepend_hook_to_reel
 
@@ -191,17 +195,18 @@ def build_and_upload(product, keys, ffmpeg, font, tld="com"):
             final_path = reel_path
             thumb_url  = None
 
-            # Step 2: Generate AI hook images + prepend (non-fatal if it fails)
-            try:
-                hook_clip, thumb_img = generate_hook(product, keys, ffmpeg, td)
-                if hook_clip and thumb_img:
-                    hooked = os.path.join(td, "hooked.mp4")
-                    prepend_hook_to_reel(hook_clip, reel_path, ffmpeg, hooked)
-                    final_path = hooked
-                    shutil.copy2(thumb_img, thumb_local)
-                    log("  CF hook: prepended to reel, thumbnail saved")
-            except Exception as e:
-                log(f"  CF hook failed (non-fatal — posting reel without hook): {e}")
+            # Step 2: Generate AI hook image + prepend (non-fatal if it fails)
+            if with_hook:
+                try:
+                    hook_clip, thumb_img = generate_hook(product, keys, ffmpeg, td)
+                    if hook_clip and thumb_img:
+                        hooked = os.path.join(td, "hooked.mp4")
+                        prepend_hook_to_reel(hook_clip, reel_path, ffmpeg, hooked)
+                        final_path = hooked
+                        shutil.copy2(thumb_img, thumb_local)
+                        log("  CF hook: prepended to reel, thumbnail saved")
+                except Exception as e:
+                    log(f"  CF hook failed (non-fatal — posting reel without hook): {e}")
 
             # Step 3: Upload video
             pub       = f"vipon_reels/{product['asin']}_{int(time.time())}"
@@ -572,8 +577,10 @@ def main() -> None:
 
     for sheet_row2, row2, product2 in cands2[:4]:
         log(f"CA: building reel for row {sheet_row2} — {product2['title'][:55]}")
+        # No hook for Canada: FB-only, so the thumbnail is never used and the
+        # Cloudflare free-tier budget is reserved for the US reel.
         video_url2, _thumb_url2, thumb_path2 = build_and_upload(
-            product2, keys, ffmpeg, font, tld="ca"
+            product2, keys, ffmpeg, font, tld="ca", with_hook=False
         )
         if thumb_path2:
             try: os.unlink(thumb_path2)

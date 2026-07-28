@@ -55,9 +55,13 @@ GEMINI_MODEL    = "gemini-2.5-flash"
 CF_API_BASE     = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
 FLUX_W, FLUX_H  = 576, 1024   # 9:16 vertical
 
+# Benchmarked cost per 576x1024 image against the 10,000 Neurons/day free tier.
+# (steps=None means the model's own default; we don't pass num_steps.)
 FLUX_MODELS = {
-    "schnell":   ("@cf/black-forest-labs/flux-1-schnell",            4),
-    "lightning": ("@cf/bytedance/stable-diffusion-xl-lightning",     1),   # fastest, lower quality
+    "lucid":     ("@cf/leonardo/lucid-origin",                    None),  # ~1730 n  — PRODUCTION
+    "phoenix":   ("@cf/leonardo/phoenix-1.0",                     None),  # ~1440 n
+    "schnell":   ("@cf/black-forest-labs/flux-1-schnell",            4),  # ~49 n, distortion-prone
+    "lightning": ("@cf/bytedance/stable-diffusion-xl-lightning",  None),  # free, lowest quality
 }
 
 # Sheet columns (1-based, matching vipon_publisher.py)
@@ -70,50 +74,8 @@ COL_O = 15  # VO text / features
 COL_S = 19  # Social Score
 COL_P = 16  # Posted flag
 
-# ── Prompt ────────────────────────────────────────────────────────────────────
-_CONCEPT_PROMPT = """\
-You are a viral short-form video creative director specialising in Amazon affiliate content.
-
-PRODUCT DETAILS:
-  Title:    {title}
-  Price:    {price}
-  Discount: {pct}% off
-  Features / VO script:
-{features}
-
-YOUR TASK:
-Identify the single most relatable PERSONA who would buy this product and the specific
-PAIN POINT this product relieves. Then write TWO photorealistic image prompts for
-FLUX.1, a state-of-the-art AI image generator.
-
-IMAGE 1 — PAIN POINT (hook frame — makes the viewer say "that's exactly me"):
-  Capture the persona IN their frustrating situation, BEFORE they found this product.
-  The viewer must instantly feel the discomfort or struggle.
-  Do NOT show the product yet.
-
-IMAGE 2 — RELIEF / TRANSFORMATION (reward frame — makes the viewer want the product):
-  The same persona experiencing the peak benefit — the moment of relief, satisfaction,
-  power, or delight that this product delivers.
-  The product (or its effect) should be clearly present.
-
-FLUX PROMPT RULES (apply to BOTH images):
-  • Open with: "Photorealistic vertical photograph,"
-  • FACELESS — over-shoulder, hands/wrists only, tight crop below chin, or shot from behind
-  • Describe the EXACT physical scene: setting, body position, props, what hands are doing
-  • Include specific lighting: golden-hour window light / soft overcast / dramatic rim light
-  • Describe colour mood: warm & cozy / cool & clinical / vibrant & energetic
-  • Close with: "vertical 9:16, cinematic depth of field, sharp foreground, Canon EOS R5"
-  • No text, no logos, no on-screen captions
-  • Max 120 words per prompt — FLUX responds best to dense, specific descriptions
-
-Respond ONLY in valid JSON — no markdown, no explanation:
-{{
-  "persona": "2-sentence description of the target buyer",
-  "pain_point": "one sharp sentence — the core frustration this product solves",
-  "image_1_prompt": "complete FLUX prompt for the pain-point frame",
-  "image_2_prompt": "complete FLUX prompt for the relief/transformation frame"
-}}
-"""
+# The concept prompt lives in cf_image_hook so test and production can't drift.
+from cf_image_hook import _CONCEPT_PROMPT, _gemini_concept
 
 
 def log(m): print(m, flush=True)
@@ -222,80 +184,45 @@ def _row_to_product(row, row_num):
 # ── Gemini concept generation ─────────────────────────────────────────────────
 
 def generate_concept(product, keys):
-    pct      = re.search(r"(\d+)", product["disc"] or "0")
-    pct      = pct.group(1) if pct else "0"
+    """Delegates to cf_image_hook._gemini_concept so test == production."""
     features = product["vo_text"] or product["title"]
-    features = "\n".join(f"  - {line.strip()}" for line in features.splitlines() if line.strip())
-
-    prompt_text = _CONCEPT_PROMPT.format(
-        title    = product["title"],
-        price    = product["price"],
-        pct      = pct,
-        features = features,
-    )
-    payload = {
-        "contents":        [{"parts": [{"text": prompt_text}]}],
-        "generationConfig": {
-            "temperature":    0.85,
-            "maxOutputTokens": 2048,
-            "thinkingConfig": {"thinkingBudget": 0},  # disable thinking — not needed for JSON output
-        },
-    }
-    for i, key in enumerate(keys):
-        url = f"{GEMINI_BASE}/models/{GEMINI_MODEL}:generateContent?key={key}"
-        log(f"  Gemini concept (key {i+1}/{len(keys)})...")
-        try:
-            r = requests.post(url, json=payload, timeout=60)
-            if r.status_code == 429:
-                log("  → 429, trying next key")
-                continue
-            r.raise_for_status()
-            # gemini-2.5-flash is a thinking model: skip thought parts
-            parts = r.json()["candidates"][0]["content"]["parts"]
-            text  = next(
-                (p["text"] for p in parts if not p.get("thought") and p.get("text")),
-                None
-            )
-            if not text:
-                raise ValueError("No text part in response")
-            text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
-            concept = json.loads(text.strip())
-            return concept
-        except Exception as e:
-            log(f"  → error: {e}")
-    sys.exit("All Gemini keys failed for concept generation.")
+    features = "\n".join(f"  - {l.strip()}" for l in features.splitlines() if l.strip())
+    concept  = _gemini_concept(product["title"], features, keys)
+    if not concept or not concept.get("image_prompt"):
+        sys.exit("All Gemini keys failed for concept generation.")
+    return concept
 
 
 # ── FLUX.1 Schnell image generation ──────────────────────────────────────────
 
-def flux_generate(account_id, api_token, prompt, model_key="schnell", label="image"):
+def flux_generate(account_id, api_token, prompt, model_key="lucid", label="image"):
     model_id, num_steps = FLUX_MODELS[model_key]
     url  = CF_API_BASE.format(account_id=account_id, model=model_id)
-    body = {
-        "prompt":    prompt,
-        "num_steps": num_steps,
-        "width":     FLUX_W,
-        "height":    FLUX_H,
-    }
-    log(f"  Cloudflare FLUX.1 {model_key.capitalize()} ({num_steps} steps) → {label}...")
+    body = {"prompt": prompt, "width": FLUX_W, "height": FLUX_H}
+    if num_steps:
+        body["num_steps"] = num_steps
+    log(f"  Cloudflare {model_id} → {label}...")
     r = requests.post(
         url,
         headers={"Authorization": f"Bearer {api_token}",
                  "Content-Type":  "application/json"},
-        json=body, timeout=120,
+        json=body, timeout=180,
     )
+    if r.status_code == 429:
+        raise RuntimeError("daily free allocation of 10,000 neurons exhausted "
+                           "(resets at UTC midnight)")
     if r.status_code != 200:
         raise RuntimeError(f"CF API {r.status_code}: {r.text[:300]}")
-    # FLUX returns raw PNG bytes; Workers AI may wrap in JSON on error
+    # Some models return raw PNG bytes, others JSON with a base64 image.
     if "application/json" in r.headers.get("Content-Type", ""):
         data = r.json()
         if not data.get("success"):
             raise RuntimeError(f"CF error: {data.get('errors', r.text[:200])}")
-        # Some models return base64 in JSON
-        img = data.get("result", {}).get("image")
+        img = (data.get("result") or {}).get("image")
         if img:
             import base64
             return base64.b64decode(img)
+        raise RuntimeError("200 but no image in result")
     return r.content   # raw PNG bytes
 
 
@@ -308,9 +235,10 @@ def main():
     parser.add_argument("--features", type=str,   help="Features/VO text (with --title)")
     parser.add_argument("--price",    type=str,   default="N/A")
     parser.add_argument("--disc",     type=str,   default="0% off")
-    parser.add_argument("--model",    type=str,   default="schnell",
-                        choices=["schnell", "lightning", "both"],
-                        help="schnell (FLUX.1 Schnell, best quality on CF) | lightning (SDXL Lightning, faster/lower quality) | both")
+    parser.add_argument("--model",    type=str,   default="lucid",
+                        choices=list(FLUX_MODELS) + ["all"],
+                        help="lucid (production) | phoenix | schnell | lightning | all "
+                             "— note: 'all' burns a large share of the 10k/day free neurons")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(exist_ok=True)
@@ -342,35 +270,26 @@ def main():
 
     log(f"\n  Persona:    {concept.get('persona', '')[:100]}")
     log(f"  Pain point: {concept.get('pain_point', '')[:100]}")
-    log(f"\n  Prompt 1 (pain):\n    {concept.get('image_1_prompt', '')[:150]}")
-    log(f"\n  Prompt 2 (relief):\n    {concept.get('image_2_prompt', '')[:150]}")
+    log(f"\n  Image prompt:\n    {concept.get('image_prompt', '')[:200]}")
 
     # Save concept JSON for reference / iteration
     concept_path = OUTPUT_DIR / f"{slug}_concept.json"
     concept_path.write_text(json.dumps({**concept, "product": product}, indent=2, ensure_ascii=False), encoding="utf-8")
     log(f"\n  Concept saved → {concept_path}")
 
-    # ── 3. FLUX image generation ──────────────────────────────────────────────
-    model_keys = ["schnell", "dev"] if args.model == "both" else [args.model]
+    # ── 3. Image generation ───────────────────────────────────────────────────
+    model_keys = list(FLUX_MODELS) if args.model == "all" else [args.model]
     account_id, api_token = _load_cf_creds()
+    prompt = concept["image_prompt"]
 
     for model_key in model_keys:
-        log(f"\nGenerating images via Cloudflare FLUX.1 {model_key.capitalize()}...")
-        for i, (key, label) in enumerate([
-            ("image_1_prompt", "pain-point"),
-            ("image_2_prompt", "relief"),
-        ], 1):
-            prompt = concept.get(key, "")
-            if not prompt:
-                log(f"  Skipping image {i} — no prompt")
-                continue
-            try:
-                img_bytes = flux_generate(account_id, api_token, prompt, model_key, label)
-                out_path  = OUTPUT_DIR / f"{slug}_{model_key}_img{i}_{label.replace('-','_')}.png"
-                out_path.write_bytes(img_bytes)
-                log(f"  ✓ Saved → {out_path}  ({len(img_bytes):,} bytes)")
-            except Exception as e:
-                log(f"  ✗ Image {i} failed: {e}")
+        try:
+            img_bytes = flux_generate(account_id, api_token, prompt, model_key, "pain-point")
+            out_path  = OUTPUT_DIR / f"{slug}_{model_key}.png"
+            out_path.write_bytes(img_bytes)
+            log(f"  ✓ Saved → {out_path}  ({len(img_bytes):,} bytes)")
+        except Exception as e:
+            log(f"  ✗ {model_key} failed: {e}")
 
     log(f"\n=== Done — output in ./{OUTPUT_DIR}/ ===")
 
