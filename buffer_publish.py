@@ -184,11 +184,8 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
                    f"🔥 {pct}% OFF — limited time!")
 
         try:
-            # thumbnailOffset (ms): 500 = 0.5s into the video, which lands on the
-            # first AI hook image (the 2-second hook clip starts at 0).
             pid = _create_post(key, tk["id"], tk_text, video_url,
-                               metadata={"tiktok": {"isAiGenerated": True,
-                                                     "thumbnailOffset": 500}})
+                               metadata={"tiktok": {"isAiGenerated": True}})
             log(f"  ✓ Buffer TikTok: posted (id={pid})")
         except Exception as e:
             log(f"  ✗ Buffer TikTok failed: {e}")
