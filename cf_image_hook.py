@@ -39,9 +39,19 @@ _GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _GEMINI_MODEL    = "gemini-2.5-flash"
 
 _CF_API_BASE = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
-_IMAGE_MODEL = "@cf/leonardo/lucid-origin"
 _IMG_W, _IMG_H = 576, 1024      # 9:16 vertical — matches the 720x1280 reel
 _HOOK_SECS     = 2.0            # length of the prepended hook clip
+
+# Ordered best-quality-first. Cloudflare itself tells us when the daily neuron
+# grant is gone (HTTP 429), so rather than tracking a budget we just walk down
+# the chain: a cheaper image beats no image. Schnell costs ~35x less than Lucid
+# Origin, so it still works long after the premium budget is spent.
+_MODEL_CHAIN = [
+    ("@cf/leonardo/lucid-origin",            {}),
+    ("@cf/black-forest-labs/flux-1-schnell",  {"num_steps": 4}),
+]
+
+_IMAGE_MODEL = _MODEL_CHAIN[0][0]   # preferred model, for logging/tests
 
 _CONCEPT_PROMPT = """\
 You are a viral short-form video creative director specialising in Amazon affiliate content.
@@ -134,10 +144,14 @@ def _gemini_concept(title, features, keys):
 
 # ── Cloudflare Workers AI REST API ───────────────────────────────────────────
 
-def _cf_generate(account_id, api_token, prompt):
-    """Generate one image. Returns PNG bytes. Raises on failure."""
-    url  = _CF_API_BASE.format(account_id=account_id, model=_IMAGE_MODEL)
-    body = {"prompt": prompt, "width": _IMG_W, "height": _IMG_H}
+class QuotaExhausted(RuntimeError):
+    """Cloudflare returned 429 — the daily free neuron grant is spent."""
+
+
+def _cf_generate_one(account_id, api_token, prompt, model, extra=None):
+    """Generate one image with a specific model. Returns PNG bytes. Raises on failure."""
+    url  = _CF_API_BASE.format(account_id=account_id, model=model)
+    body = {"prompt": prompt, "width": _IMG_W, "height": _IMG_H, **(extra or {})}
     r = requests.post(
         url,
         headers={"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"},
@@ -145,7 +159,7 @@ def _cf_generate(account_id, api_token, prompt):
         timeout=120,
     )
     if r.status_code == 429:
-        raise RuntimeError("daily free neuron allocation exhausted")
+        raise QuotaExhausted("daily free neuron allocation exhausted")
     r.raise_for_status()
 
     # Lucid Origin returns JSON with a base64 image; some models return raw bytes.
@@ -158,6 +172,25 @@ def _cf_generate(account_id, api_token, prompt):
             raise RuntimeError("CF returned 200 but no image in result")
         return base64.b64decode(img_b64)
     return r.content
+
+
+def _cf_generate(account_id, api_token, prompt):
+    """Walk the model chain best-first, degrading on quota exhaustion.
+
+    Returns (png_bytes, model_used). Raises only if every model fails.
+    """
+    last_err = None
+    for model, extra in _MODEL_CHAIN:
+        try:
+            log(f"  CF hook: generating image via {model}...")
+            return _cf_generate_one(account_id, api_token, prompt, model, extra), model
+        except QuotaExhausted as e:
+            log(f"  CF hook: {model} — daily neuron grant spent, trying cheaper model")
+            last_err = e
+        except Exception as e:
+            log(f"  CF hook: {model} failed ({e}) — trying next model")
+            last_err = e
+    raise last_err or RuntimeError("no image models configured")
 
 
 # ── FFmpeg helpers ────────────────────────────────────────────────────────────
@@ -248,13 +281,12 @@ def generate_hook(product, gemini_keys, ffmpeg, td):
     log(f"  CF hook prompt:     {concept['image_prompt'][:90]}")
 
     try:
-        log(f"  CF hook: generating image via {_IMAGE_MODEL}...")
-        img_bytes = _cf_generate(account_id, api_token, concept["image_prompt"])
-        img_path  = os.path.join(td, "cf_hook.png")
+        img_bytes, model_used = _cf_generate(account_id, api_token, concept["image_prompt"])
+        img_path = os.path.join(td, "cf_hook.png")
         Path(img_path).write_bytes(img_bytes)
-        log(f"  CF hook: image saved ({len(img_bytes):,} bytes)")
+        log(f"  CF hook: image saved ({len(img_bytes):,} bytes) via {model_used}")
     except Exception as e:
-        log(f"  CF hook: image generation failed: {e} — skipping")
+        log(f"  CF hook: all image models failed: {e} — skipping")
         return None, None
 
     try:
