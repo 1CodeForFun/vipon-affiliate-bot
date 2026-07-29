@@ -48,7 +48,10 @@ jobs:
       - name: Copy credential files for the video builder
         run: |
           cp secrets/cloudinary.json ~/cloudinary.json
-          cp secrets/PAAPI.csv       ~/PAAPI.csv
+          # PAAPI.csv is legacy: PA-API v5 was retired 2026-05-15. Kept only so the
+          # old client init does not raise; FDP-credentials.csv is what is used now.
+          [ -f secrets/PAAPI.csv            ] && cp secrets/PAAPI.csv            ~/PAAPI.csv            || true
+          [ -f secrets/FDP-credentials.csv  ] && cp secrets/FDP-credentials.csv  ~/FDP-credentials.csv  || true
           [ -f secrets/geminipro.txt      ] && cp secrets/geminipro.txt      ~/geminipro.txt      || true
           [ -f secrets/geminikey.txt      ] && cp secrets/geminikey.txt      ~/geminikey.txt      || true
           [ -f secrets/geminikeys.txt     ] && cp secrets/geminikeys.txt     ~/geminikeys.txt     || true

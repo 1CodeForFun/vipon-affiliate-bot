@@ -499,8 +499,16 @@ def _handle_continue_shopping(driver, url, settle=5, tries=2):
 
 def capture_page(asin, td, ffmpeg, tld="com"):
     """Return (gallery_image_urls, screenshot_path, img_w, img_h, price_box, reviews_box)."""
-    # PA API is primary for images — reliable, no bot-detection
-    imgs = _paapi_get_images(asin, tld)
+    # Creators API is primary for images — reliable, no bot-detection. It replaced
+    # PA-API v5, which Amazon retired 2026-05-15 (the old path only ever 403'd).
+    # Returns [] until the account clears the Creators API eligibility bar, in
+    # which case the Selenium gallery scrape below supplies the images instead.
+    try:
+        from creators_api import get_images as _creators_get_images
+        imgs = _creators_get_images(asin, tld)
+    except Exception as e:
+        log(f"  Creators API unavailable ({e}) — using Selenium images")
+        imgs = []
 
     try:
         from selenium import webdriver

@@ -7,8 +7,14 @@ fb_page_token-ultafind.json
 token_youtube.json
 truehvYT.json
 PAAPI.csv
+PAAPICredentials.csv
+FDP-credentials.csv
 videokey.txt
 geminikey.txt
+geminikeys.txt
+geminipro.txt
+cf_account_id.txt
+cf_api_token.txt
 
 # Python
 __pycache__/
@@ -33,5 +39,7 @@ token_youtube_ultafind.json
 reel_output/
 hook_test_output/
 scraper_test_output/
+flux_test_output/
+cf_probe_output/
 localfont.ttf
 paapi5_python_sdk/
