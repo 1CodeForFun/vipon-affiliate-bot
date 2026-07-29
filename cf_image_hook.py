@@ -9,14 +9,19 @@ YouTube/Pinterest thumbnail.
 
 Model: @cf/leonardo/lucid-origin (Leonardo Lucid Origin)
   Chosen after benchmarking every text-to-image model on the account.
-  FLUX.1 Schnell is ~35x cheaper but produces mangled hands and artifacts.
-  FLUX.2 [dev] is better still but needs multipart and ~113s/image, and burns
-  the free allocation in a handful of calls.
+  FLUX.1 Schnell is ~5x cheaper but produces mangled hands and artifacts.
+  FLUX.2 [dev] is better still but needs multipart, ~113s/image, and 2,500
+  neurons/call — only ~4 images/day, so it cannot cover 6 publisher runs.
 
-BUDGET NOTE — Cloudflare grants 10,000 Neurons/day free, shared across ALL
-Workers AI usage on the account. Lucid Origin costs roughly 1,700 neurons per
-576x1024 image, so this must stay at ONE image per run, US only (~6/day).
-Raising the image count or enabling this for Canada will exceed the free tier.
+BUDGET — Cloudflare grants 10,000 Neurons/day free, shared across ALL Workers
+AI usage on the account. MEASURED costs per 576x1024 image (from the account's
+own analytics via cf_neuron_report.py — the published per-tile rates overstate
+Lucid Origin by ~5x, so do not compute these from the docs):
+    lucid-origin   306 n/image  -> ~32 images/day
+    flux-1-schnell  62 n/image  -> ~160 images/day
+    phoenix-1.0  1,560 n/image  (5x Lucid for worse quality — not used)
+    flux-2-dev   2,500 n/image
+At one image per US run (6/day) this uses ~1,836 n, about 18% of the grant.
 
 Credentials (loaded from home dir or SECRETS_DIR):
   cf_account_id.txt  — Cloudflare Account ID
@@ -44,7 +49,7 @@ _HOOK_SECS     = 2.0            # length of the prepended hook clip
 
 # Ordered best-quality-first. Cloudflare itself tells us when the daily neuron
 # grant is gone (HTTP 429), so rather than tracking a budget we just walk down
-# the chain: a cheaper image beats no image. Schnell costs ~35x less than Lucid
+# the chain: a cheaper image beats no image. Schnell costs ~5x less than Lucid
 # Origin, so it still works long after the premium budget is spent.
 _MODEL_CHAIN = [
     ("@cf/leonardo/lucid-origin",            {}),

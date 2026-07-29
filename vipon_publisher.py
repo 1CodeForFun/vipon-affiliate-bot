@@ -172,9 +172,10 @@ def build_and_upload(product, keys, ffmpeg, font, tld="com", with_hook=True):
                          caller must os.unlink() it after use.
     Returns ("", None, None) on build failure.
 
-    with_hook=False skips AI image generation entirely. Cloudflare's free tier is
-    10,000 Neurons/day and one hook image costs ~1,700, so the hook is US-only —
-    Canada posts to Facebook alone and never uses the thumbnail.
+    with_hook=False skips AI image generation entirely. Canada posts to Facebook
+    alone and never uses the thumbnail, so it does not pay for an image.
+    (Measured cost is 306 neurons/image against a 10,000/day free grant, so this
+    is headroom rather than a hard constraint — see cf_image_hook for the budget.)
     """
     from cf_image_hook import generate_hook, prepend_hook_to_reel
 
