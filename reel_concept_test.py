@@ -63,19 +63,33 @@ _FF_ENCODE = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-threads
 def log(m): print(m, flush=True)
 
 # ─── CREDENTIALS / TOOLS ──────────────────────────────────────────────────────
+# geminipro.txt holds the BILLED (paid Google Cloud) key. It used to be index 0,
+# so every Gemini call in every flow — post text, VO script, TTS, hook concept —
+# charged the paid account first and only fell back to the free keys once it
+# errored (the "prepayment credits are depleted" 429s in the logs). It is now
+# excluded entirely; set GEMINI_ALLOW_PAID=1 to opt back in.
+_PAID_KEY_FILE = "geminipro.txt"
+_FREE_KEY_FILES = ("geminikeys.txt", "geminikey.txt")
+
+
 def _read_gemini_keys():
+    """Free Gemini API keys, in try order. Every file is parsed line-by-line, so
+    it does not matter which filename holds the multi-key list."""
     out = []
-    for path, _ in ((os.path.expanduser("~/geminipro.txt"), 1),):
-        if os.path.exists(path):
-            k = open(path).read().strip()
-            if k: out.append(k)
-    multi = os.path.expanduser("~/geminikeys.txt")
-    if os.path.exists(multi):
-        out += [l.strip() for l in open(multi) if l.strip() and not l.startswith("#")]
-    single = os.path.expanduser("~/geminikey.txt")
-    if os.path.exists(single):
-        k = open(single).read().strip()
-        if k and k not in out: out.append(k)
+
+    def _add(path):
+        if not os.path.exists(path):
+            return
+        for line in open(path):
+            k = line.strip()
+            if k and not k.startswith("#") and k not in out:
+                out.append(k)
+
+    for name in _FREE_KEY_FILES:
+        _add(os.path.expanduser(f"~/{name}"))
+
+    if os.environ.get("GEMINI_ALLOW_PAID", "").strip() == "1":
+        _add(os.path.expanduser(f"~/{_PAID_KEY_FILE}"))   # appended LAST, never first
     return out
 
 def _load_cloudinary():

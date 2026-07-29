@@ -84,17 +84,12 @@ def log(m): print(m, flush=True)
 # ── Credentials ───────────────────────────────────────────────────────────────
 
 def _load_gemini_keys():
-    keys = []
-    for fname in ["geminipro.txt", "geminikeys.txt", "geminikey.txt"]:
-        p = Path.home() / fname
-        if p.exists():
-            text = p.read_text().strip()
-            for line in text.splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and line not in keys:
-                    keys.append(line)
+    """Use the production reader so this test never touches the billed key
+    (~/geminipro.txt) — see reel_concept_test._read_gemini_keys."""
+    from reel_concept_test import _read_gemini_keys
+    keys = _read_gemini_keys()
     if not keys:
-        sys.exit("No Gemini keys found (~/geminikey.txt / ~/geminikeys.txt)")
+        sys.exit("No free Gemini keys found (~/geminikeys.txt / ~/geminikey.txt)")
     return keys
 
 
