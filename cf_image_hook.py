@@ -27,9 +27,17 @@ SUCCESSFUL calls only. (Doing it wrong gave "306/image" and a 6x-too-generous
 budget.) The published per-tile rate independently confirms 1,836:
 2.25 tiles x 636 n/tile + ~34 steps x 12 n/step ~= 1,839.
 
-At 6 US publisher runs/day this needs 11,016 n against a 10,000 grant, so the
-last run of the day falls back to Schnell via _MODEL_CHAIN. That is expected,
-not a fault.
+THE LIMIT BEHAVES AS A ROLLING ~24h WINDOW, NOT A CALENDAR UTC DAY, whatever
+the docs say. Observed: 429 while the current UTC day showed only 38% used and
+a run 48 minutes later succeeded; and, separately, still 429 more than 8 hours
+into a fresh UTC day that had logged 0 neurons, following a day that went 13%
+over. Treat "10,000 per rolling 24h" as the real constraint.
+
+At 1,836 n/image that sustains ~5.4 images per rolling 24h, so 6 publisher runs
+a day will intermittently hit the wall. Note the 429 is ACCOUNT-WIDE: when the
+grant is gone every metered model refuses, so _MODEL_CHAIN cannot rescue it —
+the chain only helps when an individual model is unavailable. Reducing runs, or
+generating at a smaller size (tile count dominates the cost), are the levers.
 
 Credentials (loaded from home dir or SECRETS_DIR):
   cf_account_id.txt  — Cloudflare Account ID
@@ -193,15 +201,21 @@ def _cf_generate(account_id, api_token, prompt):
     Returns (png_bytes, model_used). Raises only if every model fails.
     """
     last_err = None
-    for model, extra in _MODEL_CHAIN:
+    last_i   = len(_MODEL_CHAIN) - 1
+    for i, (model, extra) in enumerate(_MODEL_CHAIN):
+        more = " — trying next model" if i < last_i else ""
         try:
             log(f"  CF hook: generating image via {model}...")
             return _cf_generate_one(account_id, api_token, prompt, model, extra), model
         except QuotaExhausted as e:
-            log(f"  CF hook: {model} — daily neuron grant spent, trying cheaper model")
+            # 429 is ACCOUNT-WIDE, not per-model: once the grant is spent every
+            # metered model refuses, so falling through to a cheaper one does not
+            # help here. The chain still earns its keep when a single model is
+            # unavailable or rejects the request.
+            log(f"  CF hook: {model} — neuron grant spent (account-wide){more}")
             last_err = e
         except Exception as e:
-            log(f"  CF hook: {model} failed ({e}) — trying next model")
+            log(f"  CF hook: {model} failed ({e}){more}")
             last_err = e
     raise last_err or RuntimeError("no image models configured")
 
