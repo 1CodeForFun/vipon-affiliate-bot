@@ -173,9 +173,9 @@ def build_and_upload(product, keys, ffmpeg, font, tld="com", with_hook=True):
     Returns ("", None, None) on build failure.
 
     with_hook=False skips AI image generation entirely. Canada posts to Facebook
-    alone and never uses the thumbnail, so it does not pay for an image.
-    (Measured cost is 306 neurons/image against a 10,000/day free grant, so this
-    is headroom rather than a hard constraint — see cf_image_hook for the budget.)
+    alone and never uses the thumbnail, so it does not pay for an image — and at
+    1,836 neurons per image against a 10,000/day grant, 6 US runs already exceed
+    the budget on their own. See cf_image_hook for the full figures.
     """
     from cf_image_hook import generate_hook, prepend_hook_to_reel
 

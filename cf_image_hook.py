@@ -14,14 +14,22 @@ Model: @cf/leonardo/lucid-origin (Leonardo Lucid Origin)
   neurons/call — only ~4 images/day, so it cannot cover 6 publisher runs.
 
 BUDGET — Cloudflare grants 10,000 Neurons/day free, shared across ALL Workers
-AI usage on the account. MEASURED costs per 576x1024 image (from the account's
-own analytics via cf_neuron_report.py — the published per-tile rates overstate
-Lucid Origin by ~5x, so do not compute these from the docs):
-    lucid-origin   306 n/image  -> ~32 images/day
+AI usage on the account. Cost per 576x1024 image:
+    lucid-origin 1,836 n/image  -> 5.4 images/day
     flux-1-schnell  62 n/image  -> ~160 images/day
-    phoenix-1.0  1,560 n/image  (5x Lucid for worse quality — not used)
-    flux-2-dev   2,500 n/image
-At one image per US run (6/day) this uses ~1,836 n, about 18% of the grant.
+    phoenix-1.0  1,560 n/image  (worse quality than Lucid — not used)
+    flux-2-dev   2,500 n/image  (multipart + ~113s — not usable at this volume)
+
+READ THE NEURON FIGURES CAREFULLY when re-deriving these from
+cf_neuron_report.py: 429-rejected calls are logged with 0 neurons, so
+total/call_count badly understates the true cost. Divide by the number of
+SUCCESSFUL calls only. (Doing it wrong gave "306/image" and a 6x-too-generous
+budget.) The published per-tile rate independently confirms 1,836:
+2.25 tiles x 636 n/tile + ~34 steps x 12 n/step ~= 1,839.
+
+At 6 US publisher runs/day this needs 11,016 n against a 10,000 grant, so the
+last run of the day falls back to Schnell via _MODEL_CHAIN. That is expected,
+not a fault.
 
 Credentials (loaded from home dir or SECRETS_DIR):
   cf_account_id.txt  — Cloudflare Account ID
