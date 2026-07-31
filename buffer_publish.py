@@ -142,14 +142,69 @@ def _create_post_assets(key, channel_id, text, assets, metadata, first_comment=N
     return (cp.get("post") or {}).get("id")
 
 
+# Which frame Buffer uses as the video cover, in ms. 1000 lands one second into
+# the 2-second AI hook clip, so the cover is the pain-point image.
+THUMB_OFFSET_MS = 1000
+
+
+def _video_asset(video_url, thumbnail_offset_ms=THUMB_OFFSET_MS):
+    """Video asset carrying an explicit cover frame.
+
+    Buffer's schema documents VideoAssetInput.thumbnailUrl as "Do not use:
+    social networks do not accept custom video thumbnail images". The supported
+    control is VideoMetadataInput.thumbnailOffset (ms), which picks a frame out
+    of the video itself. It belongs on the VIDEO ASSET's metadata — not on
+    metadata.tiktok, which has no such field and returns INTERNAL_SERVER_ERROR.
+
+    Without it Buffer stores the post with no cover at all, and Pinterest
+    refuses to publish a coverless video pin ("An unknown error has occurred").
+    Retrying does not help because retry republishes the same coverless asset;
+    only re-saving through Buffer's own composer generates a frame.
+    """
+    asset = {"url": video_url}
+    if thumbnail_offset_ms is not None:
+        asset["metadata"] = {"thumbnailOffset": int(thumbnail_offset_ms)}
+    return {"video": asset}
+
+
 def _create_post(key, channel_id, text, video_url, metadata,
                  thumbnail_url=None, first_comment=None):
-    # thumbnailUrl in the video asset is rejected by Buffer for all social networks
-    # ("social networks do not accept custom video thumbnail images").
-    # Pinterest/TikTok thumbnail offset must use metadata.thumbnailOffset (ms) instead.
-    video_asset = {"url": video_url}
-    return _create_post_assets(key, channel_id, text, [{"video": video_asset}],
+    return _create_post_assets(key, channel_id, text, [_video_asset(video_url)],
                                metadata, first_comment=first_comment)
+
+
+_POST_STATUS = """
+query($id: PostId!) {
+  post(input: { id: $id }) {
+    id status sentAt externalLink
+    error { message rawError }
+  }
+}
+"""
+
+
+def _verify_published(key, post_id, tries=6, delay=5):
+    """Poll a post until it leaves the sending state.
+
+    createPost only means Buffer ACCEPTED the post; publishing happens
+    asynchronously and can still fail. Without this the log reported success
+    for pins that never went out. Returns (status, detail).
+    """
+    import time
+    status, detail = "unknown", ""
+    for i in range(tries):
+        try:
+            p = (_gql(key, _POST_STATUS, {"id": post_id}) or {}).get("post") or {}
+        except Exception as e:
+            return "unknown", f"status check failed: {e}"
+        status = p.get("status") or "unknown"
+        err    = p.get("error") or {}
+        detail = err.get("message") or err.get("rawError") or p.get("externalLink") or ""
+        if status in ("sent", "error"):
+            return status, detail
+        if i < tries - 1:
+            time.sleep(delay)
+    return status, detail   # still sending/scheduled — report as-is
 
 
 
@@ -186,7 +241,13 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
         try:
             pid = _create_post(key, tk["id"], tk_text, video_url,
                                metadata={"tiktok": {"isAiGenerated": True}})
-            log(f"  ✓ Buffer TikTok: posted (id={pid})")
+            status, detail = _verify_published(key, pid)
+            if status == "sent":
+                log(f"  ✓ Buffer TikTok: published — {detail or pid}")
+            elif status == "error":
+                log(f"  ✗ Buffer TikTok: Buffer accepted but publishing FAILED — {detail}")
+            else:
+                log(f"  … Buffer TikTok: still '{status}' (id={pid}) — check Buffer")
         except Exception as e:
             log(f"  ✗ Buffer TikTok failed: {e}")
     else:
@@ -203,28 +264,38 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
                 raise RuntimeError("no Pinterest boards available on channel")
             meta = {"pinterest": {"title": title[:95], "url": pin_link,
                                   "boardServiceId": board_id}}
-            # Buffer's Pinterest requires an image (a bare video asset is rejected).
-            # Prefer a video pin WITH a cover image; if Pinterest is image-only, fall
-            # back to a static image pin so it still publishes. image_url is a public
-            # product image from the page capture.
-            # thumbnailUrl in the video asset is rejected by Buffer for all networks.
-            asset_options = [[{"video": {"url": video_url}}]]
+            # Pinterest video pins need a cover frame; _video_asset supplies one via
+            # metadata.thumbnailOffset. A static image pin is kept as a fallback for
+            # when Buffer rejects the video asset outright, or when the video pin is
+            # accepted but fails to publish. image_url is the AI hook thumbnail (col L).
+            attempts = [("video pin", [_video_asset(video_url)])]
             if image_url:
-                asset_options.append([{"image": {"url": image_url}}])
-            pid, last_err = None, None
-            for assets in asset_options:
+                attempts.append(("image pin", [{"image": {"url": image_url}}]))
+
+            posted, last_err = False, None
+            for label, assets in attempts:
                 try:
                     pid = _create_post_assets(key, pin["id"], pin_text, assets, meta)
-                    break
                 except Exception as e:
                     last_err = e
-                    if "image" in str(e).lower():
-                        log(f"  Buffer Pinterest: {e} — falling back to image pin")
-                        continue
-                    raise
-            if pid:
-                log(f"  ✓ Buffer Pinterest: posted (id={pid})")
-            else:
+                    log(f"  Buffer Pinterest: {label} rejected: {e}")
+                    continue
+
+                status, detail = _verify_published(key, pid)
+                if status == "sent":
+                    log(f"  ✓ Buffer Pinterest: {label} published — {detail or pid}")
+                    posted = True
+                    break
+                if status == "error":
+                    last_err = detail
+                    log(f"  ✗ Buffer Pinterest: {label} accepted but publishing "
+                        f"FAILED — {detail}")
+                    continue          # try the image pin
+                log(f"  … Buffer Pinterest: {label} still '{status}' (id={pid})")
+                posted = True         # queued, not a failure — don't double-post
+                break
+
+            if not posted:
                 log(f"  ✗ Buffer Pinterest failed: {last_err}")
         except Exception as e:
             log(f"  ✗ Buffer Pinterest failed: {e}")
