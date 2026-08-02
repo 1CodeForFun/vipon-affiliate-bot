@@ -59,7 +59,9 @@ jobs:
       - name: Copy credential files
         run: |
           cp secrets/vipon_google_creds.json .
-          cp secrets/PAAPI.csv ~/PAAPI.csv
+          # PAAPI.csv is legacy — PA-API 5 was retired 2026-05-15 and is no longer called.
+          [ -f secrets/PAAPI.csv            ] && cp secrets/PAAPI.csv            ~/PAAPI.csv            || true
+          [ -f secrets/FDP-credentials.csv  ] && cp secrets/FDP-credentials.csv  ~/FDP-credentials.csv  || true
           cp secrets/videokey.txt ~/videokey.txt
           [ -f secrets/geminikey.txt ] && cp secrets/geminikey.txt ~/geminikey.txt || true
           cp secrets/vipon_accounts.json ~/vipon_accounts.json

@@ -1513,31 +1513,8 @@ def resolve_cover_image_url(driver) -> str:
         return _extract_amazon_img_from_source(driver.page_source or "")
     except Exception:
         return ""
-# PA-API client cached at module level — created once, reused across all products
-_PAAPI_CLIENT = None
-
-def _get_paapi_client():
-    global _PAAPI_CLIENT
-    if _PAAPI_CLIENT is not None:
-        return _PAAPI_CLIENT
-    try:
-        import csv
-        from paapi5_python_sdk.api.default_api import DefaultApi
-        csv_path = os.path.expanduser("~/PAAPI.csv")
-        with open(csv_path) as f:
-            row = next(csv.DictReader(f))
-            access = row["Access Key"].strip()
-            secret = row["Secret Key"].strip()
-        _PAAPI_CLIENT = DefaultApi(
-            access_key=access,
-            secret_key=secret,
-            host="webservices.amazon.com",
-            region="us-east-1",
-        )
-        return _PAAPI_CLIENT
-    except Exception as e:
-        log(f"  ⚠️ PA-API client init failed: {e}")
-        return None
+# PA-API 5 was retired 2026-05-15; its client lived here and is gone. Image
+# lookups now go through creators_api.get_images (see fetch_amazon_images).
 
 
 def _fetch_images_http(asin: str, tld: str = "com", max_imgs: int = 9) -> list:
@@ -1581,52 +1558,24 @@ def _fetch_images_http(asin: str, tld: str = "com", max_imgs: int = 9) -> list:
 
 def fetch_amazon_images(driver, asin: str, tld: str = "com", max_imgs: int = 9) -> list:
     """
-    Primary: PA-API 5. Fallback: lightweight HTTP scrape of the product page.
+    Primary: Amazon Creators API. Fallback: lightweight HTTP scrape of the page.
     The 'driver' param is kept for signature compatibility but is not used.
+
+    This used to call PA-API 5, which Amazon retired on 2026-05-15 — every call
+    cost a round-trip and dumped a 403 AssociateNotEligible traceback into the
+    log before falling through to the HTTP scrape that was doing the real work.
+    The Creators API replaces it and currently returns nothing for the same
+    eligibility reason (10 qualified sales in 30 days), but it fails in one
+    quiet line and starts working by itself once that bar is met.
     """
     if not asin:
         return []
     imgs = []
-    client = _get_paapi_client()
-    if client:
-        try:
-            from paapi5_python_sdk.get_items_request import GetItemsRequest
-            from paapi5_python_sdk.get_items_resource import GetItemsResource
-            from paapi5_python_sdk.partner_type import PartnerType
-
-            log(f"  ↳ Amazon PA-API: {asin}")
-            request = GetItemsRequest(
-                partner_tag=AFFILIATE_ID_CA if tld == "ca" else AFFILIATE_ID,
-                partner_type=PartnerType.ASSOCIATES,
-                marketplace=f"www.amazon.{tld}",
-                item_ids=[asin],
-                resources=[
-                    GetItemsResource.IMAGES_PRIMARY_LARGE,
-                    GetItemsResource.IMAGES_VARIANTS_LARGE,
-                ],
-            )
-            response = client.get_items(request)
-            if response and response.items_result and response.items_result.items:
-                item = response.items_result.items[0]
-                try:
-                    if item.images and item.images.primary and item.images.primary.large:
-                        imgs.append(item.images.primary.large.url)
-                except Exception:
-                    pass
-                try:
-                    if item.images and item.images.variants:
-                        for v in item.images.variants:
-                            if v.large and v.large.url and v.large.url not in imgs:
-                                imgs.append(v.large.url)
-                            if len(imgs) >= max_imgs:
-                                break
-                except Exception:
-                    pass
-                log(f"  ↳ PA-API images: {len(imgs)}")
-            else:
-                log(f"  ⚠️ PA-API returned no items for {asin}")
-        except Exception as e:
-            log(f"  ⚠️ PA-API fetch failed for {asin}: {e}")
+    try:
+        from creators_api import get_images as _creators_get_images
+        imgs = _creators_get_images(asin, tld, max_imgs)
+    except Exception as e:
+        log(f"  ⚠️ Creators API unavailable for {asin}: {e}")
 
     if not imgs:
         imgs = _fetch_images_http(asin, tld, max_imgs)

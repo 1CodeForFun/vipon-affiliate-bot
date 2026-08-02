@@ -343,117 +343,30 @@ out.body_head = (document.body ? (document.body.innerText || '').slice(0, 300) :
 return out;
 """
 
-# ─── PA API CLIENT (primary image source — no scraping, no IP blocking) ─────
-_PAAPI_CLIENT = None
-
-def _get_paapi_client():
-    global _PAAPI_CLIENT
-    if _PAAPI_CLIENT is not None:
-        return _PAAPI_CLIENT
-    try:
-        import csv
-        from paapi5_python_sdk.api.default_api import DefaultApi
-        csv_path = os.path.expanduser("~/PAAPI.csv")
-        with open(csv_path) as f:
-            row = next(csv.DictReader(f))
-            access = row["Access Key"].strip()
-            secret = row["Secret Key"].strip()
-        _PAAPI_CLIENT = DefaultApi(
-            access_key=access,
-            secret_key=secret,
-            host="webservices.amazon.com",
-            region="us-east-1",
-        )
-        return _PAAPI_CLIENT
-    except Exception as e:
-        log(f"  PA-API client init failed: {e}")
-        return None
-
-def _paapi_get_images(asin, tld="com", max_imgs=6):
-    """Primary image source: Amazon PA API. Returns [] on any failure."""
-    client = _get_paapi_client()
-    if not client:
-        return []
-    try:
-        from paapi5_python_sdk.get_items_request import GetItemsRequest
-        from paapi5_python_sdk.get_items_resource import GetItemsResource
-        from paapi5_python_sdk.partner_type import PartnerType
-        partner_tag = "fdcanada00-20" if tld == "ca" else "freshdeal00cc-20"
-        request = GetItemsRequest(
-            partner_tag=partner_tag,
-            partner_type=PartnerType.ASSOCIATES,
-            marketplace=f"www.amazon.{tld}",
-            item_ids=[asin],
-            resources=[
-                GetItemsResource.IMAGES_PRIMARY_LARGE,
-                GetItemsResource.IMAGES_VARIANTS_LARGE,
-            ],
-        )
-        response = client.get_items(request)
-        if not response or not response.items_result or not response.items_result.items:
-            return []
-        item = response.items_result.items[0]
-        imgs = []
-        if item.images and item.images.primary and item.images.primary.large:
-            imgs.append(item.images.primary.large.url)
-        if item.images and item.images.variants:
-            for v in item.images.variants:
-                if v.large and v.large.url and v.large.url not in imgs:
-                    imgs.append(v.large.url)
-                if len(imgs) >= max_imgs:
-                    break
-        log(f"  PA-API images: {len(imgs)}")
-        return imgs[:max_imgs]
-    except Exception as e:
-        log(f"  PA-API fetch failed: {e}")
-        return []
-
+# ─── PRODUCT DATA (Amazon Creators API) ────────────────────────────────────
+# PA-API 5 was retired 2026-05-15. These wrappers keep the original names so
+# callers (including the dormant publish_reel_hook flow) keep working, and now
+# delegate to creators_api. Both return empty until the account clears the
+# Creators API eligibility bar, at which point they start working unchanged.
 
 def paapi_get_product_info(asin, tld="com"):
-    """Fetch clean title + bullet features + price from PA API. Returns dict (empty on failure)."""
-    client = _get_paapi_client()
-    if not client:
-        return {}
+    """Clean title + feature bullets for an ASIN. Returns {} on any failure."""
     try:
-        from paapi5_python_sdk.get_items_request import GetItemsRequest
-        from paapi5_python_sdk.get_items_resource import GetItemsResource
-        from paapi5_python_sdk.partner_type import PartnerType
-        partner_tag = "fdcanada00-20" if tld == "ca" else "freshdeal00cc-20"
-        request = GetItemsRequest(
-            partner_tag=partner_tag,
-            partner_type=PartnerType.ASSOCIATES,
-            marketplace=f"www.amazon.{tld}",
-            item_ids=[asin],
-            resources=[
-                GetItemsResource.ITEMINFO_TITLE,
-                GetItemsResource.ITEMINFO_FEATURES,
-                GetItemsResource.OFFERS_LISTINGS_PRICE,
-                GetItemsResource.OFFERS_LISTINGS_SAVINGBASIS,
-            ],
-        )
-        response = client.get_items(request)
-        if not response or not response.items_result or not response.items_result.items:
-            return {}
-        item = response.items_result.items[0]
-        info = {}
-        if item.item_info and item.item_info.title:
-            info['title_text'] = (item.item_info.title.display_value or '').strip()
-        if item.item_info and item.item_info.features:
-            info['bullets'] = [f for f in (item.item_info.features.display_values or []) if f][:5]
-        # Current price
-        try:
-            listing = item.offers.listings[0]
-            info['price_text'] = listing.price.display_amount or ''
-            if listing.saving_basis:
-                info['orig_price_text'] = listing.saving_basis.display_amount or ''
-        except Exception:
-            pass
-        log(f"  PA-API info: title={'yes' if info.get('title_text') else 'no'} | "
-            f"bullets={len(info.get('bullets', []))} | price={info.get('price_text', '-')}")
-        return info
+        from creators_api import get_product_info
+        info = get_product_info(asin, tld)
     except Exception as e:
-        log(f"  PA-API product info failed: {e}")
+        log(f"  Creators API unavailable: {e}")
         return {}
+    if not info:
+        return {}
+    out = {}
+    if info.get("title"):
+        out["title_text"] = info["title"]
+    if info.get("features"):
+        out["bullets"] = [f for f in info["features"] if f][:5]
+    log(f"  Creators API info: title={'yes' if out.get('title_text') else 'no'} | "
+        f"bullets={len(out.get('bullets', []))}")
+    return out
 
 
 def _handle_continue_shopping(driver, url, settle=5, tries=2):
