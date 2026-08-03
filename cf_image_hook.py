@@ -61,7 +61,10 @@ _GEMINI_MODEL    = "gemini-2.5-flash"
 
 _CF_API_BASE = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
 _IMG_W, _IMG_H = 576, 1024      # 9:16 vertical — matches the 720x1280 reel
-_HOOK_SECS     = 2.0            # length of the prepended hook clip
+# Length of the prepended hook clip. 3.5s gives the riser room to build into its
+# impact and leaves the POV line on screen long enough to actually be read — 2s
+# was too tight for both.
+_HOOK_SECS     = 3.5
 
 # Ordered best-quality-first. Cloudflare itself tells us when the daily neuron
 # grant is gone (HTTP 429), so rather than tracking a budget we just walk down
@@ -349,19 +352,42 @@ def _render_overlay(pov_text, emojis, out_path, w=720, h=1280):
 
 
 def _impact_audio(ffmpeg, out, dur=_HOOK_SECS):
-    """Loud cinematic impact for the hook: a descending boom plus a noise transient,
-    both decaying fast. Grabs attention while the hook frame is on screen."""
-    boom = "sin(2*PI*(45+140*exp(-7*t))*t)*exp(-2.4*t)"
+    """Cinematic riser -> impact -> tail sting for the hook.
+
+    Five synthesised layers, so there is no audio asset to ship or license:
+      1. rising chirp that accelerates in pitch and volume into the hit
+      2. filtered noise "air" swelling alongside it
+      3. descending boom at the hit
+      4. sub-bass body under the boom
+      5. a short noise crack on the transient
+    The hit lands ~36% into the clip, leaving a decaying tail under the rest of
+    the hook rather than dying immediately.
+    """
+    hit  = round(dur * 0.36, 3)
+    tail = round(dur - hit + 1.0, 3)
+    dly  = int(hit * 1000)
+
+    riser = (f"if(lt(t,{hit}), sin(2*PI*(150+800*pow(t/{hit},2))*t)"
+             f"*pow(t/{hit},1.8)*0.55, 0)")
+    boom  = "sin(2*PI*(48+165*exp(-7*t))*t)*exp(-1.7*t)"
+    sub   = "sin(2*PI*42*t)*exp(-0.9*t)*0.55"
+
     r = subprocess.run([
         ffmpeg, "-y",
-        "-f", "lavfi", "-i", f"aevalsrc='{boom}':s=44100:c=stereo:d={dur}",
-        "-f", "lavfi", "-i", f"anoisesrc=d={dur}:c=white:a=0.9:r=44100",
+        "-f", "lavfi", "-i", f"aevalsrc='{riser}':s=44100:c=stereo:d={dur}",
+        "-f", "lavfi", "-i", f"aevalsrc='{boom}':s=44100:c=stereo:d={tail}",
+        "-f", "lavfi", "-i", f"aevalsrc='{sub}':s=44100:c=stereo:d={tail}",
+        "-f", "lavfi", "-i", f"anoisesrc=d={dur}:c=white:a=1:r=44100",
+        "-f", "lavfi", "-i", f"anoisesrc=d={tail}:c=white:a=1:r=44100",
         "-filter_complex",
-        "[1:a]highpass=f=600,volume='exp(-16*t)':eval=frame[hit];"
-        "[0:a][hit]amix=inputs=2:duration=first:weights='1 0.45',"
-        "volume=2.2,alimiter=limit=0.95[a]",
+        f"[1:a]adelay={dly}|{dly}[boom];"
+        f"[2:a]adelay={dly}|{dly}[sub];"
+        f"[3:a]highpass=f=1200,volume='0.30*pow(min(t/{hit},1),3)':eval=frame[air];"
+        f"[4:a]highpass=f=500,volume='exp(-17*t)':eval=frame,adelay={dly}|{dly}[crack];"
+        "[0:a][air][boom][sub][crack]amix=inputs=5:duration=first:"
+        "weights='1 1 1.15 0.9 0.55',volume=2.4,alimiter=limit=0.96[a]",
         "-map", "[a]", "-t", str(dur), "-c:a", "aac", "-b:a", "128k", out,
-    ] + _FF_LOG, capture_output=True, timeout=60)
+    ] + _FF_LOG, capture_output=True, timeout=90)
     if r.returncode != 0:
         raise RuntimeError(f"impact audio failed: {r.stderr.decode()[-300:]}")
     return out
