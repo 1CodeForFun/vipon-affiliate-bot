@@ -82,16 +82,18 @@ _CONFIG_TAB = "_config"  # lightweight sheet that persists run state across GitH
 
 def _read_account_state(ss) -> int:
     """Return the account index to start on this run.
-    Reads last-saved index from the sheet and advances by one, so consecutive
-    runs never start on the same account. Falls back to day-of-year if no state."""
+
+    RESUMES on the last-used account rather than advancing. An account is only
+    left behind when it is actually capped (see the rotation triggers in the
+    scrape loop), so a run that ended mid-quota picks up where it stopped.
+    Falls back to day-of-year if there is no saved state."""
     try:
         cfg = ss.worksheet(_CONFIG_TAB)
         val = cfg.acell("A1").value
         if val is not None and str(val).strip().lstrip("-").isdigit():
-            saved = int(val)
-            nxt = (saved + 1) % len(VIPON_ACCOUNTS)
-            print(f"[account-state] last run ended on index {saved} — starting on {nxt} ({VIPON_ACCOUNTS[nxt]['username']})")
-            return nxt
+            saved = int(val) % len(VIPON_ACCOUNTS)
+            print(f"[account-state] resuming on index {saved} ({VIPON_ACCOUNTS[saved]['username']})")
+            return saved
     except Exception:
         pass
     fallback = datetime.now().timetuple().tm_yday % len(VIPON_ACCOUNTS)
@@ -2676,10 +2678,12 @@ def main():
         rotations_no_success = 0       # account cycles since last successful code
         account_scraped   = 0          # successful codes from current account this run
         ROTATION_THRESHOLD = 3         # rotate after this many consecutive throttle fails
-        # Proactive: spread codes evenly — rotate before hitting the 60/day cap
-        PROACTIVE_ROTATE_AFTER = max(1, (us_target + ca_target + len(VIPON_ACCOUNTS) - 1) // len(VIPON_ACCOUNTS))
-        log(f"  ↺ Proactive rotation every {PROACTIVE_ROTATE_AFTER} code(s) per account "
-            f"(target {us_target + ca_target} across {len(VIPON_ACCOUNTS)} accounts)")
+        # Run ONE account until it is actually capped, then move on. The previous
+        # "spread evenly" scheme rotated every ceil(target / n_accounts) codes, so
+        # ADDING accounts made it rotate more often, not less — each login costs
+        # time and re-auth, and no account ever reached its own daily quota.
+        log(f"  ↺ Sequential accounts: staying on {_current_account()['username']} "
+            f"until capped ({len(VIPON_ACCOUNTS)} account(s) available)")
 
         def _do_rotate():
             nonlocal rotations_no_success, account_scraped
@@ -2750,9 +2754,7 @@ def main():
             scraped.append(data)
             count += 1
             log(f"✓ Scraped {count}/{us_target} (sheet total {us_existing+count}/{PRODUCT_LIMIT}): {data['title'][:60]}")
-            if account_scraped >= PROACTIVE_ROTATE_AFTER and len(VIPON_ACCOUNTS) > 1 and count < us_target:
-                log(f"  📊 Proactive rotation after {account_scraped} code(s) — spreading load evenly")
-                _do_rotate()
+            # No proactive rotation — stay on this account until it caps out.
             try:
                 _write_product_row(ws, data, tld="com", ws_p=ws_p)
             except Exception as e:
@@ -2767,12 +2769,9 @@ def main():
             ca_switched = switch_to_canada(driver)
             if not ca_switched:
                 log("⚠️  Canada switch failed — skipping CA scrape to avoid writing US products to Sheet2")
-            if ca_switched and len(VIPON_ACCOUNTS) > 1:
-                # Always start CA on a fresh account so it doesn't inherit an account that
-                # already burned through its daily quota during the US phase.
-                log(f"  ↺ CA: rotating to fresh account (was {_current_account()['username']})…")
-                _do_rotate()
-                account_scraped = 0
+            # CA continues on the SAME account as the US phase. It only moves on when
+            # that account actually caps out — if the US phase already exhausted it,
+            # the first throttle fails here will rotate soon enough.
             ca_tiles = collect_promo_tiles_random(driver, wait, start_url=PROMO_URL_CA) if ca_switched else []
         ca_count = 0
         ca_consecutive_fails = 0     # throttle fails since last CA rotation
@@ -2833,10 +2832,7 @@ def main():
             ca_count += 1
             code_tag = "" if data_ca.get("deal_only") else f" code={data_ca.get('code','?')}"
             log(f"✓ CA Scraped {ca_count}/{ca_target} (sheet total {ca_existing+ca_count}/{PRODUCT_LIMIT}){code_tag}: {data_ca['title'][:60]}")
-            if account_scraped >= PROACTIVE_ROTATE_AFTER and len(VIPON_ACCOUNTS) > 1 and ca_count < ca_target:
-                log(f"  📊 Proactive rotation after {account_scraped} code(s) — spreading load evenly")
-                _do_rotate()
-                account_scraped = 0
+            # No proactive rotation — stay on this account until it caps out.
             try:
                 _write_product_row(ws2, data_ca, tld=AMAZON_TLD_CA)
             except Exception as e:
