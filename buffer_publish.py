@@ -142,9 +142,11 @@ def _create_post_assets(key, channel_id, text, assets, metadata, first_comment=N
     return (cp.get("post") or {}).get("id")
 
 
-# Which frame Buffer uses as the video cover, in ms. 1000 lands one second into
-# the 2-second AI hook clip, so the cover is the pain-point image.
-THUMB_OFFSET_MS = 1000
+# Which frame Buffer uses as the video cover, in ms.
+# TEMPORARILY DISABLED (None) to test whether sending thumbnailOffset is itself
+# what stops Buffer generating the video preview — no preview, no Pinterest post.
+# Set back to 1000 (one second into the 2-second AI hook clip) to re-enable.
+THUMB_OFFSET_MS = None
 
 
 def _video_asset(video_url, thumbnail_offset_ms=THUMB_OFFSET_MS):
