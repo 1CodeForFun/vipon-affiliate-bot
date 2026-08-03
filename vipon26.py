@@ -1756,10 +1756,32 @@ def extract_code(driver):
 # The main loop uses them to decide whether to count against consecutive_fails /
 # trigger account rotation / retry.
 SKIP_THROTTLE  = "throttle"   # reveal returned nothing — rate-limited or capped account
+# Amazon product-URL matchers, per marketplace. Covers /dp/, /gp/product/ and
+# /product/ so a legitimate .ca product is not rejected over URL style.
+_AMZ_PATH = r'(?:dp|gp/product|product)/([A-Z0-9]{10})'
+_CA_ASIN_RE  = re.compile(r'amazon\.ca/(?:[^"\'\s]*/)?' + _AMZ_PATH, re.I)
+_COM_ASIN_RE = re.compile(r'amazon\.com/(?:[^"\'\s]*/)?' + _AMZ_PATH, re.I)
+
 SKIP_DEAL_ONLY = "deal-only"  # no exclusive code; product is a "Get Deal at Amazon" offer
 SKIP_ONETIME   = "onetime"    # dashed single-use code — can't be shared
 SKIP_BLOCKED   = "blocked"    # blocked keyword in title
 SKIP_NO_IMAGE  = "no-image"   # couldn't resolve product image
+
+
+# Button wordings that mean "no exclusive code — just a time-limited price drop".
+# Matched case-insensitively against clickable elements before any GET CODE click.
+_DEAL_ONLY_PHRASES = (
+    "get the deal on amazon", "get the deal at amazon",
+    "get deal on amazon",     "get deal at amazon",
+    "get this deal on amazon",
+)
+_DEAL_ONLY_XPATH = " | ".join(
+    "//*[self::a or self::button][contains("
+    "translate(normalize-space(.),"
+    "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+    f"'{p}')]"
+    for p in _DEAL_ONLY_PHRASES
+)
 
 
 def _check_deal_only(driver) -> bool:
@@ -1782,7 +1804,18 @@ def _check_deal_only(driver) -> bool:
         return True   # only "Get Deal at Amazon", no GET CODE → deal-only
     except Exception:
         pass
-    # Neither button found (page still loading?) — let extract_code decide.
+    # Neither ID matched — read the action button's TEXT. Vipon shows
+    # "Get the deal on Amazon" (wording and element ids both vary) when the
+    # product is only time-limited price drop with no exclusive code.
+    try:
+        for el in driver.find_elements(By.XPATH, _DEAL_ONLY_XPATH):
+            txt = (el.text or "").strip()
+            if txt:
+                log(f"  ↳ deal-only button text: {txt[:60]!r}")
+                return True
+    except Exception:
+        pass
+    # Nothing conclusive (page still loading?) — let extract_code decide.
     return False
 
 
@@ -1918,21 +1951,21 @@ def scrape_product_page(driver, wait, pid, tld="com", allow_deal_only=False):
 
     src = driver.page_source or ""
     if tld == "ca":
-        # For CA: extract ASIN specifically from Amazon.ca links.
-        # If the page has no amazon.ca context at all, it's a US product that Vipon listed
-        # in its CA section — using its ASIN for amazon.ca would give "Page Not Found".
-        ca_m = re.search(r'amazon\.ca/(?:dp|product)/([A-Z0-9]{10})', src, re.I)
-        if ca_m:
-            asin = ca_m.group(1).upper()
-        elif "amazon.ca" not in src.lower():
-            log(f"  ⚠️ PID {pid}: no Amazon.ca link found — US product in CA section, skipping")
+        # CA products MUST come from an explicit amazon.ca product URL.
+        #
+        # Vipon lists plenty of amazon.COM products in its CA section. Their ASINs
+        # usually do not exist on amazon.ca, so the affiliate link 404s — which is
+        # why most CA links were dead. The old code fell back to "any ASIN on the
+        # page" whenever the string "amazon.ca" appeared anywhere (it appears in
+        # nav/boilerplate on every page), so .com ASINs sailed through.
+        ca_m = _CA_ASIN_RE.search(src)
+        if not ca_m:
+            com_m = _COM_ASIN_RE.search(src)
+            why = (f"amazon.com product ({com_m.group(1).upper()})" if com_m
+                   else "no amazon.ca product URL")
+            log(f"  ✗ PID {pid}: {why} in CA section — skipping (link would 404 on .ca)")
             return SKIP_BLOCKED
-        else:
-            # amazon.ca mentioned but no /dp/ASIN in source — fall back to any ASIN
-            m = ASIN_RE.search(src)
-            asin = m.group(0).upper() if m else ""
-            if asin:
-                log(f"  ℹ PID {pid}: using fallback ASIN {asin} (no explicit .ca/dp/ URL found)")
+        asin = ca_m.group(1).upper()
     else:
         m    = ASIN_RE.search(src)
         asin = m.group(0).upper() if m else ""
