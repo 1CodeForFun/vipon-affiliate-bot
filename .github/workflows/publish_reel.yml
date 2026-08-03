@@ -30,10 +30,11 @@ jobs:
       - name: Install system dependencies (FFmpeg + Chromium for the video builder)
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y ffmpeg chromium-browser chromium-chromedriver
+          # fonts-noto-color-emoji: the hook overlay draws colour emoji with Pillow
+          sudo apt-get install -y ffmpeg chromium-browser chromium-chromedriver fonts-noto-color-emoji
 
       - name: Install Python dependencies
-        run: pip install gspread oauth2client requests selenium six google-auth google-auth-oauthlib google-api-python-client
+        run: pip install gspread oauth2client requests selenium six google-auth google-auth-oauthlib google-api-python-client Pillow
 
       - name: Install Amazon PA-API SDK from secrets repo
         run: |

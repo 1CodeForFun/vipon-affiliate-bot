@@ -82,33 +82,57 @@ KEY FEATURES / VO SCRIPT:
 {features}
 
 YOUR TASK:
-Identify the single most relatable PERSONA who would buy this product, and the specific
-PAIN POINT this product relieves. Then write ONE photorealistic image prompt capturing
-that persona INSIDE the frustrating moment — BEFORE they found this product.
+Identify the most relatable PERSONA for this product and the specific PAIN POINT it
+relieves, then write ONE photorealistic image prompt of that persona inside the
+frustrating moment — BEFORE they found the product. This frame opens the video and
+must make a scrolling viewer think "that is exactly me" and stop.
 
-This single frame opens the video. It must make a scrolling viewer instantly think
-"that is exactly me" and stop.
+STEP 1 — DERIVE THE WORLD FROM THE PRODUCT (do this first, it drives everything):
+Decide the room or place where this product is ACTUALLY used, then pick lighting and
+a colour palette that belong to that world. Match the product category:
+  • Outdoor / garden / patio / sports -> real daylight, open sky, greenery,
+      warm golden-hour or bright midday sun, saturated natural colour
+  • Beauty / skincare / hair -> clean bright bathroom or vanity, soft flattering
+      light, warm creamy tones, gentle highlights
+  • Kitchen / food -> warm domestic kitchen, appetising warm light, rich colour
+  • Bedroom / sleep / comfort -> cosy bedroom, soft warm lamplight, inviting textures
+  • Fitness / wellness -> bright gym or sunlit home space, energetic clean light
+  • Office / tech -> tidy desk with natural window light
+  • Cleaning / storage / garage -> the real utility space, but still naturally lit
+The frustration must come from the PERSON'S BODY LANGUAGE AND THE SITUATION — never
+from making the room dark, grim or depressing. Do NOT default to cold, drab, grey,
+industrial, warehouse or basement settings. A cheerful, well-lit room containing a
+visibly frustrated person is far more relatable, and far more clickable, than a
+gloomy one. Never depict despair, illness, injury or distress.
 
-THE FRAME:
-  • Show the persona mid-struggle — the discomfort must be legible at a glance
-  • Do NOT show the product; this is the "before" state
-  • One clear subject, uncluttered composition — it will be viewed on a phone screen
-
-PROMPT RULES:
+STEP 2 — WRITE THE IMAGE PROMPT:
   • Open with: "Photorealistic vertical photograph,"
-  • FACELESS — over-shoulder, hands/wrists only, tight crop below the chin, or from behind
-  • Describe the EXACT physical scene: setting, body position, props, what the hands do
-  • Specific lighting: golden-hour window light / harsh overhead fluorescent / dim lamplight
-  • Colour mood that reinforces the frustration: cold & drab / cluttered & chaotic / harsh
+  • FACELESS IS MANDATORY — this is the single most important rule. Compose so NO
+    face is visible: shot from directly behind, over-the-shoulder past the back of
+    the head, hands and forearms only, or cropped at the chin. Never a mirror
+    reflection, never a face at any angle, never eyes.
+  • Name the specific room from STEP 1 and the exact lighting and colour palette
+  • Describe the physical scene precisely: body position, props, what the hands do
+  • Do NOT show the product — this is the "before" state
+  • One clear subject, uncluttered — it is viewed on a phone screen
   • Close with: "vertical 9:16, cinematic depth of field, sharp foreground, Canon EOS R5"
   • No text, no logos, no captions, no watermarks
   • Max 120 words — dense and specific beats long and vague
+
+STEP 3 — WRITE THE ON-SCREEN HOOK:
+  • pov_text: a punchy first-person line in the style of "POV: you ..." naming the
+    frustration. MAX 8 WORDS. No product name, no price, no hashtags, no quotes.
+  • emojis: exactly 2 or 3 emoji characters that match the pain point and product
+    (food, household, activity, weather, reaction faces are all fine). Emoji only.
 
 Respond ONLY in valid JSON. No markdown fences. No explanation.
 {{
   "persona":    "one sentence describing the target buyer",
   "pain_point": "one sharp sentence — the core frustration this product solves",
-  "image_prompt": "the complete image prompt for the pain-point frame"
+  "setting":    "the room/place and the lighting-and-colour mood you chose",
+  "image_prompt": "the complete image prompt for the pain-point frame",
+  "pov_text":   "POV: ... (max 8 words)",
+  "emojis":     "2-3 emoji characters"
 }}
 """
 
@@ -222,19 +246,148 @@ def _cf_generate(account_id, api_token, prompt):
 
 # ── FFmpeg helpers ────────────────────────────────────────────────────────────
 
-def _zoom_clip(ffmpeg, img, out, dur=_HOOK_SECS):
-    """Ken Burns slow zoom-in from a single still (720x1280, 30fps)."""
-    frames = int(dur * 30)
+def _find_font(bold=True):
+    """Body font for the POV line."""
+    for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+              "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+              "C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf"):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _find_emoji_font():
+    """Colour-emoji font. ffmpeg's drawtext CANNOT render these in colour (freetype
+    rasterises them monochrome), which is why the overlay is drawn with Pillow and
+    composited as an image instead."""
+    for p in ("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+              "/usr/share/fonts/truetype/noto/NotoColorEmoji-Regular.ttf",
+              "C:/Windows/Fonts/seguiemj.ttf"):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _render_overlay(pov_text, emojis, out_path, w=720, h=1280):
+    """Draw the POV line + emojis onto a transparent PNG. Returns path or None.
+
+    Kept deliberately sparse — one line of text and a small emoji row, upper third,
+    so it reads instantly without covering the image.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        log("  CF hook: Pillow not installed — skipping text overlay")
+        return None
+
+    pov_text = (pov_text or "").strip()
+    emojis   = (emojis or "").strip()
+    if not pov_text and not emojis:
+        return None
+
+    font_path = _find_font()
+    if not font_path:
+        log("  CF hook: no text font found — skipping overlay")
+        return None
+
+    img  = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # ── Wrap the POV line to the canvas width ────────────────────────────────
+    size = 58
+    font = ImageFont.truetype(font_path, size)
+    margin = 56
+    words, lines, cur = pov_text.split(), [], ""
+    for word in words:
+        trial = f"{cur} {word}".strip()
+        if draw.textlength(trial, font=font) <= (w - 2 * margin):
+            cur = trial
+        else:
+            if cur:
+                lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    lines = lines[:3]
+
+    y = int(h * 0.13)
+    for line in lines:
+        tw = draw.textlength(line, font=font)
+        draw.text(((w - tw) / 2, y), line, font=font, fill=(255, 255, 255, 255),
+                  stroke_width=6, stroke_fill=(0, 0, 0, 235))
+        y += size + 14
+
+    # ── Emoji row, rendered at the font's native strike then scaled ──────────
+    if emojis:
+        ef = _find_emoji_font()
+        if ef:
+            target = 96
+            for native in (target, 109, 137):     # NotoColorEmoji only has fixed strikes
+                try:
+                    efont = ImageFont.truetype(ef, native)
+                    tmp   = Image.new("RGBA", (native * 6, int(native * 1.6)), (0, 0, 0, 0))
+                    ImageDraw.Draw(tmp).text((0, 0), emojis, font=efont, embedded_color=True)
+                    bbox = tmp.getbbox()
+                    if not bbox:
+                        break
+                    strip = tmp.crop(bbox)
+                    scale = target / strip.height
+                    strip = strip.resize((max(1, int(strip.width * scale)), target),
+                                         Image.LANCZOS)
+                    img.alpha_composite(strip, ((w - strip.width) // 2, y + 10))
+                    break
+                except OSError:
+                    continue                      # wrong strike size — try the next
+                except Exception as e:
+                    log(f"  CF hook: emoji render failed ({e})")
+                    break
+        else:
+            log("  CF hook: no colour-emoji font found — text only")
+
+    img.save(out_path)
+    return out_path
+
+
+def _impact_audio(ffmpeg, out, dur=_HOOK_SECS):
+    """Loud cinematic impact for the hook: a descending boom plus a noise transient,
+    both decaying fast. Grabs attention while the hook frame is on screen."""
+    boom = "sin(2*PI*(45+140*exp(-7*t))*t)*exp(-2.4*t)"
     r = subprocess.run([
-        ffmpeg, "-y", "-loop", "1", "-i", img,
-        "-vf", (
-            "scale=720:1280:force_original_aspect_ratio=increase,"
-            "crop=720:1280,"
-            f"zoompan=z='min(zoom+0.0015,1.12)':d={frames}"
-            ":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=720x1280,fps=30"
-        ),
-        "-t", str(dur), "-pix_fmt", "yuv420p", out,
-    ] + _FF_LOG, capture_output=True)
+        ffmpeg, "-y",
+        "-f", "lavfi", "-i", f"aevalsrc='{boom}':s=44100:c=stereo:d={dur}",
+        "-f", "lavfi", "-i", f"anoisesrc=d={dur}:c=white:a=0.9:r=44100",
+        "-filter_complex",
+        "[1:a]highpass=f=600,volume='exp(-16*t)':eval=frame[hit];"
+        "[0:a][hit]amix=inputs=2:duration=first:weights='1 0.45',"
+        "volume=2.2,alimiter=limit=0.95[a]",
+        "-map", "[a]", "-t", str(dur), "-c:a", "aac", "-b:a", "128k", out,
+    ] + _FF_LOG, capture_output=True, timeout=60)
+    if r.returncode != 0:
+        raise RuntimeError(f"impact audio failed: {r.stderr.decode()[-300:]}")
+    return out
+
+
+def _zoom_clip(ffmpeg, img, out, dur=_HOOK_SECS, overlay=None):
+    """Ken Burns slow zoom-in from a single still (720x1280, 30fps).
+
+    The text/emoji overlay is composited AFTER the zoom so it stays pin-sharp and
+    stationary while the photo moves behind it.
+    """
+    frames = int(dur * 30)
+    kb = ("scale=720:1280:force_original_aspect_ratio=increase,"
+          "crop=720:1280,"
+          f"zoompan=z='min(zoom+0.0015,1.12)':d={frames}"
+          ":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=720x1280,fps=30")
+
+    if overlay and os.path.exists(overlay):
+        cmd = [ffmpeg, "-y", "-loop", "1", "-i", img, "-i", overlay,
+               "-filter_complex", f"[0:v]{kb}[bg];[bg][1:v]overlay=0:0:format=auto[v]",
+               "-map", "[v]"]
+    else:
+        cmd = [ffmpeg, "-y", "-loop", "1", "-i", img, "-vf", kb]
+
+    r = subprocess.run(cmd + ["-t", str(dur), "-pix_fmt", "yuv420p", out]
+                       + _FF_LOG, capture_output=True)
     if r.returncode != 0:
         raise RuntimeError(f"Ken Burns clip failed: {r.stderr.decode()[-400:]}")
     return out
@@ -247,15 +400,23 @@ def prepend_hook_to_reel(hook_path, reel_path, ffmpeg, output_path):
     """
     td         = str(Path(output_path).parent)
     hook_audio = os.path.join(td, "_cfh_ha.mp4")
+    impact     = os.path.join(td, "_cfh_impact.aac")
 
-    # Step 1: add a silent audio track to the video-only hook clip
+    # Step 1: give the hook clip its audio. Prefer the loud impact sting; fall back
+    # to silence so a filter problem never costs us the hook.
+    try:
+        _impact_audio(ffmpeg, impact, _HOOK_SECS)
+        audio_in = ["-i", impact]
+    except Exception as e:
+        log(f"  CF hook: impact sound failed ({e}) — using silence")
+        audio_in = ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
+
     r = subprocess.run([
         ffmpeg, "-y",
-        "-i", hook_path,
-        "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+        "-i", hook_path, *audio_in,
         "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
         "-shortest", hook_audio,
-    ] + _FF_LOG, capture_output=True, timeout=30)
+    ] + _FF_LOG, capture_output=True, timeout=60)
     if r.returncode != 0:
         raise RuntimeError(f"Hook audio inject failed: {r.stderr.decode()[-300:]}")
 
@@ -305,6 +466,8 @@ def generate_hook(product, gemini_keys, ffmpeg, td):
         return None, None
 
     log(f"  CF hook pain point: {(concept.get('pain_point') or '')[:90]}")
+    log(f"  CF hook setting:    {(concept.get('setting') or '')[:90]}")
+    log(f"  CF hook overlay:    {(concept.get('pov_text') or '')!r} {concept.get('emojis') or ''}")
     log(f"  CF hook prompt:     {concept['image_prompt'][:90]}")
 
     try:
@@ -316,12 +479,35 @@ def generate_hook(product, gemini_keys, ffmpeg, td):
         log(f"  CF hook: all image models failed: {e} — skipping")
         return None, None
 
+    # Text/emoji overlay is non-fatal — a missing font must not cost us the hook.
+    overlay = None
+    try:
+        overlay = _render_overlay(concept.get("pov_text"), concept.get("emojis"),
+                                  os.path.join(td, "cf_hook_overlay.png"))
+        if overlay:
+            log("  CF hook: overlay rendered")
+    except Exception as e:
+        log(f"  CF hook: overlay failed ({e}) — continuing without it")
+        overlay = None
+
     try:
         log("  CF hook: building Ken Burns clip...")
         hook_clip = os.path.join(td, "cf_hook_clip.mp4")
-        _zoom_clip(ffmpeg, img_path, hook_clip)
+        _zoom_clip(ffmpeg, img_path, hook_clip, overlay=overlay)
         log(f"  CF hook: clip ready ({os.path.getsize(hook_clip):,} bytes)")
-        return hook_clip, img_path
+        # Thumbnail keeps the overlay burned in so the POV line shows on the pin.
+        thumb = img_path
+        if overlay:
+            try:
+                from PIL import Image
+                base = Image.open(img_path).convert("RGBA").resize((720, 1280), Image.LANCZOS)
+                base.alpha_composite(Image.open(overlay).convert("RGBA"))
+                thumb = os.path.join(td, "cf_hook_thumb.png")
+                base.convert("RGB").save(thumb)
+            except Exception as e:
+                log(f"  CF hook: thumbnail compose failed ({e}) — using bare image")
+                thumb = img_path
+        return hook_clip, thumb
     except Exception as e:
         log(f"  CF hook: FFmpeg clip failed: {e} — skipping")
         return None, None
