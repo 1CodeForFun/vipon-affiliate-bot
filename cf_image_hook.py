@@ -60,7 +60,19 @@ _GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _GEMINI_MODEL    = "gemini-2.5-flash"
 
 _CF_API_BASE = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
-_IMG_W, _IMG_H = 576, 1024      # 9:16 vertical — matches the 720x1280 reel
+# Generated image size. Kept at an exact 9:16 ratio so it crops cleanly to the
+# 720x1280 reel; ffmpeg upscales and the Ken Burns move zooms in anyway.
+#
+# SIZE IS THE NEURON LEVER. Cost is roughly
+#     (tiles x 636) + (steps x 12),  tiles = w*h / (512*512)
+# and the tile term dominates. Measured: 576x1024 = 2.25 tiles = 1,836 n, which
+# caps the free grant at 5 images/day — short of the 8 reels/day cadence.
+#     576x1024  2.250 tiles  ~1,836 n  -> 5.4/day
+#     432x768   1.266 tiles  ~1,210 n  -> 8.3/day   <- current
+#     384x683   1.000 tiles  ~1,041 n  -> 9.6/day
+# 432x768 leaves a little headroom above 8/day, because going over the grant
+# does not just fail that call — it carries into the next day and can blank it.
+_IMG_W, _IMG_H = 432, 768
 # Length of the prepended hook clip. 3.5s gives the riser room to build into its
 # impact and leaves the POV line on screen long enough to actually be read — 2s
 # was too tight for both.
