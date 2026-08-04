@@ -49,6 +49,7 @@ Falls back to (None, None) silently so the reel publisher continues without the 
 import base64
 import json
 import os
+import random
 import re
 import subprocess
 from pathlib import Path
@@ -135,8 +136,11 @@ STEP 2 — WRITE THE IMAGE PROMPT:
   • Max 120 words — dense and specific beats long and vague
 
 STEP 3 — WRITE THE ON-SCREEN HOOK:
-  • pov_text: a punchy first-person line in the style of "POV: you ..." naming the
-    frustration. MAX 8 WORDS. No product name, no price, no hashtags, no quotes.
+  • pov_text: one punchy line naming the frustration. Pick whichever ONE of these
+    openings fits this product best and write in that style:
+{styles}
+    MAX 8 WORDS TOTAL including the opening. No product name, no price, no
+    hashtags, no quotes, no emoji in this field.
   • emojis: exactly 2 or 3 emoji characters that match the pain point and product
     (food, household, activity, weather, reaction faces are all fine). Emoji only.
 
@@ -170,8 +174,29 @@ def _load_cf_creds():
 
 # ── Gemini text call (concept prompt) ─────────────────────────────────────────
 
+# Opening formats for the on-screen line. A random THREE are offered to Gemini
+# each run — left to choose freely it returned "POV:" essentially every time, so
+# every reel opened identically. Restricting the menu forces genuine variety.
+_HOOK_STYLES = [
+    'POV: ... (second person, mid-situation)',
+    'Nobody warns you about ...',
+    'This is your sign to ...',
+    'Tell me why ...',
+    'Me every single time ...',
+    'The reason your ... keeps ...',
+    'Stop scrolling if ...',
+    'Why is nobody talking about ...',
+    'Not me ... again',
+    'No prefix at all — a blunt statement of the frustration',
+    'It never fails: ...',
+    'That moment when ...',
+]
+
+
 def _gemini_concept(title, features, keys):
-    prompt_text = _CONCEPT_PROMPT.format(title=title, features=features or title)
+    styles = "\n".join(f"        - {s}" for s in random.sample(_HOOK_STYLES, 3))
+    prompt_text = _CONCEPT_PROMPT.format(title=title, features=features or title,
+                                         styles=styles)
     payload = {
         "contents": [{"parts": [{"text": prompt_text}]}],
         "generationConfig": {
@@ -363,45 +388,107 @@ def _render_overlay(pov_text, emojis, out_path, w=720, h=1280):
     return out_path
 
 
+# ── Hook stings ───────────────────────────────────────────────────────────────
+# Six synthesised designs with deliberately different shapes, so consecutive
+# reels do not all open on the same noise. Verified envelopes (peak per 150ms):
+#   riser_impact     ..:-+@@#*+==-    slow build into a hit, long tail
+#   whoosh          .@@@@-            instant air swish, gone by 0.6s
+#   bass_drop        @@@@@@@%*++==-   beat of silence, then heavy sub
+#   sparkle         =*+:.             bright ascending chime
+#   punch           @%-.              tight percussive hit, over fast
+#   reverse_swell        .::@@@%#*    builds late, lands at ~1.5s
+#
+# These are generated rather than downloaded on purpose: the reliable CC0
+# libraries (Freesound, Pixabay) need API credentials, scraping audio from
+# elsewhere is a licensing risk, and binary assets bloat the repo. Drop real
+# files into sfx/ and they take priority — see _pick_sfx.
+_SFX_DIR   = Path(__file__).resolve().parent / "sfx"
+_SFX_EXTS  = (".mp3", ".wav", ".aac", ".m4a", ".ogg")
+
+def _sfx_variants(dur):
+    d2 = round(dur * 0.72, 2)
+    return {
+        "riser_impact": (
+            [f"aevalsrc='if(lt(t,1.25), sin(2*PI*(150+800*pow(t/1.25,2))*t)*pow(t/1.25,1.8)*0.55, 0)':s=44100:c=stereo:d={dur}",
+             "aevalsrc='sin(2*PI*(48+165*exp(-7*t))*t)*exp(-1.7*t)':s=44100:c=stereo:d=2.5",
+             f"anoisesrc=d={dur}:c=white:a=1:r=44100"],
+            "[1:a]adelay=1250|1250[bm];"
+            "[2:a]highpass=f=1200,volume='0.30*pow(min(t/1.25,1),3)':eval=frame[air];"
+            "[0:a][air][bm]amix=inputs=3:duration=first:weights='1 1 1.2',"
+            "volume=2.4,alimiter=limit=0.96[a]"),
+        "whoosh": (
+            [f"anoisesrc=d={dur}:c=white:a=1:r=44100",
+             f"anoisesrc=d={dur}:c=pink:a=1:r=44100"],
+            "[0:a]highpass=f=1800,volume='exp(-pow((t-0.42)/0.20,2))*0.9':eval=frame[hi];"
+            "[1:a]lowpass=f=900,volume='exp(-pow((t-0.55)/0.26,2))*0.7':eval=frame[lo];"
+            "[hi][lo]amix=inputs=2:duration=first,volume=2.6,alimiter=limit=0.95[a]"),
+        "bass_drop": (
+            [f"aevalsrc='sin(2*PI*(28+70*exp(-5*t))*t)*exp(-1.0*t)':s=44100:c=stereo:d={d2}",
+             "anoisesrc=d=1.2:c=white:a=1:r=44100"],
+            "[0:a]adelay=260|260[sub];"
+            "[1:a]highpass=f=900,volume='exp(-22*t)':eval=frame,adelay=260|260[tick];"
+            "[sub][tick]amix=inputs=2:duration=first:weights='1 0.4',"
+            "volume=2.8,alimiter=limit=0.96[a]"),
+        "sparkle": (
+            ["aevalsrc='sin(2*PI*784*t)*exp(-7*t)*0.6':s=44100:c=stereo:d=2.6",
+             "aevalsrc='sin(2*PI*1046*t)*exp(-7*t)*0.55':s=44100:c=stereo:d=2.4",
+             "aevalsrc='sin(2*PI*1568*t)*exp(-6*t)*0.5':s=44100:c=stereo:d=2.2"],
+            "[1:a]adelay=140|140[b];[2:a]adelay=300|300[c];"
+            "[0:a][b][c]amix=inputs=3:duration=first,volume=2.4,alimiter=limit=0.95[a]"),
+        "punch": (
+            ["aevalsrc='sin(2*PI*(60+220*exp(-16*t))*t)*exp(-6.5*t)':s=44100:c=stereo:d=1.4",
+             "anoisesrc=d=1.0:c=white:a=1:r=44100"],
+            "[1:a]highpass=f=1400,volume='exp(-40*t)':eval=frame[snap];"
+            "[0:a][snap]amix=inputs=2:duration=first:weights='1 0.5',"
+            "volume=2.7,alimiter=limit=0.96[a]"),
+        "reverse_swell": (
+            [f"anoisesrc=d={dur}:c=pink:a=1:r=44100",
+             "aevalsrc='sin(2*PI*(90+40*exp(-6*t))*t)*exp(-2.2*t)':s=44100:c=stereo:d=2.0"],
+            "[0:a]highpass=f=700,volume='pow(min(t/1.5,1),3.2)*0.85':eval=frame[sw];"
+            "[1:a]adelay=1500|1500[land];"
+            "[sw][land]amix=inputs=2:duration=first:weights='1 1.1',"
+            "volume=2.3,alimiter=limit=0.95[a]"),
+    }
+
+
+def _pick_sfx_file():
+    """A random audio file from sfx/, if any have been added. Real recorded SFX
+    beat synthesised ones — this lets them be dropped in without a code change."""
+    if not _SFX_DIR.is_dir():
+        return None
+    files = [p for p in _SFX_DIR.iterdir()
+             if p.is_file() and p.suffix.lower() in _SFX_EXTS]
+    return random.choice(files) if files else None
+
+
 def _impact_audio(ffmpeg, out, dur=_HOOK_SECS):
-    """Cinematic riser -> impact -> tail sting for the hook.
+    """Build the hook sting: a random file from sfx/ if present, else a random
+    synthesised variant. Returns the output path."""
+    chosen = _pick_sfx_file()
+    if chosen:
+        r = subprocess.run([
+            ffmpeg, "-y", "-i", str(chosen),
+            "-af", f"afade=t=out:st={max(0.1, dur-0.4):.2f}:d=0.4,alimiter=limit=0.96",
+            "-t", str(dur), "-c:a", "aac", "-b:a", "128k", out,
+        ] + _FF_LOG, capture_output=True, timeout=90)
+        if r.returncode == 0:
+            log(f"  CF hook: sfx file '{chosen.name}'")
+            return out
+        log(f"  CF hook: sfx file '{chosen.name}' failed — using a synth variant")
 
-    Five synthesised layers, so there is no audio asset to ship or license:
-      1. rising chirp that accelerates in pitch and volume into the hit
-      2. filtered noise "air" swelling alongside it
-      3. descending boom at the hit
-      4. sub-bass body under the boom
-      5. a short noise crack on the transient
-    The hit lands ~36% into the clip, leaving a decaying tail under the rest of
-    the hook rather than dying immediately.
-    """
-    hit  = round(dur * 0.36, 3)
-    tail = round(dur - hit + 1.0, 3)
-    dly  = int(hit * 1000)
+    variants = _sfx_variants(dur)
+    name     = random.choice(sorted(variants))
+    inputs, fc = variants[name]
 
-    riser = (f"if(lt(t,{hit}), sin(2*PI*(150+800*pow(t/{hit},2))*t)"
-             f"*pow(t/{hit},1.8)*0.55, 0)")
-    boom  = "sin(2*PI*(48+165*exp(-7*t))*t)*exp(-1.7*t)"
-    sub   = "sin(2*PI*42*t)*exp(-0.9*t)*0.55"
-
-    r = subprocess.run([
-        ffmpeg, "-y",
-        "-f", "lavfi", "-i", f"aevalsrc='{riser}':s=44100:c=stereo:d={dur}",
-        "-f", "lavfi", "-i", f"aevalsrc='{boom}':s=44100:c=stereo:d={tail}",
-        "-f", "lavfi", "-i", f"aevalsrc='{sub}':s=44100:c=stereo:d={tail}",
-        "-f", "lavfi", "-i", f"anoisesrc=d={dur}:c=white:a=1:r=44100",
-        "-f", "lavfi", "-i", f"anoisesrc=d={tail}:c=white:a=1:r=44100",
-        "-filter_complex",
-        f"[1:a]adelay={dly}|{dly}[boom];"
-        f"[2:a]adelay={dly}|{dly}[sub];"
-        f"[3:a]highpass=f=1200,volume='0.30*pow(min(t/{hit},1),3)':eval=frame[air];"
-        f"[4:a]highpass=f=500,volume='exp(-17*t)':eval=frame,adelay={dly}|{dly}[crack];"
-        "[0:a][air][boom][sub][crack]amix=inputs=5:duration=first:"
-        "weights='1 1 1.15 0.9 0.55',volume=2.4,alimiter=limit=0.96[a]",
-        "-map", "[a]", "-t", str(dur), "-c:a", "aac", "-b:a", "128k", out,
-    ] + _FF_LOG, capture_output=True, timeout=90)
+    cmd = [ffmpeg, "-y"]
+    for i in inputs:
+        cmd += ["-f", "lavfi", "-i", i]
+    cmd += ["-filter_complex", fc, "-map", "[a]", "-t", str(dur),
+            "-c:a", "aac", "-b:a", "128k", out]
+    r = subprocess.run(cmd + _FF_LOG, capture_output=True, timeout=90)
     if r.returncode != 0:
-        raise RuntimeError(f"impact audio failed: {r.stderr.decode()[-300:]}")
+        raise RuntimeError(f"sfx '{name}' failed: {r.stderr.decode()[-300:]}")
+    log(f"  CF hook: sfx '{name}'")
     return out
 
 
