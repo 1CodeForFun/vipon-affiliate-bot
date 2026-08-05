@@ -180,7 +180,9 @@ MAX_AMAZON_IMAGES     = 6
 
 PROMO_URL     = "https://www.myvipon.com"
 PROMO_URL_CA  = "https://www.myvipon.com/promotion/index?type=instant"  # CA full deal listing (supports infinite scroll)
-PRODUCT_LIMIT = int(os.getenv("PRODUCT_LIMIT") or "24")
+# Per-sheet target. 48 pairs with the FB text poster at 2 posts/hour, which
+# clears exactly 48 in 24 hours.
+PRODUCT_LIMIT = int(os.getenv("PRODUCT_LIMIT") or "48")
 
 # FIXED delay (seconds) between code reveals. Vipon rate-limits the GET-CODE
 # endpoint per IP by requests-per-minute — the old VM never tripped it because it

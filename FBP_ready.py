@@ -39,6 +39,12 @@ FB_CANADA_PAGE_ID    = "100649111740976"   # Fresh Deals Canada (fallback if no 
 POST_DELAY_SECONDS   = 3
 TIMEOUT              = 60
 
+# Posts published per sheet PER RUN. This used to drain every unposted row in a
+# single run, which dumped the whole day's backlog onto the page at once. With
+# the workflow triggered hourly, 2 gives a steady 2 posts/hour per page and
+# clears a full 48-product sheet in 24 hours.
+POSTS_PER_RUN        = int(os.environ.get("POSTS_PER_RUN") or "2")
+
 # Column numbers (1-based)
 COL_A_LINK       = 1
 COL_F_CODE       = 6    # discount code — appended to the post body
@@ -128,16 +134,25 @@ def publish_link_post_to_facebook(page_id: str, page_token: str, graph_api_versi
 
 # ---------------- MAIN ----------------
 def post_sheet(ws, label: str, page_id: str, page_token: str, graph_api_version: str):
-    """Post text+link for all unposted rows in the given worksheet."""
+    """Post text+link for up to POSTS_PER_RUN unposted rows in this worksheet.
+
+    Rows that are skipped (no link, no copy, already posted) do NOT count
+    against the cap — only rows actually published to Facebook do.
+    """
     rows = ws.get_all_values()
     if not rows:
         log(f"{label}: sheet is empty.")
         return 0, 0, 0
 
-    log(f"{label}: loaded {len(rows)} rows (including header).")
+    log(f"{label}: loaded {len(rows)} rows (including header); "
+        f"posting up to {POSTS_PER_RUN} this run.")
     posted_count = skipped_count = failed_count = 0
 
     for sheet_row_num in range(2, len(rows) + 1):
+        if posted_count >= POSTS_PER_RUN:
+            log(f"{label}: reached the {POSTS_PER_RUN}-post cap for this run — "
+                f"remaining rows stay queued for the next one.")
+            break
         row = rows[sheet_row_num - 1]
         row = ensure_row_length(row, COL_Q_POSTED_FLAG)
 
