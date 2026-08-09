@@ -235,16 +235,22 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
     pct   = deal.get("pct", 0)
 
     # ── TikTok ──
-    # NOTE: Buffer's GraphQL API has no createComment mutation, and firstComment in
-    # CreatePostInput returned HTTP 400 for TikTok. Pending a confirmed approach for
-    # posting comments, the caption contains only the hook text — no link or code.
+    # The link and code live in the CAPTION. The original plan was link in comment
+    # 1 and code in comment 2, but Buffer's GraphQL API has no createComment
+    # mutation and firstComment on CreatePostInput returns HTTP 400 for TikTok, so
+    # there is no API path to a comment at all — the caption was going out with no
+    # link whatsoever. Each is on its own line so either can be selected and copied
+    # without dragging the other along.
     tk = _find_channel(channels, "tiktok")
     if tk:
         tk_link = f"https://www.amazon.com/dp/{asin}?tag={TIKTOK_TAG}"
         code     = (deal.get("code") or "").strip()
 
         tk_text = (f"{title[:150]}\n\n"
-                   f"🔥 {pct}% OFF — limited time!")
+                   f"🔥 {pct}% OFF — limited time!\n\n"
+                   f"🛒 {tk_link}")
+        if code:
+            tk_text += f"\n\n🏷️ Code: {code}"
 
         try:
             pid = _create_post(key, tk["id"], tk_text, video_url,

@@ -41,9 +41,9 @@ TIMEOUT              = 60
 
 # Posts published per sheet PER RUN. This used to drain every unposted row in a
 # single run, which dumped the whole day's backlog onto the page at once. With
-# the workflow triggered hourly, 2 gives a steady 2 posts/hour per page and
-# clears a full 48-product sheet in 24 hours.
-POSTS_PER_RUN        = int(os.environ.get("POSTS_PER_RUN") or "2")
+# the workflow triggered hourly, 4 gives 4 posts/hour per page and clears a full
+# 48-product sheet in 12 hours.
+POSTS_PER_RUN        = int(os.environ.get("POSTS_PER_RUN") or "4")
 
 # Column numbers (1-based)
 COL_A_LINK       = 1

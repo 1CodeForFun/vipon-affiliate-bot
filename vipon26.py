@@ -113,10 +113,17 @@ def _write_account_state(ss) -> None:
         print(f"[account-state] WARNING: could not save state: {_e.__class__.__name__}")
 
 
+# How many days of PIDs to remember. Two was too short: a product dropped out of
+# the window after 48h and came straight back round, so the same items surfaced
+# almost daily. Env-overridable.
+PID_HISTORY_DAYS = int(os.getenv("PID_HISTORY_DAYS") or "7")
+
+
 def _read_pid_history(ss) -> tuple:
-    """Return (us_historical_pids: set, ca_historical_pids: set) from last 2 days stored
-    in _config A2 as JSON.  Today's PIDs are excluded — those are already in us_pids /
-    ca_pids from _sheet_topup_state and will be deduplicated there."""
+    """Return (us_historical_pids: set, ca_historical_pids: set) from the last
+    PID_HISTORY_DAYS days stored in _config A2 as JSON.  Today's PIDs are
+    excluded — those are already in us_pids / ca_pids from _sheet_topup_state
+    and will be deduplicated there."""
     today = datetime.now().strftime("%Y-%m-%d")
     try:
         cfg = ss.worksheet(_CONFIG_TAB)
@@ -130,7 +137,7 @@ def _read_pid_history(ss) -> tuple:
                 us_pids.update(str(p) for p in entry.get("us", []))
                 ca_pids.update(str(p) for p in entry.get("ca", []))
         print(f"[pid-history] loaded {len(us_pids)} US + {len(ca_pids)} CA historical PIDs "
-              f"to exclude (last 2 days, excl. today)")
+              f"to exclude (last {PID_HISTORY_DAYS} days, excl. today)")
         return us_pids, ca_pids
     except Exception as _e:
         print(f"[pid-history] could not read history: {_e.__class__.__name__}")
@@ -138,8 +145,16 @@ def _read_pid_history(ss) -> tuple:
 
 
 def _write_pid_history(ss, today_us: list, today_ca: list) -> None:
-    """Append today's scraped PIDs to the rolling 2-day history in _config A2.
-    Re-runs today MERGE into today's entry (not replace) so early-run PIDs survive."""
+    """Append today's VISITED PIDs to the rolling history in _config A2.
+
+    "Visited" means every PID whose product page we opened, not just the ones
+    that produced a row. Rejects — blocked keyword, one-time code, deal-only,
+    throttled, amazon.com listed in the CA section — used to go unrecorded, so
+    the scraper reopened the same dead products every single day, burning both
+    run time and reveal quota to reach the same verdict.
+
+    Re-runs today MERGE into today's entry (not replace) so early-run PIDs
+    survive."""
     today = datetime.now().strftime("%Y-%m-%d")
     try:
         cfg = ss.worksheet(_CONFIG_TAB)
@@ -154,13 +169,13 @@ def _write_pid_history(ss, today_us: list, today_ca: list) -> None:
             history.insert(0, {"date": today,
                                "us": [str(p) for p in today_us],
                                "ca": [str(p) for p in today_ca]})
-        # Keep only last 2 days
+        # Keep only the last PID_HISTORY_DAYS days
         seen, kept = set(), []
         for entry in history:
             d = entry.get("date", "")
             if d not in seen:
                 seen.add(d); kept.append(entry)
-            if len(kept) >= 2:
+            if len(kept) >= PID_HISTORY_DAYS:
                 break
         cfg.update("A2", [[json.dumps(kept)]])
         print(f"[pid-history] saved {len(today_us)} US + {len(today_ca)} CA PIDs for {today} "
@@ -2680,6 +2695,9 @@ def main():
     # ── PHASE 1: Scrape US ───────────────────────────────────────
     scraped    = []
     scraped_ca = []
+    # Every PID whose page we open this run, successful or not — written to the
+    # rolling history so rejects are not reopened tomorrow.
+    visited_us, visited_ca = set(), set()
     scrape_start = time.time()                          # for the time-budget early stop
     _budget_sec  = EARLY_STOP_AFTER_MIN * 60
     def _time_up():
@@ -2738,6 +2756,9 @@ def main():
                 break
             if str(pid).strip() in us_pids:
                 continue                 # already on the sheet — don't re-scrape
+            # Remember every PID we open, whatever the outcome, so tomorrow's run
+            # does not reopen the ones that turn out to be rejects.
+            visited_us.add(str(pid).strip())
             # Fixed pace between reveals (rate-limit protection).
             time.sleep(REVEAL_PACE_SEC)
             try:
@@ -2816,6 +2837,7 @@ def main():
                 break
             if str(pid).strip() in ca_pids:
                 continue
+            visited_ca.add(str(pid).strip())   # record rejects too — see _write_pid_history
             time.sleep(REVEAL_PACE_SEC)
             try:
                 data_ca = scrape_product_page(driver, wait, pid, tld=AMAZON_TLD_CA,
@@ -2875,10 +2897,12 @@ def main():
 
     finally:
         _write_account_state(ws.spreadsheet)
+        # Union of visited and scraped: visited covers rejects, scraped covers the
+        # rows written (and survives if the loop broke before a PID was recorded).
         _write_pid_history(
             ws.spreadsheet,
-            [str(d["pid"]) for d in scraped],
-            [str(d["pid"]) for d in scraped_ca],
+            sorted(visited_us | {str(d["pid"]) for d in scraped}),
+            sorted(visited_ca | {str(d["pid"]) for d in scraped_ca}),
         )
         try:
             driver.quit()
