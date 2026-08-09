@@ -223,14 +223,18 @@ def _create_post_assets(key, channel_id, text, assets, metadata,
 # clip, so the cover is the pain-point frame. Applies to TikTok and Pinterest.
 THUMB_OFFSET_MS = 1000
 
-# Seconds ahead to schedule the Pinterest video pin, giving Buffer time to fetch
-# and ingest the video before the publish fires. Set to 0 to publish immediately.
+# Seconds ahead to schedule the Pinterest video pin. 0 = publish immediately.
 #
-# 45s was measured to be too short: a pin scheduled 45s out did not go until 87s
-# PAST its due time, and needed a manual retry. Pins whose due time was ~4 min or
-# more after creation published within 4-7s of due, every time. 240s sits above
-# that observed threshold without being the 12 min originally guessed.
-PINTEREST_LEAD_SECONDS = int(os.environ.get("PINTEREST_LEAD_SECONDS") or "240")
+# Back to 0. The lead was meant to give Buffer time to prepare the cover, but
+# measurement killed that theory: Buffer's thumbnail proxy — the exact URL
+# Pinterest fetches for the cover — returns a valid 55 KB JPEG in 0.40s COLD,
+# with no warm-up difference. 45s and 240s both still needed a manual retry, so
+# ingestion time was never the variable.
+#
+# Publishing immediately also means _verify_published actually polls the outcome
+# during the run, so the real rawError lands in the workflow log instead of the
+# run ending blind while the post sits scheduled.
+PINTEREST_LEAD_SECONDS = int(os.environ.get("PINTEREST_LEAD_SECONDS") or "0")
 
 
 def _video_asset(video_url, thumbnail_offset_ms=THUMB_OFFSET_MS, title=None):
@@ -278,7 +282,7 @@ query($id: PostId!) {
 """
 
 
-def _verify_published(key, post_id, tries=6, delay=5):
+def _verify_published(key, post_id, tries=14, delay=6):
     """Poll a post until it leaves the sending state.
 
     createPost only means Buffer ACCEPTED the post; publishing happens
@@ -294,7 +298,14 @@ def _verify_published(key, post_id, tries=6, delay=5):
             return "unknown", f"status check failed: {e}"
         status = p.get("status") or "unknown"
         err    = p.get("error") or {}
-        detail = err.get("message") or err.get("rawError") or p.get("externalLink") or ""
+        # rawError FIRST. `message` is always Buffer's generic "An unknown error
+        # has occurred. Please retry the post again", which says nothing —
+        # preferring it is why the workflow log never showed the real cause,
+        # while rawError carries the actual network reply, e.g.
+        #   "Failed to send pin: Sorry we could not fetch the image."
+        #   "getaddrinfo EAI_AGAIN business-api.tiktok.com"
+        detail = (err.get("rawError") or err.get("message")
+                  or p.get("externalLink") or "")
         if status in ("sent", "error"):
             return status, detail
         if i < tries - 1:
