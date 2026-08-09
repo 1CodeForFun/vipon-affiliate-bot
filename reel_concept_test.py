@@ -710,7 +710,8 @@ def build_concept_video(p, keys, ffmpeg, font, td, vo_text=None, tld="com"):
         tail = max(0.0, vid_dur - vo_dur)
         if tail < 1.0:
             subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-i", concat, "-i", vo_aac,
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-shortest", out], check=True, timeout=120)
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-shortest",
+                "-movflags", "+faststart", out], check=True, timeout=120)
         else:
             beats = gen_beats(tail, td, ffmpeg)
             mixed = os.path.join(td, "mix.aac"); dly = int(vo_dur*1000)
@@ -718,11 +719,13 @@ def build_concept_video(p, keys, ffmpeg, font, td, vo_text=None, tld="com"):
                 "-filter_complex", f"[1]adelay={dly}|{dly}[b];[0][b]amix=inputs=2:duration=longest[a]",
                 "-map", "[a]", "-c:a", "aac", "-b:a", "128k", mixed], check=True, timeout=120)
             subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-i", concat, "-i", mixed,
-                "-c:v", "copy", "-c:a", "aac", "-shortest", out], check=True, timeout=120)
+                "-c:v", "copy", "-c:a", "aac", "-shortest",
+                "-movflags", "+faststart", out], check=True, timeout=120)
     else:
         beats = gen_beats(vid_dur, td, ffmpeg)
         subprocess.run([ffmpeg, "-y"] + _FF_LOG + ["-i", concat, "-i", beats,
-            "-c:v", "copy", "-c:a", "aac", "-shortest", out], check=True, timeout=120)
+            "-c:v", "copy", "-c:a", "aac", "-shortest",
+                "-movflags", "+faststart", out], check=True, timeout=120)
     log(f"  ✓ final {probe_duration(out, ffmpeg):.1f}s ({os.path.getsize(out):,} bytes)")
     return out
 

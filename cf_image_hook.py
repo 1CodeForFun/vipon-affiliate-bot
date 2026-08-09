@@ -555,6 +555,11 @@ def prepend_hook_to_reel(hook_path, reel_path, ffmpeg, output_path):
         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
         "-c:a", "aac", "-b:a", "128k",
         "-pix_fmt", "yuv420p",
+        # faststart moves the moov atom to the FRONT. Without it moov sits after
+        # mdat, so anything wanting one frame has to fetch the whole file first.
+        # TikTok downloads it all and copes; Pinterest reads partially to build
+        # the cover, finds no moov, and fails with "could not fetch the image".
+        "-movflags", "+faststart",
         output_path,
     ] + _FF_LOG, capture_output=True, timeout=300)
     try: os.unlink(hook_audio)
