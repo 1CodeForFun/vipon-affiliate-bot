@@ -30,10 +30,10 @@ PINTEREST_TAG = "pinpinterestfd-20"
 
 PINTEREST_BOARD_NAME = "Daily Coupons and Discounts"
 
-# Buffer's API cannot attach a cover frame to a video post, and Pinterest refuses
-# a coverless video pin. Leave False so Pinterest receives an image pin, which
-# publishes unattended. See the long note in post_to_buffer.
-PINTEREST_VIDEO_PINS = False
+# Pinterest gets a VIDEO pin. It is scheduled a few minutes ahead rather than
+# published instantly — see PINTEREST_LEAD_MINUTES. Set False to fall back to a
+# static image pin built from the hook thumbnail.
+PINTEREST_VIDEO_PINS = True
 
 # Amazon disclosure required by both Amazon Associates and TikTok for affiliate content
 DISCLOSURE = "#ad As an Amazon Associate I earn from qualifying purchases."
@@ -128,16 +128,33 @@ mutation($input: CreatePostInput!) {
 """
 
 
-def _create_post_assets(key, channel_id, text, assets, metadata, first_comment=None):
-    """Low-level createPost with an explicit assets array (shareNow / immediate)."""
+def _create_post_assets(key, channel_id, text, assets, metadata,
+                        first_comment=None, lead_minutes=0):
+    """Low-level createPost with an explicit assets array.
+
+    lead_minutes > 0 schedules the post that far ahead (customScheduled + dueAt)
+    instead of publishing immediately. Buffer has to fetch and transcode the
+    video before it can derive a cover frame from metadata.thumbnailOffset, and
+    with mode:shareNow it pushes to the network before that finishes — Pinterest
+    then rejects the coverless pin with "Sorry we could not fetch the image".
+    Buffer's own video example uses addToQueue rather than shareNow for the same
+    reason. The lead gives the asset time to process.
+    """
     inp = {
         "channelId": channel_id,
         "schedulingType": "automatic",
-        "mode": "shareNow",          # publish immediately when this run executes
         "text": text,
         "assets": assets,
         "metadata": metadata,
     }
+    if lead_minutes > 0:
+        import datetime as _dt
+        due = (_dt.datetime.now(_dt.timezone.utc)
+               + _dt.timedelta(minutes=lead_minutes))
+        inp["mode"]  = "customScheduled"
+        inp["dueAt"] = due.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    else:
+        inp["mode"] = "shareNow"     # publish immediately when this run executes
     if first_comment:
         inp["firstComment"] = {"text": first_comment}
     res = _gql(key, _CREATE_POST, {"input": inp})
@@ -148,11 +165,13 @@ def _create_post_assets(key, channel_id, text, assets, metadata, first_comment=N
 
 
 # Which frame Buffer uses as the video cover, in ms — one second into the AI hook
-# clip, so the cover is the pain-point frame. This only affects TIKTOK now, since
-# Pinterest receives an image pin. It was briefly disabled to test whether it was
-# breaking Pinterest; it was not — Buffer simply never attaches a cover to
-# API-created video posts at all.
+# clip, so the cover is the pain-point frame. Applies to TikTok and Pinterest.
 THUMB_OFFSET_MS = 1000
+
+# Minutes ahead to schedule the Pinterest video pin, giving Buffer time to fetch
+# and transcode the video and derive its cover before publishing. Set to 0 to go
+# back to publishing immediately.
+PINTEREST_LEAD_MINUTES = int(os.environ.get("PINTEREST_LEAD_MINUTES") or "12")
 
 
 def _video_asset(video_url, thumbnail_offset_ms=THUMB_OFFSET_MS):
@@ -278,39 +297,46 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
                 raise RuntimeError("no Pinterest boards available on channel")
             meta = {"pinterest": {"title": title[:95], "url": pin_link,
                                   "boardServiceId": board_id}}
-            # PINTEREST GETS AN IMAGE PIN, NOT A VIDEO.
+            # Pinterest video pin, SCHEDULED a few minutes out rather than shared
+            # instantly. Buffer's documented video example uses addToQueue, not
+            # shareNow, and that difference matters: Buffer must fetch and
+            # transcode the video before it can cut a cover frame at
+            # metadata.thumbnailOffset. shareNow pushes to Pinterest before that
+            # finishes, Pinterest gets a pin with no image, and it fails with
+            # "Sorry we could not fetch the image". Retry re-sends the same
+            # unprocessed asset, which is why only editing and re-saving in
+            # Buffer's composer (which forces processing) ever worked.
             #
-            # Buffer's API never attaches a cover frame to a video post — only its
-            # own composer generates one. Pinterest requires a cover for a video
-            # pin, so every API-created video pin dies with:
-            #   "Failed to send pin: Sorry we could not fetch the image."
-            # Buffer's Retry re-sends the same coverless asset and fails again; the
-            # only thing that worked was opening the post, hitting Edit Thumbnail,
-            # saving and publishing by hand — every single day.
-            #
-            # Nothing is lost by dropping the video: Pinterest was only ever
-            # rendering these as a static first frame anyway. The image pin uses
-            # col L, which is the AI hook frame with the POV text already burned
-            # in — the exact frame Pinterest was showing, at full quality — and it
-            # publishes automatically. The clickable destination link is carried by
-            # metadata.pinterest.url either way.
-            #
-            # Set PINTEREST_VIDEO_PINS = True to try video again if Buffer ever
-            # starts attaching covers via the API.
+            # The static image pin stays as a fallback for when the video asset is
+            # rejected outright; it publishes, but Pinterest shows it as a still.
             attempts = []
+            if PINTEREST_VIDEO_PINS:
+                attempts.append(("video pin", [_video_asset(video_url)],
+                                 PINTEREST_LEAD_MINUTES))
             if image_url:
-                attempts.append(("image pin", [{"image": {"url": image_url}}]))
-            if PINTEREST_VIDEO_PINS or not image_url:
-                attempts.append(("video pin", [_video_asset(video_url)]))
+                attempts.append(("image pin", [{"image": {"url": image_url}}], 0))
+            if not attempts:
+                attempts.append(("video pin", [_video_asset(video_url)],
+                                 PINTEREST_LEAD_MINUTES))
 
             posted, last_err = False, None
-            for label, assets in attempts:
+            for label, assets, lead in attempts:
                 try:
-                    pid = _create_post_assets(key, pin["id"], pin_text, assets, meta)
+                    pid = _create_post_assets(key, pin["id"], pin_text, assets, meta,
+                                              lead_minutes=lead)
                 except Exception as e:
                     last_err = e
                     log(f"  Buffer Pinterest: {label} rejected: {e}")
                     continue
+
+                if lead:
+                    # Scheduled: it cannot have published yet, and polling for
+                    # 'sent' would just time out. Buffer publishes it once the
+                    # asset is processed.
+                    log(f"  ✓ Buffer Pinterest: {label} scheduled ~{lead} min out "
+                        f"(id={pid}) — Buffer processes the video, then publishes")
+                    posted = True
+                    break
 
                 status, detail = _verify_published(key, pid)
                 if status == "sent":
