@@ -57,6 +57,48 @@ def _load_key():
     return os.environ.get("BUFFER_API_KEY", "").strip()
 
 
+def _warm_url(url, timeout=90):
+    """Pull the first bytes of the asset so Cloudinary's edge has it cached.
+
+    Buffer fetches the media synchronously while validating createPost. On a
+    cold Cloudinary object that fetch can time out, and Buffer reports
+    "Invalid post: Video could not be read from its URL" even though the file is
+    perfectly healthy — verified: HTTP 200, video/mp4, 1.4 MB, H.264 High
+    720x1280 CFR 30fps. Warming the edge first makes Buffer's fetch fast.
+    """
+    if not url:
+        return
+    try:
+        r = requests.get(url, stream=True, timeout=timeout)
+        r.raise_for_status()
+        got = 0
+        for chunk in r.iter_content(65536):
+            got += len(chunk)
+            if got >= 262144:      # 256 KB is plenty to make the edge hot
+                break
+        r.close()
+        log(f"  Buffer: warmed asset ({got:,} bytes read)")
+    except Exception as e:
+        log(f"  Buffer: could not warm asset ({e}) — posting anyway")
+
+
+# createPost failures that are about Buffer FETCHING the asset, not about the
+# post being malformed. These are worth retrying; a rejected board id is not.
+_TRANSIENT_MARKERS = (
+    "could not be read",
+    "could not fetch",
+    "unable to fetch",
+    "timed out",
+    "timeout",
+    "internal server error",
+)
+
+
+def _is_transient(err) -> bool:
+    s = str(err).lower()
+    return any(m in s for m in _TRANSIENT_MARKERS)
+
+
 def _gql(key, query, variables=None):
     """POST a GraphQL request; raise RuntimeError on HTTP or GraphQL errors."""
     r = requests.post(
@@ -157,11 +199,24 @@ def _create_post_assets(key, channel_id, text, assets, metadata,
         inp["mode"] = "shareNow"     # publish immediately when this run executes
     if first_comment:
         inp["firstComment"] = {"text": first_comment}
-    res = _gql(key, _CREATE_POST, {"input": inp})
-    cp = res.get("createPost") or {}
-    if cp.get("message"):
-        raise RuntimeError(f"createPost rejected: {cp['message']}")
-    return (cp.get("post") or {}).get("id")
+
+    # Retry only fetch-side failures — Buffer reads the media during validation,
+    # and that read is flaky on a cold asset. A malformed post is not retried.
+    import time as _t
+    last = None
+    for attempt, backoff in enumerate((0, 20, 45), start=1):
+        if backoff:
+            log(f"  Buffer: asset fetch failed — retrying in {backoff}s "
+                f"(attempt {attempt}/3)")
+            _t.sleep(backoff)
+        res = _gql(key, _CREATE_POST, {"input": inp})
+        cp  = res.get("createPost") or {}
+        if not cp.get("message"):
+            return (cp.get("post") or {}).get("id")
+        last = RuntimeError(f"createPost rejected: {cp['message']}")
+        if not _is_transient(last):
+            raise last
+    raise last
 
 
 # Which frame Buffer uses as the video cover, in ms — one second into the AI hook
@@ -252,6 +307,11 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
     title = (deal.get("title_text") or deal.get("title") or "Today's Amazon deal").strip()
     asin  = deal["asin"]
     pct   = deal.get("pct", 0)
+
+    # Warm the media on Cloudinary's edge before Buffer tries to read it.
+    _warm_url(video_url)
+    if image_url and image_url != video_url:
+        _warm_url(image_url, timeout=45)
 
     # ── TikTok ──
     # The link and code live in the CAPTION. The original plan was link in comment
