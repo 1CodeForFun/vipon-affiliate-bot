@@ -30,9 +30,9 @@ PINTEREST_TAG = "pinpinterestfd-20"
 
 PINTEREST_BOARD_NAME = "Daily Coupons and Discounts"
 
-# Pinterest gets a VIDEO pin. It is scheduled a few minutes ahead rather than
-# published instantly — see PINTEREST_LEAD_MINUTES. Set False to fall back to a
-# static image pin built from the hook thumbnail.
+# Pinterest gets a VIDEO pin, scheduled a short lead ahead rather than published
+# instantly — see PINTEREST_LEAD_SECONDS. Set False to fall back to a static
+# image pin built from the hook thumbnail.
 PINTEREST_VIDEO_PINS = True
 
 # Amazon disclosure required by both Amazon Associates and TikTok for affiliate content
@@ -171,10 +171,10 @@ mutation($input: CreatePostInput!) {
 
 
 def _create_post_assets(key, channel_id, text, assets, metadata,
-                        first_comment=None, lead_minutes=0):
+                        first_comment=None, lead_seconds=0):
     """Low-level createPost with an explicit assets array.
 
-    lead_minutes > 0 schedules the post that far ahead (customScheduled + dueAt)
+    lead_seconds > 0 schedules the post that far ahead (customScheduled + dueAt)
     instead of publishing immediately. Buffer has to fetch and transcode the
     video before it can derive a cover frame from metadata.thumbnailOffset, and
     with mode:shareNow it pushes to the network before that finishes — Pinterest
@@ -189,10 +189,10 @@ def _create_post_assets(key, channel_id, text, assets, metadata,
         "assets": assets,
         "metadata": metadata,
     }
-    if lead_minutes > 0:
+    if lead_seconds > 0:
         import datetime as _dt
         due = (_dt.datetime.now(_dt.timezone.utc)
-               + _dt.timedelta(minutes=lead_minutes))
+               + _dt.timedelta(seconds=lead_seconds))
         inp["mode"]  = "customScheduled"
         inp["dueAt"] = due.strftime("%Y-%m-%dT%H:%M:%S.000Z")
     else:
@@ -223,10 +223,12 @@ def _create_post_assets(key, channel_id, text, assets, metadata,
 # clip, so the cover is the pain-point frame. Applies to TikTok and Pinterest.
 THUMB_OFFSET_MS = 1000
 
-# Minutes ahead to schedule the Pinterest video pin, giving Buffer time to fetch
+# Seconds ahead to schedule the Pinterest video pin, giving Buffer time to fetch
 # and transcode the video and derive its cover before publishing. Set to 0 to go
-# back to publishing immediately.
-PINTEREST_LEAD_MINUTES = int(os.environ.get("PINTEREST_LEAD_MINUTES") or "12")
+# back to publishing immediately. The asset is also pre-warmed on Cloudinary's
+# edge (_warm_url), so Buffer's fetch should be quick and this lead is a margin
+# rather than a full transcode window.
+PINTEREST_LEAD_SECONDS = int(os.environ.get("PINTEREST_LEAD_SECONDS") or "45")
 
 
 def _video_asset(video_url, thumbnail_offset_ms=THUMB_OFFSET_MS):
@@ -372,18 +374,18 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
             attempts = []
             if PINTEREST_VIDEO_PINS:
                 attempts.append(("video pin", [_video_asset(video_url)],
-                                 PINTEREST_LEAD_MINUTES))
+                                 PINTEREST_LEAD_SECONDS))
             if image_url:
                 attempts.append(("image pin", [{"image": {"url": image_url}}], 0))
             if not attempts:
                 attempts.append(("video pin", [_video_asset(video_url)],
-                                 PINTEREST_LEAD_MINUTES))
+                                 PINTEREST_LEAD_SECONDS))
 
             posted, last_err = False, None
             for label, assets, lead in attempts:
                 try:
                     pid = _create_post_assets(key, pin["id"], pin_text, assets, meta,
-                                              lead_minutes=lead)
+                                              lead_seconds=lead)
                 except Exception as e:
                     last_err = e
                     log(f"  Buffer Pinterest: {label} rejected: {e}")
@@ -393,7 +395,7 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
                     # Scheduled: it cannot have published yet, and polling for
                     # 'sent' would just time out. Buffer publishes it once the
                     # asset is processed.
-                    log(f"  ✓ Buffer Pinterest: {label} scheduled ~{lead} min out "
+                    log(f"  ✓ Buffer Pinterest: {label} scheduled ~{lead}s out "
                         f"(id={pid}) — Buffer processes the video, then publishes")
                     posted = True
                     break
