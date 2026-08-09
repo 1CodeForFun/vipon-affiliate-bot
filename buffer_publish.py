@@ -224,11 +224,13 @@ def _create_post_assets(key, channel_id, text, assets, metadata,
 THUMB_OFFSET_MS = 1000
 
 # Seconds ahead to schedule the Pinterest video pin, giving Buffer time to fetch
-# and transcode the video and derive its cover before publishing. Set to 0 to go
-# back to publishing immediately. The asset is also pre-warmed on Cloudinary's
-# edge (_warm_url), so Buffer's fetch should be quick and this lead is a margin
-# rather than a full transcode window.
-PINTEREST_LEAD_SECONDS = int(os.environ.get("PINTEREST_LEAD_SECONDS") or "45")
+# and ingest the video before the publish fires. Set to 0 to publish immediately.
+#
+# 45s was measured to be too short: a pin scheduled 45s out did not go until 87s
+# PAST its due time, and needed a manual retry. Pins whose due time was ~4 min or
+# more after creation published within 4-7s of due, every time. 240s sits above
+# that observed threshold without being the 12 min originally guessed.
+PINTEREST_LEAD_SECONDS = int(os.environ.get("PINTEREST_LEAD_SECONDS") or "240")
 
 
 def _video_asset(video_url, thumbnail_offset_ms=THUMB_OFFSET_MS, title=None):
