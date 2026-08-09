@@ -231,7 +231,7 @@ THUMB_OFFSET_MS = 1000
 PINTEREST_LEAD_SECONDS = int(os.environ.get("PINTEREST_LEAD_SECONDS") or "45")
 
 
-def _video_asset(video_url, thumbnail_offset_ms=THUMB_OFFSET_MS):
+def _video_asset(video_url, thumbnail_offset_ms=THUMB_OFFSET_MS, title=None):
     """Video asset carrying an explicit cover frame.
 
     Buffer's schema documents VideoAssetInput.thumbnailUrl as "Do not use:
@@ -246,14 +246,23 @@ def _video_asset(video_url, thumbnail_offset_ms=THUMB_OFFSET_MS):
     only re-saving through Buffer's own composer generates a frame.
     """
     asset = {"url": video_url}
+    meta  = {}
     if thumbnail_offset_ms is not None:
-        asset["metadata"] = {"thumbnailOffset": int(thumbnail_offset_ms)}
+        meta["thumbnailOffset"] = int(thumbnail_offset_ms)
+    if title:
+        # Buffer's composer shows "Untitled Video" for API-created posts, so this
+        # was never being set. VideoMetadataInput.title is the only other field
+        # the schema exposes; cheap to populate and it labels the asset properly.
+        meta["title"] = title[:100]
+    if meta:
+        asset["metadata"] = meta
     return {"video": asset}
 
 
 def _create_post(key, channel_id, text, video_url, metadata,
-                 thumbnail_url=None, first_comment=None):
-    return _create_post_assets(key, channel_id, text, [_video_asset(video_url)],
+                 thumbnail_url=None, first_comment=None, title=None):
+    return _create_post_assets(key, channel_id, text,
+                               [_video_asset(video_url, title=title)],
                                metadata, first_comment=first_comment)
 
 
@@ -373,12 +382,12 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
             # rejected outright; it publishes, but Pinterest shows it as a still.
             attempts = []
             if PINTEREST_VIDEO_PINS:
-                attempts.append(("video pin", [_video_asset(video_url)],
+                attempts.append(("video pin", [_video_asset(video_url, title=title)],
                                  PINTEREST_LEAD_SECONDS))
             if image_url:
                 attempts.append(("image pin", [{"image": {"url": image_url}}], 0))
             if not attempts:
-                attempts.append(("video pin", [_video_asset(video_url)],
+                attempts.append(("video pin", [_video_asset(video_url, title=title)],
                                  PINTEREST_LEAD_SECONDS))
 
             posted, last_err = False, None
