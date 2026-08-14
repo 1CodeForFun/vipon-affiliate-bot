@@ -95,8 +95,37 @@ def _goldbox_url(min_pct=MIN_PCT_DEFAULT, max_pct=100, page=1):
     return url + (f"&page={page}" if page > 1 else "")
 
 
+def _despace(s):
+    """Collapse letter-spaced card text.
+
+    Some deal cards render every character separated by a space —
+    "4 0 % o f f L i m i t e d t i m e d e a l R O U M E A P i l l o w s" —
+    which defeats both the discount regex and the title cleanup. Runs of
+    single characters are rejoined; genuine words are left alone.
+    """
+    if not s:
+        return s
+    toks = s.split(" ")
+    if len(toks) < 12:
+        return s
+    singles = sum(1 for t in toks if len(t) == 1)
+    if singles / len(toks) < 0.55:
+        return s
+    out, run = [], []
+    for t in toks:
+        if len(t) == 1:
+            run.append(t)
+        else:
+            if run:
+                out.append("".join(run)); run = []
+            out.append(t)
+    if run:
+        out.append("".join(run))
+    return " ".join(out)
+
+
 def _extract_pct(text):
-    m = _PCT_RE.search(text or "")
+    m = _PCT_RE.search(_despace(text) or "")
     return int(next(g for g in m.groups() if g is not None)) if m else None
 
 
@@ -124,7 +153,7 @@ def match_brand(title):
     return max(hits, key=len) if hits else None
 
 
-def _parse_cards(html, min_pct):
+def _parse_cards(html, min_pct, require_brand=False):
     """Parse deal cards -> [{asin, title, pct, ends_in, brand}]. Branded only."""
     try:
         from bs4 import BeautifulSoup
@@ -160,12 +189,12 @@ def _parse_cards(html, min_pct):
         # price/swatch sub-element TEXT (removing those nodes from the DOM does
         # not work — the title is nested within them) and strip badge wording and
         # stray prices from what remains.
-        title = re.sub(r"\s+", " ", text)
+        title = _despace(re.sub(r"\s+", " ", text))
         for tid in ("price-section", "color-swatch"):
             sub = c.find(attrs={"data-testid": tid})
             if sub:
-                title = title.replace(re.sub(r"\s+", " ",
-                                             sub.get_text(" ", strip=True)), " ")
+                title = title.replace(_despace(re.sub(r"\s+", " ",
+                                     sub.get_text(" ", strip=True))), " ")
         title = re.sub(r"\d+\s*%\s*off|save\s+\d+\s*%|limited time deal|"
                        r"deal of the day|best seller|prime exclusive|ends? in\b[^|]*|"
                        r"list:|deal price:|\$\s?[\d,]+(?:\s?\.\s?\d+)?",
@@ -173,14 +202,38 @@ def _parse_cards(html, min_pct):
         title = re.sub(r"\s+", " ", title).strip(" -|·,")
         if len(title) < 8:
             continue
+        # Reject anything still letter-spaced after _despace — a handful of cards
+        # use a layout it cannot recover, and a mangled title would end up in the
+        # reel and the caption. There is ample supply, so drop them.
+        toks = title.split()
+        if len(toks) > 6 and sum(1 for t in toks if len(t) == 1) / len(toks) > 0.3:
+            continue
+        # Brand is a PREFERENCE, not a gate. The deals page simply does not carry
+        # enough recognised-brand stock at 40%+ to fill half a 48-product sheet —
+        # a live run returned 14 branded items against a need for 24. Unbranded
+        # 40%+ deals are still perfectly good posts, so keep everything and let
+        # the caller sort branded first.
         brand = match_brand(title)
-        if not brand:
+        if require_brand and not brand:
             continue
 
-        ends = _ENDS_RE.search(text)
+        # Price. The price node reads "Deal Price: $37.89 $ 37 . 89 List: $69.99",
+        # so the first money value is what you pay and the last is the list price.
+        price = list_price = ""
+        psec = c.find(attrs={"data-testid": "price-section"})
+        if psec:
+            money = re.findall(r"\$\s?([\d,]+(?:\.\d{2})?)",
+                               _despace(re.sub(r"\s+", " ", psec.get_text(" ", strip=True))))
+            if money:
+                price = "$" + money[0]
+                if len(money) > 1:
+                    list_price = "$" + money[-1]
+
+        ends = _ENDS_RE.search(_despace(text))
         seen.add(asin)
         out.append({"asin": asin, "title": title[:200], "pct": pct,
-                    "brand": brand, "ends_in": ends.group(1) if ends else ""})
+                    "brand": brand or "", "price": price, "list_price": list_price,
+                    "ends_in": ends.group(1) if ends else ""})
     return out
 
 
@@ -214,7 +267,8 @@ def _new_driver(headless=True):
         return webdriver.Chrome(options=o)
 
 
-def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=8, want=0, headless=True):
+def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=14, want=0,
+                      headless=True, require_brand=False):
     """Branded deals at >= min_pct, highest discount first. [] on failure.
 
     Selenium is required, not a nicety. Fetching the same URL with requests
@@ -235,7 +289,7 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=8, want=0, headless=True)
         driver.get(_goldbox_url(min_pct, 100))
         time.sleep(6)                      # let the refinement apply
         for i in range(max(1, scrolls)):
-            got = [d for d in _parse_cards(driver.page_source, min_pct)
+            got = [d for d in _parse_cards(driver.page_source, min_pct, require_brand)
                    if d["asin"] not in seen]
             for d in got:
                 seen.add(d["asin"])
@@ -254,7 +308,8 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=8, want=0, headless=True)
         except Exception:
             pass
 
-    found.sort(key=lambda d: -d["pct"])
+    # Branded first, then deepest discount — the caller takes from the top.
+    found.sort(key=lambda d: (0 if d["brand"] else 1, -d["pct"]))
     return found
 
 
@@ -263,11 +318,13 @@ def main():
     ap.add_argument("--min-pct", type=int, default=MIN_PCT_DEFAULT)
     ap.add_argument("--scrolls", type=int, default=8)
     ap.add_argument("--show-browser", action="store_true")
+    ap.add_argument("--branded-only", action="store_true")
     args = ap.parse_args()
 
     log(f"searching goldbox for {args.min_pct}%+ deals from {len(BRANDS)} known brands...")
     deals = fetch_brand_deals(args.min_pct, args.scrolls,
-                              headless=not args.show_browser)
+                              headless=not args.show_browser,
+                              require_brand=args.branded_only)
     log(f"\n{len(deals)} branded deal(s):\n")
     for d in deals:
         ends = f"  ends in {d['ends_in']}" if d["ends_in"] else ""
