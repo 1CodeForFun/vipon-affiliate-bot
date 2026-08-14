@@ -78,6 +78,7 @@ def _rotate_account():
     print(f"[rotate] switching to account {_account_index + 1}/{len(VIPON_ACCOUNTS)}: {acc['username']}")
     return acc
 
+_BENCHED_ACCOUNTS: dict = {}   # username -> iso date of monthly cap
 _CONFIG_TAB = "_config"  # lightweight sheet that persists run state across GitHub Actions runs
 
 def _read_account_state(ss) -> int:
@@ -144,6 +145,50 @@ def _read_pid_history(ss) -> tuple:
         return set(), set()
 
 
+_MONTHLY_CAP_DAYS = 31          # how long a monthly-capped account stays benched
+
+
+def _read_capped_accounts(ss) -> dict:
+    """{username: iso_date} of accounts that hit their MONTHLY cap recently.
+
+    Stored in _config A3. Daily caps are not recorded — they clear overnight and
+    benching an account for a day would waste eight-ninths of the fleet.
+    """
+    try:
+        cfg = ss.worksheet(_CONFIG_TAB)
+        val = cfg.acell("A3").value
+        if not val:
+            return {}
+        data = json.loads(val)
+        fresh, cutoff = {}, datetime.now() - timedelta(days=_MONTHLY_CAP_DAYS)
+        for user, iso in data.items():
+            try:
+                if datetime.strptime(iso[:10], "%Y-%m-%d") >= cutoff:
+                    fresh[user] = iso
+            except Exception:
+                pass
+        if fresh:
+            print(f"[cap-state] {len(fresh)} account(s) benched on a monthly cap: "
+                  f"{', '.join(sorted(fresh))}")
+        return fresh
+    except Exception as _e:
+        print(f"[cap-state] could not read: {_e.__class__.__name__}")
+        return {}
+
+
+def _mark_account_capped(ss, username: str) -> None:
+    """Bench an account that reported its MONTHLY cap."""
+    try:
+        cfg = ss.worksheet(_CONFIG_TAB)
+        val = cfg.acell("A3").value
+        data = json.loads(val) if val else {}
+        data[username] = datetime.now().strftime("%Y-%m-%d")
+        cfg.update("A3", [[json.dumps(data)]])
+        print(f"[cap-state] {username} benched for {_MONTHLY_CAP_DAYS} days (monthly cap)")
+    except Exception as _e:
+        print(f"[cap-state] could not save: {_e.__class__.__name__}")
+
+
 def _write_pid_history(ss, today_us: list, today_ca: list) -> None:
     """Append today's VISITED PIDs to the rolling history in _config A2.
 
@@ -195,9 +240,15 @@ MAX_AMAZON_IMAGES     = 6
 
 PROMO_URL     = "https://www.myvipon.com"
 PROMO_URL_CA  = "https://www.myvipon.com/promotion/index?type=instant"  # CA full deal listing (supports infinite scroll)
-# Per-sheet target. 48 pairs with the FB text poster at 2 posts/hour, which
-# clears exactly 48 in 24 hours.
-PRODUCT_LIMIT = int(os.getenv("PRODUCT_LIMIT") or "48")
+# Per-sheet targets, split between Vipon (exclusive code) and Amazon deals
+# (no code, 40%+, time-limited). Halving the Vipon share also halves the reveal
+# quota and the run time, which is what was pushing the run past its budget.
+#   US 48 = 24 Vipon + 24 Amazon
+#   CA 30 = 15 Vipon + 15 Amazon
+PRODUCT_LIMIT    = int(os.getenv("PRODUCT_LIMIT")    or "48")   # US per-sheet total
+PRODUCT_LIMIT_CA = int(os.getenv("PRODUCT_LIMIT_CA") or "30")   # CA per-sheet total
+AMAZON_SHARE     = float(os.getenv("AMAZON_SHARE")   or "0.5")  # fraction from deals
+AMAZON_MIN_PCT   = int(os.getenv("AMAZON_MIN_PCT")   or "40")
 
 # FIXED delay (seconds) between code reveals. Vipon rate-limits the GET-CODE
 # endpoint per IP by requests-per-minute — the old VM never tripped it because it
@@ -1783,6 +1834,8 @@ SKIP_DEAL_ONLY = "deal-only"  # no exclusive code; product is a "Get Deal at Ama
 SKIP_ONETIME   = "onetime"    # dashed single-use code — can't be shared
 SKIP_BLOCKED   = "blocked"    # blocked keyword in title
 SKIP_NO_IMAGE  = "no-image"   # couldn't resolve product image
+SKIP_CAP_DAY   = "cap-daily"   # account hit its ~40/day reveal ceiling
+SKIP_CAP_MONTH = "cap-monthly" # account hit its ~400/30-day ceiling
 
 
 # Button wordings that mean "no exclusive code — just a time-limited price drop".
@@ -1836,35 +1889,68 @@ def _check_deal_only(driver) -> bool:
     return False
 
 
-def _check_cap_toast(driver) -> bool:
-    """Poll briefly for the '400 codes every 30 days' iView toast that Vipon shows for
-    ~1.5s after a capped account clicks GET CODE. Returns True if detected."""
-    _CAP_PHRASES = ("400 codes", "only claim", "codes every 30", "limit reached",
-                    "you can only")
-    deadline = time.time() + 2.0    # toast lasts ~1.5s; poll for 2s to be safe
+# Vipon caps reveals two ways and says which in a toast that shows for ~2-3s at
+# the top of the product page right after GET CODE is clicked. The two mean very
+# different things and were previously treated identically:
+#   DAILY   (~40/day)      the account is fine again tomorrow — rotate for now
+#   MONTHLY (~300-400/30d) the account is spent for weeks — skip it entirely,
+#                          otherwise every future run wastes a login and a
+#                          handful of reveals rediscovering the same wall
+# At ~40/day against a ~400/month ceiling an account lasts roughly ten days, so
+# the monthly state is the one worth persisting.
+_CAP_DAILY_HINTS   = ("today", "daily", "24 hours", "per day", "a day")
+_CAP_MONTHLY_HINTS = ("30 days", "month", "400 codes", "300 codes")
+_CAP_PHRASES = ("codes", "only claim", "limit", "you can only", "reached",
+                "maximum", "exceed")
+
+
+def _classify_cap(text: str) -> str:
+    """'daily' | 'monthly' | '' for a candidate toast string."""
+    t = (text or "").lower()
+    if not any(p in t for p in _CAP_PHRASES):
+        return ""
+    # Monthly wins ties: "40 today / 400 this month" should be read as monthly
+    # only when the monthly wording is present.
+    if any(h in t for h in _CAP_MONTHLY_HINTS):
+        return "monthly"
+    if any(h in t for h in _CAP_DAILY_HINTS):
+        return "daily"
+    return "daily"      # a cap we cannot classify is treated as the milder one
+
+
+def _check_cap_toast(driver) -> str:
+    """Poll for the cap toast. Returns 'daily', 'monthly', or '' if none.
+
+    The toast is visible for only ~2-3s after the GET CODE click, so this polls
+    fast and briefly. The raw text is always logged — the exact wording is the
+    only way to tell which ceiling was hit, and it is worth seeing in the run
+    log if Vipon rewords it.
+    """
+    deadline = time.time() + 3.5
     while time.time() < deadline:
         try:
-            # iView notifications land in .ivu-notice-content or .ivu-message-content
             for sel in (".ivu-notice-content", ".ivu-message-content",
-                        "[class*='notice']", "[class*='message']", "[class*='toast']"):
+                        "[class*='notice']", "[class*='message']", "[class*='toast']",
+                        "[class*='alert']"):
                 try:
-                    els = driver.find_elements(By.CSS_SELECTOR, sel)
-                    for el in els:
-                        txt = (el.text or "").lower()
-                        if any(p in txt for p in _CAP_PHRASES):
-                            log(f"  🚫 account cap toast detected: {el.text.strip()!r}")
-                            return True
+                    for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                        raw = (el.text or "").strip()
+                        kind = _classify_cap(raw)
+                        if kind:
+                            log(f"  🚫 {kind.upper()} cap toast: {raw[:160]!r}")
+                            return kind
                 except Exception:
                     pass
-            # Also check for the phrase anywhere in the visible page text (fast).
-            body = (driver.find_element(By.TAG_NAME, "body").text or "").lower()
-            if any(p in body for p in _CAP_PHRASES):
-                log(f"  🚫 account cap phrase detected in body text")
-                return True
+            body = (driver.find_element(By.TAG_NAME, "body").text or "")
+            for line in body.splitlines():
+                kind = _classify_cap(line)
+                if kind:
+                    log(f"  🚫 {kind.upper()} cap text in body: {line.strip()[:160]!r}")
+                    return kind
         except Exception:
             pass
-        time.sleep(0.2)
-    return False
+        time.sleep(0.15)
+    return ""
 
 
 def scrape_product_page(driver, wait, pid, tld="com", allow_deal_only=False):
@@ -1895,7 +1981,7 @@ def scrape_product_page(driver, wait, pid, tld="com", allow_deal_only=False):
     # For CA (allow_deal_only=True) we still capture the product with code="" instead
     # of skipping, because the Amazon deal link alone has affiliate value.
     _is_deal_only = _check_deal_only(driver)
-    account_capped = False
+    cap_kind = ""
     if _is_deal_only:
         if not allow_deal_only:
             log(f"  ⏭ deal-only product (no exclusive code) — skipping PID {pid}")
@@ -1906,7 +1992,7 @@ def scrape_product_page(driver, wait, pid, tld="com", allow_deal_only=False):
         try_reveal_code(driver)
 
         # Poll immediately for the 400-cap toast (appears for ~1.5s right after click).
-        account_capped = _check_cap_toast(driver)
+        cap_kind = _check_cap_toast(driver)
 
         # Guard: if a reveal click navigated away from vipon (e.g. clicked "Use on Amazon"), come back
         if "myvipon.com/product/" not in driver.current_url:
@@ -1939,9 +2025,12 @@ def scrape_product_page(driver, wait, pid, tld="com", allow_deal_only=False):
         # ── Classify the skip reason precisely ───────────────────────
         if not is_plausible_code(code, strict=False):
             _capture_code_failure(driver, pid)   # only for genuine throttle/empty reveal
-            if account_capped:
-                log(f"  🚫 no valid code — account at 400/30-day cap → rotate immediately")
-                return SKIP_THROTTLE
+            if cap_kind == "monthly":
+                log("  🚫 no valid code — account at its MONTHLY cap → bench it")
+                return SKIP_CAP_MONTH
+            if cap_kind == "daily":
+                log("  🚫 no valid code — account at its DAILY cap → rotate")
+                return SKIP_CAP_DAY
             log("  ✗ no valid code — skipping (throttle/empty reveal)")
             return SKIP_THROTTLE
 
@@ -2666,8 +2755,15 @@ def main():
     ws2    = open_sheet2_and_reset()
     ws_p   = open_pinterest_sheet_and_reset() if ENABLE_PINTEREST else None
 
-    global _account_index
+    global _account_index, _BENCHED_ACCOUNTS
+    _BENCHED_ACCOUNTS = _read_capped_accounts(ws.spreadsheet)
     _account_index = _read_account_state(ws.spreadsheet)
+    # Step off a benched account rather than spending a login proving it is spent.
+    for _ in range(len(VIPON_ACCOUNTS)):
+        if _current_account()["username"] not in _BENCHED_ACCOUNTS:
+            break
+        log(f"  ↷ {_current_account()['username']} is benched (monthly cap) — next")
+        _account_index = (_account_index + 1) % len(VIPON_ACCOUNTS)
     log(f"══════════════════════════════════════════════════════════════")
     log(f"  STARTING ACCOUNT: {_account_index + 1}/{len(VIPON_ACCOUNTS)} — {_current_account()['username']}")
     log(f"══════════════════════════════════════════════════════════════")
@@ -2683,11 +2779,20 @@ def main():
     ca_existing, ca_pids = _sheet_topup_state(ws2)
     us_pids |= us_hist_pids   # exclude last-2-days PIDs from this run's tile scan
     ca_pids |= ca_hist_pids
-    us_target = max(0, PRODUCT_LIMIT - us_existing)
-    ca_target = max(0, PRODUCT_LIMIT - ca_existing)
+    # Only the VIPON share is scraped here; the rest is filled from Amazon deals,
+    # which cost no reveal quota and take one fast Selenium session.
+    us_vipon_cap = PRODUCT_LIMIT    - int(PRODUCT_LIMIT    * AMAZON_SHARE)
+    ca_vipon_cap = PRODUCT_LIMIT_CA - int(PRODUCT_LIMIT_CA * AMAZON_SHARE)
+    us_amz_cap   = PRODUCT_LIMIT    - us_vipon_cap
+    ca_amz_cap   = PRODUCT_LIMIT_CA - ca_vipon_cap
+
+    us_target = max(0, us_vipon_cap - us_existing)
+    ca_target = max(0, ca_vipon_cap - ca_existing)
     need_scrape = (us_target > 0 or ca_target > 0)
-    log(f"▶ Top-up — US: have {us_existing}, need {us_target} more; "
-        f"CA: have {ca_existing}, need {ca_target} more (limit {PRODUCT_LIMIT}).")
+    log(f"▶ Top-up — US: have {us_existing}, need {us_target} more Vipon "
+        f"(+{us_amz_cap} from Amazon deals, {PRODUCT_LIMIT} total); "
+        f"CA: have {ca_existing}, need {ca_target} more Vipon "
+        f"(+{ca_amz_cap} from Amazon deals, {PRODUCT_LIMIT_CA} total).")
 
     driver = create_driver()
     wait   = WebDriverWait(driver, WAIT_SECS)
@@ -2775,6 +2880,21 @@ def main():
                 # These are legit non-code products — don't penalise the account.
                 continue
 
+            if data in (SKIP_CAP_DAY, SKIP_CAP_MONTH):
+                # Vipon told us the ceiling outright — no need to burn
+                # ROTATION_THRESHOLD more reveals discovering it.
+                if data == SKIP_CAP_MONTH:
+                    _mark_account_capped(ws.spreadsheet, _current_account()["username"])
+                if len(VIPON_ACCOUNTS) > 1:
+                    _do_rotate()
+                    consecutive_fails = 0
+                    if rotations_no_success >= len(VIPON_ACCOUNTS):
+                        log(f"  ⛔ every account capped — stopping US at {count}.")
+                        break
+                    continue
+                log("  ⛔ single account capped — stopping US scrape.")
+                break
+
             if data == SKIP_THROTTLE:
                 # Outer retry: wait another REVEAL_PACE_SEC then try the same PID once more.
                 # A transient throttle often clears after a short pause; a genuine account
@@ -2847,6 +2967,16 @@ def main():
                 data_ca = SKIP_THROTTLE
 
             # Legit skips don't count against the throttle.
+            if data_ca in (SKIP_CAP_DAY, SKIP_CAP_MONTH):
+                if data_ca == SKIP_CAP_MONTH:
+                    _mark_account_capped(ws.spreadsheet, _current_account()["username"])
+                if len(VIPON_ACCOUNTS) > 1:
+                    _do_rotate()
+                    ca_consecutive_fails = 0
+                    continue
+                log("  ⛔ single account capped — stopping CA scrape.")
+                break
+
             if data_ca in (SKIP_DEAL_ONLY, SKIP_BLOCKED, SKIP_ONETIME):
                 continue
 
