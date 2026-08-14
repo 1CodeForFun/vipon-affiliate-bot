@@ -79,7 +79,7 @@ def log(m):
     print(m, flush=True)
 
 
-def _goldbox_url(min_pct=MIN_PCT_DEFAULT, max_pct=100, page=1):
+def _goldbox_url(min_pct=MIN_PCT_DEFAULT, max_pct=100, page=1, tld="com"):
     """Goldbox with a working percentOff filter.
 
     The discounts-widget value is a JSON object, json-stringified AGAIN so the
@@ -91,7 +91,7 @@ def _goldbox_url(min_pct=MIN_PCT_DEFAULT, max_pct=100, page=1):
            "version": 1}
     inner = json.dumps(obj, separators=(",", ":"))
     enc   = quote(quote(json.dumps(inner), safe=""), safe="")
-    url   = f"https://www.amazon.com/gp/goldbox/?discounts-widget={enc}"
+    url   = f"https://www.amazon.{tld}/gp/goldbox/?discounts-widget={enc}"
     return url + (f"&page={page}" if page > 1 else "")
 
 
@@ -268,7 +268,7 @@ def _new_driver(headless=True):
 
 
 def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=14, want=0,
-                      headless=True, require_brand=False):
+                      headless=True, require_brand=False, tld="com"):
     """Branded deals at >= min_pct, highest discount first. [] on failure.
 
     Selenium is required, not a nicety. Fetching the same URL with requests
@@ -286,7 +286,7 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=14, want=0,
 
     found, seen = [], set()
     try:
-        driver.get(_goldbox_url(min_pct, 100))
+        driver.get(_goldbox_url(min_pct, 100, tld=tld))
         time.sleep(6)                      # let the refinement apply
         for i in range(max(1, scrolls)):
             got = [d for d in _parse_cards(driver.page_source, min_pct, require_brand)

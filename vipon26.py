@@ -943,7 +943,13 @@ def _finalize_post(txt: str, link: str) -> str:
 def generate_social_post(link, code, discount_pct, expiry, title, price):
     # Convert a relative expiry ("7 days") to an absolute date ("June 11") so the
     # post never says "ends in 2 days" — viewers may see it days later.
-    expiry_date = expiry_to_date_text(expiry) or expiry
+    # EXCEPTION: an hours/minutes countdown is an Amazon flash deal. Rendering
+    # "6 hours" as a date throws away the urgency that is the whole pitch for a
+    # product with no discount code, and the deal is gone by the next day anyway.
+    if re.search(r"\d+\s*(?:h|hr|hour|m|min)", (expiry or ""), re.I):
+        expiry_date = f"in {expiry.strip()}"
+    else:
+        expiry_date = expiry_to_date_text(expiry) or expiry
 
     # Col O is the VO/body copy ONLY — no link, no spelled-out code (FBP_ready
     # appends the code; the link goes in the FB link field).
@@ -2684,6 +2690,93 @@ def _append_row_retry(ws, row, retries: int = 4) -> bool:
     return False
 
 
+
+# ── AMAZON DEALS FEED ─────────────────────────────────────────────────────────
+def _fetch_amazon_pool(tld, want, exclude_pids):
+    """Deals-page candidates for one marketplace, already de-duplicated.
+
+    Costs no Vipon reveal quota — one Selenium session, no per-product page
+    visits — which is why half the sheet can come from here without extending
+    the run's time budget.
+    """
+    if want <= 0:
+        return []
+    try:
+        from amazon_brand_deals import fetch_brand_deals
+    except Exception as e:
+        log(f"  ⚠️ Amazon deals module unavailable: {e.__class__.__name__}")
+        return []
+    try:
+        deals = fetch_brand_deals(AMAZON_MIN_PCT, scrolls=16, tld=tld)
+    except Exception as e:
+        log(f"  ⚠️ Amazon deals fetch failed: {e.__class__.__name__}")
+        return []
+    pool = [d for d in deals if str(d["asin"]) not in exclude_pids]
+    log(f"  🛒 Amazon {tld}: {len(deals)} deal(s) at {AMAZON_MIN_PCT}%+, "
+        f"{len(pool)} new, {len([d for d in pool if d['brand']])} branded")
+    return pool[:want * 3]          # headroom for image/link failures
+
+
+def _amazon_deal_to_product(d, tld):
+    """Shape a deals-page item like a scraped Vipon product.
+
+    The only real differences are an EMPTY code — these are open discounts, not
+    exclusive ones — and an expiry that is a countdown ("6 hours") rather than a
+    date. generate_social_post already branches on an empty code, so the copy
+    drops the "use the code at checkout" line by itself.
+    """
+    asin = d["asin"]
+    if tld == "ca":
+        links = {k: _worker_smartlink(asin, AFFILIATE_ID_CA, tld)
+                 for k in ("reel", "ig", "youtube", "tiktok", "pinterest")}
+        primary = _worker_smartlink(asin, AFFILIATE_ID_CA, tld)
+    else:
+        links = get_platform_links(asin, tld)
+        primary = get_affiliate_link(asin, tld)
+
+    imgs = _fetch_images_http(asin, tld, MAX_AMAZON_IMAGES)
+    if not imgs:
+        return None
+    return {
+        "pid":        asin,                 # no Vipon PID — the ASIN is the key
+        "title":      d["title"],
+        "price":      d.get("price") or "",
+        "code":       "",                   # open deal: nothing to enter
+        "discount":   f"{d['pct']}%",
+        "expiry":     d.get("ends_in") or "",
+        "image":      imgs[0],
+        "link":       primary,
+        "link_reel":     links.get("reel", primary),
+        "link_ig":       links.get("ig", primary),
+        "link_youtube":  links.get("youtube", primary),
+        "link_tiktok":   links.get("tiktok", primary),
+        "link_pinterest": links.get("pinterest", primary),
+        "source":     "amazon",
+        "brand":      d.get("brand", ""),
+    }
+
+
+def _write_amazon_row(ws, pool, tld, ws_p=None):
+    """Write ONE deal from the pool. Returns True if a row landed."""
+    while pool:
+        d = pool.pop(0)
+        try:
+            prod = _amazon_deal_to_product(d, tld)
+        except Exception as e:
+            log(f"  ⚠️ Amazon deal {d.get('asin')} failed: {e.__class__.__name__}")
+            continue
+        if not prod:
+            continue
+        try:
+            _write_product_row(ws, prod, tld=tld, ws_p=ws_p)
+            tag = f" [{d['brand']}]" if d.get("brand") else ""
+            log(f"🛒 Amazon row: {d['pct']}% off{tag} — {d['title'][:52]}")
+            return True
+        except Exception as e:
+            log(f"  ⚠️ Amazon row write failed: {e.__class__.__name__}")
+    return False
+
+
 def _write_product_row(ws, data, tld="com", ws_p=None) -> float:
     """Build and immediately write one scraped product's row. Computes the VO post
     (Col O) and social/selection score (Col S) inline so the row is fully usable by
@@ -2789,6 +2882,10 @@ def main():
     us_target = max(0, us_vipon_cap - us_existing)
     ca_target = max(0, ca_vipon_cap - ca_existing)
     need_scrape = (us_target > 0 or ca_target > 0)
+    us_amz_pool = _fetch_amazon_pool("com", us_amz_cap, us_pids | us_hist_pids)
+    ca_amz_pool = _fetch_amazon_pool(AMAZON_TLD_CA, ca_amz_cap, ca_pids | ca_hist_pids)
+    us_amz_written = ca_amz_written = 0
+
     log(f"▶ Top-up — US: have {us_existing}, need {us_target} more Vipon "
         f"(+{us_amz_cap} from Amazon deals, {PRODUCT_LIMIT} total); "
         f"CA: have {ca_existing}, need {ca_target} more Vipon "
@@ -2936,6 +3033,18 @@ def main():
             except Exception as e:
                 log(f"  ⚠️ inline sheet write failed for PID {data['pid']}: {e.__class__.__name__}")
 
+            # Alternate: one Amazon deal after each Vipon product.
+            if us_amz_written < us_amz_cap and _write_amazon_row(ws, us_amz_pool, "com", ws_p):
+                us_amz_written += 1
+
+        # Vipon may have fallen short (caps, throttles); fill the rest from deals,
+        # which cost no quota — the sheet still reaches PRODUCT_LIMIT.
+        while us_amz_written < us_amz_cap and us_amz_pool:
+            if not _write_amazon_row(ws, us_amz_pool, "com", ws_p):
+                break
+            us_amz_written += 1
+        log(f"  🛒 US Amazon rows written: {us_amz_written}/{us_amz_cap}")
+
         # ── PHASE 1b: Switch to Canada and scrape CA deals ───────
         log("\n═══ Phase 1b: Canada Scrape ═══")
         if ca_target <= 0:
@@ -3024,6 +3133,17 @@ def main():
                 _write_product_row(ws2, data_ca, tld=AMAZON_TLD_CA)
             except Exception as e:
                 log(f"  ⚠️ inline CA sheet write failed for PID {data_ca['pid']}: {e.__class__.__name__}")
+
+            # Alternate on the CA sheet too.
+            if ca_amz_written < ca_amz_cap and _write_amazon_row(ws2, ca_amz_pool,
+                                                                 AMAZON_TLD_CA):
+                ca_amz_written += 1
+
+        while ca_amz_written < ca_amz_cap and ca_amz_pool:
+            if not _write_amazon_row(ws2, ca_amz_pool, AMAZON_TLD_CA):
+                break
+            ca_amz_written += 1
+        log(f"  🛒 CA Amazon rows written: {ca_amz_written}/{ca_amz_cap}")
 
     finally:
         _write_account_state(ws.spreadsheet)
