@@ -408,6 +408,29 @@ def _yt_upload(req) -> dict:
     return response
 
 
+def _thumb_as_jpeg(path: str) -> str:
+    """Return a JPEG suitable for thumbnails.set, converting if needed.
+
+    The hook writes a PNG, but the upload was declaring mimetype image/jpeg — a
+    mismatch YouTube can reject outright. JPEG is also the safest format here and
+    keeps the file well under the 2 MB cap. Falls back to the original file if
+    Pillow is unavailable, so this can never cost us the upload.
+    """
+    if path.lower().endswith((".jpg", ".jpeg")):
+        return path
+    try:
+        from PIL import Image
+        out = os.path.splitext(path)[0] + "_yt.jpg"
+        im = Image.open(path).convert("RGB")
+        # YouTube caps thumbnails at 2 MB; quality 88 keeps a 720x1280 frame far
+        # below that while staying visually clean.
+        im.save(out, "JPEG", quality=88, optimize=True)
+        return out
+    except Exception as e:
+        log(f"YT: could not convert thumbnail to JPEG ({e}) — sending as-is")
+        return path
+
+
 def post_youtube_short(video_url: str, title: str, description: str,
                        yt_token_file: str = None, thumbnail_path: str = None) -> str:
     video_bytes = _download_video(video_url)
@@ -449,18 +472,38 @@ def post_youtube_short(video_url: str, title: str, description: str,
         video_id = response.get("id", "")
         log(f"YT: Short uploaded ->video_id={video_id}")
 
-        # Set custom thumbnail (frame from Veo hook) if provided
-        if thumbnail_path and os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0 and video_id:
+        # Set the custom thumbnail (the AI hook frame) if we have one.
+        if not video_id:
+            pass
+        elif not thumbnail_path or not os.path.exists(thumbnail_path):
+            log("YT: no thumbnail file — skipping (hook likely did not run)")
+        elif os.path.getsize(thumbnail_path) == 0:
+            log("YT: thumbnail file is empty — skipping")
+        else:
             try:
-                log("YT: setting thumbnail...")
+                jpg = _thumb_as_jpeg(thumbnail_path)
+                log(f"YT: setting thumbnail ({os.path.getsize(jpg):,} bytes)...")
                 youtube.thumbnails().set(
                     videoId=video_id,
                     media_body=googleapiclient.http.MediaFileUpload(
-                        thumbnail_path, mimetype="image/jpeg", chunksize=-1, resumable=False)
+                        jpg, mimetype="image/jpeg", chunksize=-1, resumable=False)
                 ).execute()
                 log("YT: thumbnail set")
             except Exception as e:
-                log(f"YT: thumbnail set failed (non-fatal): {e}")
+                # Surface the reason. A 403 here is almost always the channel not
+                # being verified for custom thumbnails, which no code change can
+                # fix — as opposed to a 400, which means the file was wrong.
+                detail = getattr(e, "content", b"")
+                if isinstance(detail, bytes):
+                    detail = detail.decode("utf-8", "replace")
+                status = getattr(getattr(e, "resp", None), "status", "?")
+                log(f"YT: thumbnail set FAILED (HTTP {status}): {e}")
+                if detail:
+                    log(f"YT: thumbnail error body: {detail[:400]}")
+                if str(status) == "403":
+                    log("YT: 403 on thumbnails.set means the channel is not enabled "
+                        "for custom thumbnails — verify the channel at "
+                        "youtube.com/verify, then this starts working with no code change.")
 
         return video_id
     finally:
