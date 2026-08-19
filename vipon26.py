@@ -2711,9 +2711,22 @@ def _fetch_amazon_pool(tld, want, exclude_pids):
     except Exception as e:
         log(f"  ⚠️ Amazon deals fetch failed: {e.__class__.__name__}")
         return []
-    pool = [d for d in deals if str(d["asin"]) not in exclude_pids]
+    # Same blocked-keyword screen the Vipon scrape uses. This was missing, which
+    # is how intimate apparel ("bra" and friends) reached the sheet and then the
+    # AI hook — the deals page has no category filter of its own.
+    pool, blocked = [], 0
+    for d in deals:
+        if str(d["asin"]) in exclude_pids:
+            continue
+        hit = _blocked_keyword_hit(d.get("title", ""))
+        if hit:
+            blocked += 1
+            log(f"  ✗ blocked keyword '{hit}' — skipping {d['asin']}")
+            continue
+        pool.append(d)
     log(f"  🛒 Amazon {tld}: {len(deals)} deal(s) at {AMAZON_MIN_PCT}%+, "
-        f"{len(pool)} new, {len([d for d in pool if d['brand']])} branded")
+        f"{len(pool)} usable, {blocked} blocked, "
+        f"{len([d for d in pool if d['brand']])} branded")
     return pool[:want * 3]          # headroom for image/link failures
 
 

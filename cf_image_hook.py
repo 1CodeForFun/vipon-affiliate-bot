@@ -122,13 +122,34 @@ visibly frustrated person is far more relatable, and far more clickable, than a
 gloomy one. Never depict despair, illness, injury or distress.
 
 STEP 2 — WRITE THE IMAGE PROMPT:
+
+  ** RULE 1 — NO PEOPLE. This is the default and it applies to almost every
+     product. Show the SITUATION, not a person in it. **
+  A frustration reads perfectly well through objects and aftermath alone:
+  tangled cables spilling off a desk, a sink stacked with crusted pans, a
+  cluttered entryway, wet muddy pawprints across a floor, a bed with the duvet
+  thrown back at 3am, frost thick on a windscreen. These are cleaner, more
+  relatable and never uncanny.
+  Do NOT include a person, body, silhouette, limb or shadow of a person.
+
+  ** RULE 2 — only if the product CANNOT be shown without a body part **
+  (hand tools, gloves, hair styling, footwear fit, and very little else):
+    - Show HANDS AND FOREARMS ONLY, entering the frame from the edge. Nothing
+      above the forearm — no shoulders, no torso, no neck, no head. The head must
+      be OUT OF FRAME entirely, not turned away and not hidden.
+      NEVER pose a body facing the camera with the head turned or cropped: it
+      produces a twisted, obviously-AI figure. Frame it out instead.
+    - Fully covered and modest: long sleeves to the wrist, loose fit. No bare
+      arms, no bare shoulders, no bare legs, no bare midriff, no short sleeves,
+      no shorts, no tight or form-fitting clothing, no swimwear, no underwear.
+    - Prefer neutral, non-gendered hands. Do not describe gender, body shape,
+      figure, or attractiveness. No jewellery, no nail polish, no skin focus.
+  Absolutely zero nudity, zero suggestive framing, zero body emphasis of any kind.
+
+  OTHER RULES:
   • Open with: "Photorealistic vertical photograph,"
-  • FACELESS IS MANDATORY — this is the single most important rule. Compose so NO
-    face is visible: shot from directly behind, over-the-shoulder past the back of
-    the head, hands and forearms only, or cropped at the chin. Never a mirror
-    reflection, never a face at any angle, never eyes.
   • Name the specific room from STEP 1 and the exact lighting and colour palette
-  • Describe the physical scene precisely: body position, props, what the hands do
+  • Describe the physical scene precisely: objects, surfaces, mess, aftermath
   • Do NOT show the product — this is the "before" state
   • One clear subject, uncluttered — it is viewed on a phone screen
   • Close with: "vertical 9:16, cinematic depth of field, sharp foreground, Canon EOS R5"
@@ -233,9 +254,24 @@ class QuotaExhausted(RuntimeError):
     """Cloudflare returned 429 — the daily free neuron grant is spent."""
 
 
+# Appended to EVERY image prompt, whatever Gemini wrote. Belt and braces: the
+# concept prompt already forbids people and immodesty, but it is a language model
+# and will occasionally ignore an instruction. These clauses are cheap and cannot
+# be argued with. Ordered most-important first in case the model truncates.
+_HARD_NEGATIVES = (
+    " Scene only, no people. No person, no human, no body, no face, no head, "
+    "no hands unless essential. Nobody in frame. Fully clothed if any body part "
+    "appears: long sleeves, modest loose clothing. No nudity, no bare skin, no "
+    "bare arms, no bare legs, no bare shoulders, no midriff, no cleavage, no "
+    "underwear, no lingerie, no swimwear, no shorts, no tight clothing, no "
+    "suggestive pose. No twisted or backward-facing head. No text, no watermark."
+)
+
+
 def _cf_generate_one(account_id, api_token, prompt, model, extra=None):
     """Generate one image with a specific model. Returns PNG bytes. Raises on failure."""
     url  = _CF_API_BASE.format(account_id=account_id, model=model)
+    prompt = (prompt or "").rstrip().rstrip(".") + "." + _HARD_NEGATIVES
     body = {"prompt": prompt, "width": _IMG_W, "height": _IMG_H, **(extra or {})}
     r = requests.post(
         url,

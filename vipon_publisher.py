@@ -408,26 +408,46 @@ def _yt_upload(req) -> dict:
     return response
 
 
-def _thumb_as_jpeg(path: str) -> str:
-    """Return a JPEG suitable for thumbnails.set, converting if needed.
+# YouTube's documented Shorts thumbnail spec: 1080x1920, 9:16, under 2 MB.
+# 1280x720 is accepted but renders with black bars or an awkward crop in the
+# vertical placements (Shorts shelf, channel Shorts tab), which is exactly where
+# these are seen.
+_YT_THUMB_W, _YT_THUMB_H = 1080, 1920
 
-    The hook writes a PNG, but the upload was declaring mimetype image/jpeg — a
-    mismatch YouTube can reject outright. JPEG is also the safest format here and
-    keeps the file well under the 2 MB cap. Falls back to the original file if
-    Pillow is unavailable, so this can never cost us the upload.
+
+def _thumb_as_jpeg(path: str) -> str:
+    """Return a 1080x1920 JPEG suitable for thumbnails.set.
+
+    Two things were wrong before. The hook writes a PNG while the upload declared
+    mimetype "image/jpeg" — a mismatch YouTube can reject outright. And the frame
+    is only 720x1280 (the AI image is generated at 432x768 and composited up),
+    which is below the documented Shorts size.
+
+    Falls back to the original file if Pillow is unavailable, so this can never
+    cost us the video upload itself.
     """
-    if path.lower().endswith((".jpg", ".jpeg")):
-        return path
     try:
         from PIL import Image
         out = os.path.splitext(path)[0] + "_yt.jpg"
-        im = Image.open(path).convert("RGB")
-        # YouTube caps thumbnails at 2 MB; quality 88 keeps a 720x1280 frame far
-        # below that while staying visually clean.
-        im.save(out, "JPEG", quality=88, optimize=True)
+        im  = Image.open(path).convert("RGB")
+
+        # Cover-fit to 9:16, then centre-crop, so nothing is letterboxed.
+        sw, sh = im.size
+        scale  = max(_YT_THUMB_W / sw, _YT_THUMB_H / sh)
+        im = im.resize((max(1, round(sw * scale)), max(1, round(sh * scale))),
+                       Image.LANCZOS)
+        left = (im.width  - _YT_THUMB_W) // 2
+        top  = (im.height - _YT_THUMB_H) // 2
+        im = im.crop((left, top, left + _YT_THUMB_W, top + _YT_THUMB_H))
+
+        # Step quality down if needed — YouTube rejects anything over 2 MB.
+        for q in (90, 82, 74, 66):
+            im.save(out, "JPEG", quality=q, optimize=True)
+            if os.path.getsize(out) <= 2 * 1024 * 1024:
+                break
         return out
     except Exception as e:
-        log(f"YT: could not convert thumbnail to JPEG ({e}) — sending as-is")
+        log(f"YT: could not prepare thumbnail ({e}) — sending as-is")
         return path
 
 
