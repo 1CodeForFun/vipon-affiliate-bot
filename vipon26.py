@@ -2692,7 +2692,60 @@ def _append_row_retry(ws, row, retries: int = 4) -> bool:
 
 
 # ── AMAZON DEALS FEED ─────────────────────────────────────────────────────────
-def _fetch_amazon_pool(tld, want, exclude_pids):
+
+# Words that vary between models of the SAME product and so must not make two
+# listings look different: sizes, colours, counts, generations, model numbers.
+_SIG_NOISE = {
+    "with", "for", "and", "the", "a", "an", "plus", "pro", "max", "mini", "lite",
+    "new", "newest", "latest", "gen", "generation", "model", "series", "edition",
+    "version", "inch", "in", "ft", "pack", "count", "ct", "pcs", "piece", "set",
+    "size", "large", "small", "medium", "xl", "xxl", "black", "white", "grey",
+    "gray", "blue", "red", "green", "pink", "silver", "gold", "beige", "navy",
+    "cordless", "wireless", "portable", "premium", "upgraded", "hd", "4k", "5g",
+}
+
+
+def _title_signature(title: str, words: int = 4) -> str:
+    """A coarse identity key for a product, used to spot near-duplicates.
+
+    ASIN dedup cannot catch these: every Fire TV Stick variant is a different
+    ASIN, so several would land on the same sheet on the same day. Stripping
+    model/size/colour noise and keeping the first few meaningful words collapses
+    them onto one key:
+        "Amazon Fire TV Stick 4K Max streaming device"  -> "amazon fire tv stick"
+        "Amazon Fire TV Stick HD, free & live TV"       -> "amazon fire tv stick"
+    """
+    t = re.sub(r"[^a-z0-9 ]+", " ", (title or "").lower())
+    toks = []
+    for w in t.split():
+        if w in _SIG_NOISE or w.isdigit():
+            continue
+        if re.fullmatch(r"[a-z]{1,2}\d+[a-z0-9]*", w):   # model codes: av2511ae, k7
+            continue
+        toks.append(w)
+        if len(toks) >= words:
+            break
+    return " ".join(toks)
+
+
+def _sheet_title_signatures(*worksheets) -> set:
+    """Signatures already present on the sheets, so today's picks avoid them."""
+    sigs = set()
+    for ws in worksheets:
+        if ws is None:
+            continue
+        try:
+            for row in ws.get_all_values()[1:]:
+                if len(row) >= 9 and row[8].strip():        # col I = title
+                    s = _title_signature(row[8])
+                    if s:
+                        sigs.add(s)
+        except Exception as e:
+            log(f"  ⚠️ could not read sheet titles: {e.__class__.__name__}")
+    return sigs
+
+
+def _fetch_amazon_pool(tld, want, exclude_pids, exclude_sigs=None):
     """Deals-page candidates for one marketplace, already de-duplicated.
 
     Costs no Vipon reveal quota — one Selenium session, no per-product page
@@ -2714,7 +2767,8 @@ def _fetch_amazon_pool(tld, want, exclude_pids):
     # Same blocked-keyword screen the Vipon scrape uses. This was missing, which
     # is how intimate apparel ("bra" and friends) reached the sheet and then the
     # AI hook — the deals page has no category filter of its own.
-    pool, blocked = [], 0
+    seen_sigs = set(exclude_sigs or ())
+    pool, blocked, dupes = [], 0, 0
     for d in deals:
         if str(d["asin"]) in exclude_pids:
             continue
@@ -2723,9 +2777,17 @@ def _fetch_amazon_pool(tld, want, exclude_pids):
             blocked += 1
             log(f"  ✗ blocked keyword '{hit}' — skipping {d['asin']}")
             continue
+        # Near-duplicate guard: different ASINs, same product line.
+        sig = _title_signature(d.get("title", ""))
+        if sig and sig in seen_sigs:
+            dupes += 1
+            log(f"  ⊘ near-duplicate of '{sig}' — skipping {d['asin']}")
+            continue
+        if sig:
+            seen_sigs.add(sig)
         pool.append(d)
     log(f"  🛒 Amazon {tld}: {len(deals)} deal(s) at {AMAZON_MIN_PCT}%+, "
-        f"{len(pool)} usable, {blocked} blocked, "
+        f"{len(pool)} usable, {blocked} blocked, {dupes} near-duplicate, "
         f"{len([d for d in pool if d['brand']])} branded")
     return pool[:want * 3]          # headroom for image/link failures
 
@@ -2895,8 +2957,14 @@ def main():
     us_target = max(0, us_vipon_cap - us_existing)
     ca_target = max(0, ca_vipon_cap - ca_existing)
     need_scrape = (us_target > 0 or ca_target > 0)
-    us_amz_pool = _fetch_amazon_pool("com", us_amz_cap, us_pids | us_hist_pids)
-    ca_amz_pool = _fetch_amazon_pool(AMAZON_TLD_CA, ca_amz_cap, ca_pids | ca_hist_pids)
+    # Titles already on either sheet, so today's deals avoid near-duplicates of
+    # what is already queued (and of yesterday's, which is still on the sheet).
+    _existing_sigs = _sheet_title_signatures(ws, ws2)
+    log(f"  ⊘ {len(_existing_sigs)} existing product signature(s) to avoid")
+    us_amz_pool = _fetch_amazon_pool("com", us_amz_cap, us_pids | us_hist_pids,
+                                     _existing_sigs)
+    ca_amz_pool = _fetch_amazon_pool(AMAZON_TLD_CA, ca_amz_cap,
+                                     ca_pids | ca_hist_pids, _existing_sigs)
     us_amz_written = ca_amz_written = 0
 
     log(f"▶ Top-up — US: have {us_existing}, need {us_target} more Vipon "

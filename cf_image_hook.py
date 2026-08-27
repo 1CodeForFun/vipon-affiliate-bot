@@ -123,28 +123,37 @@ gloomy one. Never depict despair, illness, injury or distress.
 
 STEP 2 — WRITE THE IMAGE PROMPT:
 
-  ** RULE 1 — NO PEOPLE. This is the default and it applies to almost every
-     product. Show the SITUATION, not a person in it. **
-  A frustration reads perfectly well through objects and aftermath alone:
-  tangled cables spilling off a desk, a sink stacked with crusted pans, a
-  cluttered entryway, wet muddy pawprints across a floor, a bed with the duvet
-  thrown back at 3am, frost thick on a windscreen. These are cleaner, more
-  relatable and never uncanny.
-  Do NOT include a person, body, silhouette, limb or shadow of a person.
+  ** RULE 1 — THE FACE MUST NEVER BE CLEARLY VISIBLE, AND IT MUST LOOK NATURAL **
+  A person MAY appear. What must not appear is a readable face. Hide it the way
+  a real photographer would, as a consequence of the composition — pick ONE:
+    - shallow depth of field with focus on the hands or the product, so the face
+      falls softly out of focus in the background
+    - shot from behind or over the shoulder, the person genuinely facing away
+      because that is where the task is
+    - head naturally lowered, looking down at what the hands are doing
+    - framed from the shoulders or chest down, the head simply above the frame
+    - backlit against a window so the figure reads as a soft silhouette
+    - close on the hands and forearms, the rest of the person out of frame
+  NEVER a body facing the camera with the head turned backwards, twisted,
+  smudged, deleted or awkwardly chopped. That is what produced the uncanny
+  figures. The pose must be one a real person would actually hold.
+  Do not sacrifice the scene to hide the face — the photograph should look
+  natural first, with the face incidentally unreadable.
+  Watch for reflections: do NOT place a mirror, window, screen or other
+  reflective surface where it would show the face you just turned away. A
+  back-turned pose in front of a mirror puts the face straight back in shot.
 
-  ** RULE 2 — only if the product CANNOT be shown without a body part **
-  (hand tools, gloves, hair styling, footwear fit, and very little else):
-    - Show HANDS AND FOREARMS ONLY, entering the frame from the edge. Nothing
-      above the forearm — no shoulders, no torso, no neck, no head. The head must
-      be OUT OF FRAME entirely, not turned away and not hidden.
-      NEVER pose a body facing the camera with the head turned or cropped: it
-      produces a twisted, obviously-AI figure. Frame it out instead.
-    - Fully covered and modest: long sleeves to the wrist, loose fit. No bare
-      arms, no bare shoulders, no bare legs, no bare midriff, no short sleeves,
-      no shorts, no tight or form-fitting clothing, no swimwear, no underwear.
-    - Prefer neutral, non-gendered hands. Do not describe gender, body shape,
-      figure, or attractiveness. No jewellery, no nail polish, no skin focus.
-  Absolutely zero nudity, zero suggestive framing, zero body emphasis of any kind.
+  ** RULE 2 — MODEST, ALWAYS, NO EXCEPTIONS **
+    - Fully covered: long sleeves to the wrist, long trousers or a long skirt,
+      loose relaxed fit. No bare arms, shoulders, legs, midriff or back.
+      No short sleeves, no shorts, no tight or form-fitting clothing, no
+      swimwear, no underwear, no sheer fabric.
+    - Do not describe gender, body shape, figure or attractiveness. Prefer a
+      person only where the product needs one; otherwise show the scene alone.
+      Where a person adds nothing (homeware, cleaning, kitchen clutter, storage,
+      garden, tech on a desk), show the SITUATION instead — tangled cables, a
+      sink of crusted pans, muddy pawprints, a duvet thrown back at 3am.
+  Zero nudity, zero suggestive framing, zero body emphasis of any kind.
 
   OTHER RULES:
   • Open with: "Photorealistic vertical photograph,"
@@ -259,12 +268,14 @@ class QuotaExhausted(RuntimeError):
 # and will occasionally ignore an instruction. These clauses are cheap and cannot
 # be argued with. Ordered most-important first in case the model truncates.
 _HARD_NEGATIVES = (
-    " Scene only, no people. No person, no human, no body, no face, no head, "
-    "no hands unless essential. Nobody in frame. Fully clothed if any body part "
-    "appears: long sleeves, modest loose clothing. No nudity, no bare skin, no "
-    "bare arms, no bare legs, no bare shoulders, no midriff, no cleavage, no "
+    " Face not visible or softly out of focus, never sharp, never looking at the "
+    "camera. No face reflected in a mirror or window. Natural pose only. "
+    "No twisted neck, no backward-facing head, no "
+    "distorted or deformed face, no smudged or erased face, no extra limbs. "
+    "Fully clothed and modest: long sleeves, long trousers, loose fit. No nudity, "
+    "no bare arms, no bare legs, no bare shoulders, no midriff, no cleavage, no "
     "underwear, no lingerie, no swimwear, no shorts, no tight clothing, no "
-    "suggestive pose. No twisted or backward-facing head. No text, no watermark."
+    "suggestive pose. No text, no watermark."
 )
 
 
