@@ -1746,19 +1746,35 @@ def try_reveal_code(driver):
             time.sleep(0.5)
             try: driver.execute_script("arguments[0].click();", el)
             except Exception: el.click()
-            # Wait for the code to be present in PC_240_jumpToAmzFromCodeZone.
-            # Read textContent (not .text): the code can be in the DOM while the zone
-            # stays hidden, so .text would block the full 6s for nothing.
-            try:
-                WebDriverWait(driver, 6).until(
-                    lambda d: (d.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone")
-                               .get_attribute("textContent") or "").strip()
-                )
-            except Exception:
-                time.sleep(3.0)   # fallback if element not found by ID
-            break   # ← stop after first click — never loop into the post-reveal "Use on Amazon" button
+
+            # Watch for the code AND the cap toast TOGETHER.
+            #
+            # This used to block on WebDriverWait(6) for the code, and only after
+            # that did the caller poll for the cap toast. On a capped account the
+            # code never arrives, so the full 6s elapsed first — by which point
+            # the toast, which shows for only ~2-3s, had already vanished. The cap
+            # was therefore never detected: the account was not benched, and it
+            # burned three products hitting "throttle" before rotating.
+            # Reading textContent (not .text) matters too — the code can be in the
+            # DOM while the zone is still hidden.
+            deadline = time.time() + 6.0
+            while time.time() < deadline:
+                try:
+                    z = (driver.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone")
+                         .get_attribute("textContent") or "").strip()
+                    if z:
+                        return ""            # code arrived — no cap
+                except Exception:
+                    pass
+                kind = _classify_cap(_toast_text(driver))
+                if kind:
+                    log(f"  🚫 {kind.upper()} cap detected during reveal")
+                    return kind
+                time.sleep(0.25)
+            return ""
         except Exception:
             continue
+    return ""
 
 _ONETIME_SENTINEL = "__ONETIME__"   # returned by extract_code for dashed single-use codes
 
@@ -1972,6 +1988,21 @@ def _classify_cap(text: str) -> str:
     return "daily"      # a cap we cannot classify is treated as the milder one
 
 
+def _toast_text(driver) -> str:
+    """Text of any visible notification/toast, or ''. Cheap enough to poll."""
+    for sel in (".ivu-notice-content", ".ivu-message-content",
+                "[class*='notice']", "[class*='message']", "[class*='toast']",
+                "[class*='alert']"):
+        try:
+            for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                t = (el.text or "").strip()
+                if t:
+                    return t
+        except Exception:
+            pass
+    return ""
+
+
 def _check_cap_toast(driver) -> str:
     """Poll for the cap toast. Returns 'daily', 'monthly', or '' if none.
 
@@ -2052,10 +2083,11 @@ def scrape_product_page(driver, wait, pid, tld="com", allow_deal_only=False):
         code = _code_on_page
         log(f"  ✓ code read from page — no reveal spent ({code})")
     else:
-        try_reveal_code(driver)
-
-        # Poll immediately for the 400-cap toast (appears for ~1.5s right after click).
-        cap_kind = _check_cap_toast(driver)
+        # try_reveal_code watches for the code and the cap toast simultaneously,
+        # so a cap is caught while the toast is still on screen.
+        cap_kind = try_reveal_code(driver)
+        if not cap_kind:
+            cap_kind = _check_cap_toast(driver)   # late/slow toast, belt and braces
 
         # Guard: if a reveal click navigated away from vipon (e.g. clicked "Use on Amazon"), come back
         if "myvipon.com/product/" not in driver.current_url:
