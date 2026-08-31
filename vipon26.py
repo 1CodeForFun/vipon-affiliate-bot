@@ -1860,28 +1860,42 @@ _DEAL_ONLY_XPATH = " | ".join(
 )
 
 
-def _visible_code(driver) -> str:
-    """The code already sitting in the DOM, or '' if there is none.
+def _visible_code(driver, timeout=8.0) -> str:
+    """The code rendered on the page, or '' if there is none.
 
-    Vipon serves some products with the code zone already populated and no
-    "Get Code" button at all. Reading it costs nothing; clicking reveal to get a
-    code we can already see would burn one of the ~40 daily reveals for free.
-    One-time (dashed) codes return '' so the normal one-time path still handles
-    them rather than treating a non-shareable code as usable.
+    Vipon REMOVED the "Get Code" reveal step: every product now renders the code
+    directly, confirmed in the DOM as
+        div#coupon-container > div#PC_240_jumpToAmzFromCodeZone.coupon-code
+                                 <span>TXDPWVTA</span>
+    so this is the primary way to read a code, not a special case. It costs no
+    reveal quota at all.
+
+    The wait matters. The zone is populated by the page's own JavaScript, and
+    checking immediately after load found it empty — which is what made coded
+    products look like deal-only ones.
+
+    One-time (dashed) codes return '' so the existing one-time path still
+    handles them rather than treating a non-shareable code as usable.
     """
-    try:
-        el  = driver.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone")
-        txt = (el.get_attribute("textContent") or "").strip().upper()
-    except Exception:
-        return ""
-    if not txt or is_onetime_code(txt):
-        return ""
-    m = CODE_RE.search(txt)
-    cand = m.group(1) if m else txt
-    return cand if is_plausible_code(cand) else ""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            el  = driver.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone")
+            txt = (el.get_attribute("textContent") or "").strip().upper()
+            if txt:
+                if is_onetime_code(txt):
+                    return ""
+                m = CODE_RE.search(txt)
+                cand = m.group(1) if m else txt
+                if is_plausible_code(cand):
+                    return cand
+        except Exception:
+            pass
+        time.sleep(0.35)
+    return ""
 
 
-def _check_deal_only(driver) -> bool:
+def _check_deal_only(driver, known_code=None) -> bool:
     """Return True ONLY when this product genuinely has no exclusive code.
 
     The ONLY reliable marker is the PRESENCE of PC_239_getCodeInDetail (the GET CODE
@@ -1889,22 +1903,17 @@ def _check_deal_only(driver) -> bool:
     immediately regardless of any other markers. The JS string 'GetDealatAmazon=true'
     lives in a function definition on EVERY Vipon page and must NOT be used as a
     signal (it matches every product and false-flags all of them as deal-only)."""
-    # 1. A CODE ALREADY IN THE DOM settles it — this product has a code, whatever
-    #    the buttons look like. Vipon serves some products with the code zone
-    #    already revealed (display:flex) and NO "Get Code" button, e.g.
-    #      <div id="PC_240_jumpToAmzFromCodeZone" class="coupon-code"
-    #           style="display: flex;"><span>IMITDQNM</span></div>
-    #    Those used to fall through to the plummet-status check below and get
-    #    thrown away as deal-only, which is how coded products were skipped.
-    try:
-        el = driver.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone")
-        txt = (el.get_attribute("textContent") or "").strip().upper()
-        m = CODE_RE.search(txt)
-        cand = m.group(1) if m else txt
-        if cand and (is_plausible_code(cand) or is_onetime_code(cand)):
-            return False        # has a code — definitely not deal-only
-    except Exception:
-        pass
+    # 1. A CODE IN THE DOM settles it. Vipon removed the reveal step, so every
+    #    coded product now renders its code directly and there is no "Get Code"
+    #    button to look for:
+    #      <div id="PC_240_jumpToAmzFromCodeZone" class="coupon-code">
+    #        <span>TXDPWVTA</span></div>
+    #    Waiting here is essential — the zone is filled by the page's own JS, and
+    #    testing it immediately after load found it empty, which is exactly how
+    #    coded products were being discarded as deal-only.
+    code = known_code if known_code is not None else _visible_code(driver)
+    if code:
+        return False
     try:
         # GET CODE button present → definitely has an exclusive code, not deal-only.
         driver.find_element(By.ID, "PC_239_getCodeInDetail")
@@ -2025,7 +2034,10 @@ def scrape_product_page(driver, wait, pid, tld="com", allow_deal_only=False):
     # These products have no exclusive code — clicking GET CODE wastes a reveal quota.
     # For CA (allow_deal_only=True) we still capture the product with code="" instead
     # of skipping, because the Amazon deal link alone has affiliate value.
-    _is_deal_only = _check_deal_only(driver)
+    # Read the code once, with a wait, and reuse it. Vipon renders it directly
+    # now, so this single read decides everything below.
+    _code_on_page = _visible_code(driver)
+    _is_deal_only = _check_deal_only(driver, _code_on_page)
     cap_kind = ""
     if _is_deal_only:
         if not allow_deal_only:
@@ -2033,12 +2045,12 @@ def scrape_product_page(driver, wait, pid, tld="com", allow_deal_only=False):
             return SKIP_DEAL_ONLY
         log(f"  ↳ deal-only product — capturing with empty code (no quota slot used)")
         code = ""
-    elif _visible_code(driver):
-        # The code is already in the DOM, so there is nothing to reveal. Clicking
+    elif _code_on_page:
+        # Vipon renders the code directly — there is nothing to reveal. Clicking
         # GET CODE here would spend one of the ~40 daily reveals to obtain a code
-        # we can already read, which is pure waste against the cap.
-        code = _visible_code(driver)
-        log(f"  ✓ code already revealed on the page — no reveal spent ({code})")
+        # already on screen, which is pure waste against the cap.
+        code = _code_on_page
+        log(f"  ✓ code read from page — no reveal spent ({code})")
     else:
         try_reveal_code(driver)
 
