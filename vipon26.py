@@ -1860,6 +1860,27 @@ _DEAL_ONLY_XPATH = " | ".join(
 )
 
 
+def _visible_code(driver) -> str:
+    """The code already sitting in the DOM, or '' if there is none.
+
+    Vipon serves some products with the code zone already populated and no
+    "Get Code" button at all. Reading it costs nothing; clicking reveal to get a
+    code we can already see would burn one of the ~40 daily reveals for free.
+    One-time (dashed) codes return '' so the normal one-time path still handles
+    them rather than treating a non-shareable code as usable.
+    """
+    try:
+        el  = driver.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone")
+        txt = (el.get_attribute("textContent") or "").strip().upper()
+    except Exception:
+        return ""
+    if not txt or is_onetime_code(txt):
+        return ""
+    m = CODE_RE.search(txt)
+    cand = m.group(1) if m else txt
+    return cand if is_plausible_code(cand) else ""
+
+
 def _check_deal_only(driver) -> bool:
     """Return True ONLY when this product genuinely has no exclusive code.
 
@@ -1868,16 +1889,34 @@ def _check_deal_only(driver) -> bool:
     immediately regardless of any other markers. The JS string 'GetDealatAmazon=true'
     lives in a function definition on EVERY Vipon page and must NOT be used as a
     signal (it matches every product and false-flags all of them as deal-only)."""
+    # 1. A CODE ALREADY IN THE DOM settles it — this product has a code, whatever
+    #    the buttons look like. Vipon serves some products with the code zone
+    #    already revealed (display:flex) and NO "Get Code" button, e.g.
+    #      <div id="PC_240_jumpToAmzFromCodeZone" class="coupon-code"
+    #           style="display: flex;"><span>IMITDQNM</span></div>
+    #    Those used to fall through to the plummet-status check below and get
+    #    thrown away as deal-only, which is how coded products were skipped.
+    try:
+        el = driver.find_element(By.ID, "PC_240_jumpToAmzFromCodeZone")
+        txt = (el.get_attribute("textContent") or "").strip().upper()
+        m = CODE_RE.search(txt)
+        cand = m.group(1) if m else txt
+        if cand and (is_plausible_code(cand) or is_onetime_code(cand)):
+            return False        # has a code — definitely not deal-only
+    except Exception:
+        pass
     try:
         # GET CODE button present → definitely has an exclusive code, not deal-only.
         driver.find_element(By.ID, "PC_239_getCodeInDetail")
         return False
     except Exception:
         pass
-    # GET CODE button absent → check for the deal-only plummet button.
+    # 2. Neither a code nor a GET CODE button. plummet-status alone is NOT proof
+    #    of deal-only — it is present on coded products too — so it only counts
+    #    once both checks above have come up empty.
     try:
         driver.find_element(By.ID, "plummet-status")
-        return True   # only "Get Deal at Amazon", no GET CODE → deal-only
+        return True
     except Exception:
         pass
     # Neither ID matched — read the action button's TEXT. Vipon shows
@@ -1994,6 +2033,12 @@ def scrape_product_page(driver, wait, pid, tld="com", allow_deal_only=False):
             return SKIP_DEAL_ONLY
         log(f"  ↳ deal-only product — capturing with empty code (no quota slot used)")
         code = ""
+    elif _visible_code(driver):
+        # The code is already in the DOM, so there is nothing to reveal. Clicking
+        # GET CODE here would spend one of the ~40 daily reveals to obtain a code
+        # we can already read, which is pure waste against the cap.
+        code = _visible_code(driver)
+        log(f"  ✓ code already revealed on the page — no reveal spent ({code})")
     else:
         try_reveal_code(driver)
 
