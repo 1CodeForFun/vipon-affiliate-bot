@@ -229,10 +229,22 @@ def _parse_cards(html, min_pct, require_brand=False):
                 if len(money) > 1:
                     list_price = "$" + money[-1]
 
+        # Product image straight off the card. Re-fetching it from the product
+        # page was failing constantly on the CI runner ("HTTP image fallback: 0"),
+        # and a deal with no image is dropped entirely — which is why only a
+        # handful of Amazon rows were reaching the sheet. The card already has a
+        # usable image; the size suffix is stripped for a larger render.
+        image = ""
+        img = c.find("img")
+        if img:
+            image = (img.get("src") or img.get("data-src") or "").split("?")[0]
+            image = re.sub(r"\._AC_[^.]*(?=\.[a-z]{3,4}$)", "._AC_SL1500_", image)
+
         ends = _ENDS_RE.search(_despace(text))
         seen.add(asin)
         out.append({"asin": asin, "title": title[:200], "pct": pct,
                     "brand": brand or "", "price": price, "list_price": list_price,
+                    "image": image,
                     "ends_in": ends.group(1) if ends else ""})
     return out
 

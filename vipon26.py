@@ -2898,7 +2898,14 @@ def _amazon_deal_to_product(d, tld):
         links = get_platform_links(asin, tld)
         primary = get_affiliate_link(asin, tld)
 
+    # Prefer the image the deals page already gave us. Fetching the product page
+    # for images fails often on the CI runner (Amazon rate-limits it), and a deal
+    # with no image was being discarded — which is why the sheet was getting a
+    # fraction of the Amazon rows it asked for.
     imgs = _fetch_images_http(asin, tld, MAX_AMAZON_IMAGES)
+    if not imgs and d.get("image"):
+        imgs = [d["image"]]
+        log(f"  ↳ using deals-page image for {asin}")
     if not imgs:
         return None
     return {
