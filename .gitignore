@@ -51,3 +51,5 @@ buffer_API_Key.txt
 geminipro.txt
 *.token
 .env
+test.py
+output_image.png
