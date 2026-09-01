@@ -1171,11 +1171,27 @@ def _build_affiliate_dp_link(asin: str, tld: str = "com") -> str:
     sep  = "&" if "?" in base else "?"
     return base + f"{sep}tag={tag}"
 
-def _worker_smartlink(asin: str, tag: str, tld: str = "com") -> str:
+def _worker_smartlink(asin: str, tag: str, tld: str = "com",
+                      image: str = "", title: str = "") -> str:
+    """Affiliate smartlink. image/title are optional and only feed link previews.
+
+    Amazon product pages carry NO Open Graph tags at all — verified against both
+    the Facebook crawler and a normal browser — so Facebook has nothing to build
+    a preview from and falls back to guessing, which is why link posts showed a
+    grey placeholder at random. Passing the image and title lets the worker
+    answer crawlers with real og: tags (see smartlink_worker.js) while humans
+    still get the same instant redirect. Harmless if the worker is not updated:
+    the extra params are simply ignored.
+    """
     dp = _build_affiliate_dp_link(asin, tld)
     if not WORKER_BASE:
         return dp
-    qs = urllib.parse.urlencode({"asin": asin.upper(), "tag": tag, "tld": tld})
+    params = {"asin": asin.upper(), "tag": tag, "tld": tld}
+    if image:
+        params["img"] = image
+    if title:
+        params["t"] = title[:110]
+    qs = urllib.parse.urlencode(params)
     return f"{WORKER_BASE}/a?{qs}"
 
 def get_affiliate_link(asin: str, tld: str = "com") -> str:
