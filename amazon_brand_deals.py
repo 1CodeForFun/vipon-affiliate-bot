@@ -249,6 +249,37 @@ def _parse_cards(html, min_pct, require_brand=False):
     return out
 
 
+def _click_load_more(driver) -> bool:
+    """Click the grid's "View more deals" button. True if it was clicked.
+
+    Confirmed in the live DOM:
+      <div data-testid="load-more-footer">
+        <button data-testid="load-more-view-more-button">View more deals</button>
+    Without this the scraper reaches the end of the first grid and just re-reads
+    the same cards, which capped the pool no matter how many scrolls were set.
+    """
+    from selenium.webdriver.common.by import By
+    sels = [
+        (By.CSS_SELECTOR, '[data-testid="load-more-view-more-button"]'),
+        (By.CSS_SELECTOR, '[data-testid="load-more-footer"] button'),
+        (By.XPATH, "//button[contains(., 'View more deals')]"),
+        (By.XPATH, "//*[self::button or self::a][contains(., 'See more deals')]"),
+    ]
+    for how, what in sels:
+        try:
+            for el in driver.find_elements(how, what):
+                if not el.is_displayed():
+                    continue
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});", el)
+                time.sleep(0.4)
+                driver.execute_script("arguments[0].click();", el)
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _new_driver(headless=True):
     """Chrome for the deals page. undetected_chromedriver where available (same
     as the Vipon scrape), plain Selenium otherwise."""
@@ -300,6 +331,7 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=14, want=0,
     try:
         driver.get(_goldbox_url(min_pct, 100, tld=tld))
         time.sleep(6)                      # let the refinement apply
+        stalls = 0
         for i in range(max(1, scrolls)):
             got = [d for d in _parse_cards(driver.page_source, min_pct, require_brand)
                    if d["asin"] not in seen]
@@ -307,11 +339,26 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=14, want=0,
                 seen.add(d["asin"])
             found += got
             if got:
-                log(f"  brand deals: +{len(got)} branded (total {len(found)})")
+                log(f"  deals: +{len(got)} (total {len(found)})")
+                stalls = 0
+            else:
+                stalls += 1
             if want and len(found) >= want:
                 break
-            driver.execute_script("window.scrollBy(0, document.body.scrollHeight*0.8);")
-            time.sleep(2.5)
+
+            driver.execute_script(
+                "window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1.8)
+
+            # The grid is finite and ends in a "View more deals" button. Scrolling
+            # alone just parks at the bottom and re-parses the same cards, which
+            # is why the pool stayed small however many scrolls were configured.
+            # Clicking it appends the next page of deals in place.
+            if not _click_load_more(driver):
+                if stalls >= 2:
+                    log("  deals: no more to load")
+                    break
+            time.sleep(2.2)
     except Exception as e:
         log(f"  brand deals: scrape error ({str(e)[:70]})")
     finally:

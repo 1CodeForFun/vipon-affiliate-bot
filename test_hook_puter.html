@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hook Image Generator — Puter.js</title>
+  <script src="https://js.puter.com/v2/"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0f0f0f; color: #e0e0e0; padding: 24px; }
+    h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 4px; }
+    .subtitle { font-size: 0.85rem; color: #888; margin-bottom: 24px; }
+    .card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+    label { font-size: 0.8rem; color: #aaa; display: block; margin-bottom: 6px; font-weight: 500; }
+    input, textarea { width: 100%; background: #111; border: 1px solid #333; border-radius: 6px;
+      color: #e0e0e0; padding: 10px 12px; font-size: 0.9rem; outline: none; }
+    input:focus, textarea:focus { border-color: #555; }
+    textarea { resize: vertical; min-height: 90px; font-family: inherit; }
+    .row { display: flex; gap: 12px; margin-bottom: 14px; }
+    .row > div { flex: 1; }
+    button { background: #3a6fff; color: white; border: none; border-radius: 6px;
+      padding: 11px 22px; font-size: 0.9rem; font-weight: 600; cursor: pointer; }
+    button:disabled { background: #2a2a2a; color: #555; cursor: not-allowed; }
+    button.secondary { background: #2a2a2a; color: #ccc; }
+    button.secondary:hover:not(:disabled) { background: #333; }
+    #log { background: #0d0d0d; border: 1px solid #222; border-radius: 6px; padding: 12px;
+      font-family: monospace; font-size: 0.78rem; max-height: 180px; overflow-y: auto;
+      white-space: pre-wrap; color: #7ec8a0; margin-top: 12px; display: none; }
+    #log.active { display: block; }
+    .images { display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+    .img-card { flex: 1; min-width: 180px; background: #1a1a1a; border: 1px solid #2a2a2a;
+      border-radius: 8px; overflow: hidden; }
+    .img-card img { width: 100%; display: block; }
+    .img-card .img-label { padding: 8px 12px; font-size: 0.75rem; color: #888;
+      display: flex; justify-content: space-between; align-items: center; }
+    .img-card a { color: #3a6fff; text-decoration: none; font-size: 0.78rem; }
+    .concept-box { background: #111; border: 1px solid #222; border-radius: 6px;
+      padding: 14px; font-size: 0.82rem; line-height: 1.6; color: #ccc; margin-top: 12px; }
+    .concept-box strong { color: #fff; }
+    .badge { display: inline-block; font-size: 0.7rem; padding: 2px 8px; border-radius: 4px;
+      background: #1c3a1c; color: #5ecf5e; margin-left: 8px; vertical-align: middle; }
+    .provider-note { font-size: 0.75rem; color: #666; margin-top: 6px; }
+    .step-indicator { font-size: 0.75rem; color: #3a6fff; font-weight: 600; margin-bottom: 6px; }
+    .error { color: #e05050; font-size: 0.82rem; margin-top: 8px; }
+  </style>
+</head>
+<body>
+
+<h1>Hook Image Generator <span class="badge">Puter.js</span></h1>
+<p class="subtitle">Gemini concept + AI images — runs free in your browser via Puter</p>
+
+<!-- ── Product Input ── -->
+<div class="card">
+  <div class="step-indicator">STEP 1 — PRODUCT INFO</div>
+  <p style="font-size:0.8rem;color:#777;margin-bottom:14px;">
+    Amazon blocks direct browser fetches (CORS). Paste the product details manually below.
+  </p>
+
+  <div style="margin-bottom:14px;">
+    <label>Product Name</label>
+    <input id="productName" type="text"
+      placeholder="e.g. Blink Outdoor 4 Security Camera System" />
+  </div>
+
+  <div style="margin-bottom:14px;">
+    <label>Key Features (one per line, 3–5 bullets)</label>
+    <textarea id="bullets"
+      placeholder="• Wire-free, weatherproof design&#10;• 2-year battery life&#10;• Motion detection alerts to phone&#10;• Works with Alexa"></textarea>
+  </div>
+
+  <div class="row">
+    <div>
+      <label>Current Price</label>
+      <input id="price" type="text" placeholder="$49.99" />
+    </div>
+    <div>
+      <label>Original Price</label>
+      <input id="origPrice" type="text" placeholder="$119.99" />
+    </div>
+    <div>
+      <label>Discount %</label>
+      <input id="discount" type="number" placeholder="58" min="1" max="99" />
+    </div>
+  </div>
+</div>
+
+<!-- ── Image Provider ── -->
+<div class="card">
+  <div class="step-indicator">STEP 2 — IMAGE MODEL</div>
+  <div class="row" style="margin-bottom:0;">
+    <div>
+      <label>Provider</label>
+      <select id="provider" style="width:100%;background:#111;border:1px solid #333;border-radius:6px;color:#e0e0e0;padding:10px 12px;font-size:0.9rem;outline:none;">
+        <option value="gemini">Gemini (gemini-2.5-flash-image)</option>
+        <option value="openai">OpenAI (gpt-image-1-mini)</option>
+      </select>
+    </div>
+    <div>
+      <label>Seed (optional)</label>
+      <input id="seed" type="number" placeholder="random" />
+    </div>
+  </div>
+  <p class="provider-note">Gemini provider uses your Puter account's Gemini credits (same model as Python script).</p>
+</div>
+
+<!-- ── Actions ── -->
+<div class="card">
+  <div style="display:flex;gap:10px;align-items:center;">
+    <button id="btnRun" onclick="runPipeline()">Generate Hook Images</button>
+    <button class="secondary" id="btnClear" onclick="clearResults()">Clear</button>
+  </div>
+  <div id="log"></div>
+  <div id="errorMsg" class="error"></div>
+</div>
+
+<!-- ── Results ── -->
+<div id="results" style="display:none;">
+  <div class="card">
+    <div class="step-indicator">CONCEPT</div>
+    <div id="conceptDisplay" class="concept-box"></div>
+  </div>
+  <div class="card">
+    <div class="step-indicator">GENERATED IMAGES (download and run FFmpeg Ken Burns via Python)</div>
+    <div id="imageGrid" class="images"></div>
+  </div>
+</div>
+
+<script>
+// ── Meta-prompt (mirrors Python META_PROMPT) ──────────────────────────────────
+function buildMetaPrompt(product, bullets, price, origPrice, discount) {
+  return `You are a viral short-form creative director designing the OPENING HOOK still image
+for a faceless product reel. ONE single frame that makes a scroller freeze instantly.
+
+PRODUCT: ${product}
+CURRENT PRICE: ${price || 'N/A'}
+ORIGINAL PRICE: ${origPrice || 'N/A'}
+DISCOUNT: ${discount || '?'}% OFF
+TOP BENEFITS:
+${bullets}
+
+Work through these steps, then output ONLY JSON:
+
+1. PAIN POINT — the single most universal, relatable frustration this product solves;
+   something a random person recognizes instantly mid-scroll.
+2. PERSONA — the specific person who feels it most. FACELESS: only hands / wrists / body from
+   behind or cropped at the shoulders — never a face.
+3. PEAK ACTION — dramatize that pain point as an escalated, exaggerated PHYSICAL moment, frozen
+   at the single instant RIGHT BEFORE the "big bang": the spill / crash / collapse / overflow /
+   snap is about to happen but has NOT yet — maximum suspended tension, in medias res. Do NOT
+   show the product (the hook is the PROBLEM, not the solution).
+4. IMAGE PROMPT — one hyper-detailed photographic still description capturing exactly that frozen
+   pre-disaster instant. Be specific: the faceless subject and exact pose, what is mid-motion /
+   teetering / about to give way, framing, lighting, mood. End the image prompt with:
+   "photorealistic, cinematic, dramatic high-contrast lighting, ultra-sharp focus, 9:16 vertical portrait, no text".
+
+Respond ONLY in valid JSON. No markdown. No code fences.
+{
+  "pain_point": "...",
+  "persona": "...",
+  "peak_action": "...",
+  "image_prompt": "the single frozen-instant-before-the-big-bang image description"
+}`;
+}
+
+// ── Logging ───────────────────────────────────────────────────────────────────
+const logEl    = document.getElementById('log');
+const errorEl  = document.getElementById('errorMsg');
+
+function log(msg) {
+  logEl.classList.add('active');
+  logEl.textContent += msg + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+  console.log(msg);
+}
+
+function setError(msg) {
+  errorEl.textContent = msg;
+}
+
+// ── Image download helper ─────────────────────────────────────────────────────
+function addImageToGrid(imgEl, label, index) {
+  const grid  = document.getElementById('imageGrid');
+  const card  = document.createElement('div');
+  card.className = 'img-card';
+
+  const a = document.createElement('a');
+  a.href     = imgEl.src;
+  a.download = `hook_puter_${index + 1}.png`;
+  a.appendChild(imgEl);
+
+  const footer = document.createElement('div');
+  footer.className = 'img-label';
+  footer.innerHTML = `<span>${label}</span><a href="${imgEl.src}" download="hook_puter_${index + 1}.png">↓ download</a>`;
+
+  card.appendChild(a);
+  card.appendChild(footer);
+  grid.appendChild(card);
+}
+
+// ── Main pipeline ─────────────────────────────────────────────────────────────
+async function runPipeline() {
+  const btnRun = document.getElementById('btnRun');
+  btnRun.disabled = true;
+  errorEl.textContent = '';
+  logEl.textContent   = '';
+  document.getElementById('results').style.display = 'none';
+  document.getElementById('imageGrid').innerHTML   = '';
+  document.getElementById('conceptDisplay').innerHTML = '';
+
+  const productName = document.getElementById('productName').value.trim();
+  const bulletsRaw  = document.getElementById('bullets').value.trim();
+  const price       = document.getElementById('price').value.trim();
+  const origPrice   = document.getElementById('origPrice').value.trim();
+  const discount    = document.getElementById('discount').value.trim();
+  const provider    = document.getElementById('provider').value;
+
+  if (!productName || !bulletsRaw) {
+    setError('Please fill in Product Name and Key Features.');
+    btnRun.disabled = false;
+    return;
+  }
+
+  try {
+    // ── Step 1: Generate concept via Puter AI chat ────────────────────────────
+    log('Step 1: Generating hook concept via Puter AI...');
+    const metaPrompt = buildMetaPrompt(productName, bulletsRaw, price, origPrice, discount);
+
+    const conceptRaw = await puter.ai.chat(metaPrompt, {
+      model: 'gpt-4o',   // Puter chat uses GPT-4o by default (free tier)
+    });
+
+    // Parse JSON from response
+    let conceptText = typeof conceptRaw === 'string' ? conceptRaw
+      : (conceptRaw?.message?.content || conceptRaw?.text || JSON.stringify(conceptRaw));
+
+    // Strip markdown code fences if present
+    conceptText = conceptText.replace(/^```(?:json)?\s*/m, '').replace(/\s*```$/m, '').trim();
+
+    let concept;
+    try {
+      concept = JSON.parse(conceptText);
+    } catch (e) {
+      // Try to extract JSON from the text
+      const match = conceptText.match(/\{[\s\S]*\}/);
+      if (match) {
+        concept = JSON.parse(match[0]);
+      } else {
+        throw new Error('Could not parse concept JSON: ' + conceptText.slice(0, 200));
+      }
+    }
+
+    log(`  ✓ Pain point:  ${concept.pain_point?.slice(0, 80)}`);
+    log(`  ✓ Persona:     ${concept.persona?.slice(0, 80)}`);
+    log(`  ✓ Peak action: ${concept.peak_action?.slice(0, 80)}`);
+
+    // Show concept
+    document.getElementById('results').style.display = 'block';
+    document.getElementById('conceptDisplay').innerHTML = `
+      <strong>Pain point:</strong> ${concept.pain_point}<br><br>
+      <strong>Persona:</strong> ${concept.persona}<br><br>
+      <strong>Peak action:</strong> ${concept.peak_action}<br><br>
+      <strong>Image prompt:</strong> ${concept.image_prompt}
+    `;
+
+    // ── Step 2: Generate ONE peak image (the frozen instant before the big bang) ──
+    const prompt = concept.image_prompt;
+    if (!prompt) throw new Error('Concept missing image_prompt');
+
+    log(`\nStep 2: Generating the PEAK image (${provider})...`);
+    log(`  Prompt: ${prompt.slice(0, 110)}...`);
+
+    const imgConfig = (provider === 'gemini')
+      ? { provider: 'gemini', model: 'gemini-2.5-flash-image', ratio: { w: 9, h: 16 } }
+      : { provider: 'openai', model: 'gpt-image-1-mini' };
+
+    const imgEl = await puter.ai.txt2img(prompt, imgConfig);
+    log(`  ✓ PEAK image received`);
+    addImageToGrid(imgEl, 'PEAK', 0);
+
+    log('\n✓ Done — use the ↓ download link to save the image.');
+
+  } catch (err) {
+    log('ERROR: ' + (err.message || String(err)));
+    setError('Error: ' + (err.message || String(err)));
+  } finally {
+    btnRun.disabled = false;
+  }
+}
+
+function clearResults() {
+  document.getElementById('results').style.display = 'none';
+  document.getElementById('imageGrid').innerHTML = '';
+  document.getElementById('conceptDisplay').innerHTML = '';
+  logEl.textContent = '';
+  logEl.classList.remove('active');
+  errorEl.textContent = '';
+}
+</script>
+
+</body>
+</html>

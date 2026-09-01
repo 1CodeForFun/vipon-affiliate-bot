@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """
-test_hook_gemini_img.py — Hook image variant using Gemini Imagen (free-tier keys)
+test_hook_gemini_img.py — Hook image pipeline
 
-Uses the SAME geminikey.txt keys as the main scraper.
-Generates 3 photorealistic stills via Gemini image generation, then
-assembles them into a 5-second Ken Burns hook clip with FFmpeg.
+Uses Gemini (free tier) for concept + image prompts, and Pollinations.ai
+(Flux model, completely free, no API key) for actual image generation.
 
-Image model tried in order:
-  1. imagen-3.0-generate-001     (Imagen 3, highest quality)
-  2. imagen-3.0-fast-generate-001 (faster, still good)
-
-The key difference from Pollinations: prompts are DIRECT product scenes
-(the actual pain-point situation), not surreal abstract metaphors.
+gemini-3.1-flash-image / gemini-2.5-flash-image are PAID — avoided here.
+Pollinations: https://image.pollinations.ai/prompt/{encoded}
 
 Usage:
   python test_hook_gemini_img.py --url "https://www.amazon.com/dp/ASIN"
@@ -25,23 +20,13 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-GEMINI_KEYS_FILE = Path.home() / "geminikey.txt"
-GEMINI_API_BASE  = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_KEYS_FILE  = Path.home() / "geminikey.txt"
+GEMINI_API_BASE   = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_TEXT_MODEL = "gemini-2.5-flash"
 
-IMAGEN_MODELS = [
-    "imagen-4.0-generate-preview-05-20",   # Imagen 4 (newest)
-    "imagen-3.0-generate-001",
-    "imagen-3.0-fast-generate-001",
-]
-
-# Gemini multimodal image generation via generateContent + responseModalities.
-# gemini-2.5-flash is already confirmed working for text on these free keys —
-# it also supports image output via the same endpoint.
-GEMINI_IMG_MODELS = [
-    "gemini-2.0-flash-preview-image-generation",
-    "gemini-2.0-flash-exp",
-]
+# Image generation: Gemini 2.5 Flash Image only — no fallback to other models
+GEMINI_IMG_MODEL = "gemini-2.5-flash-image"
+GEMINI_IMG_BASE  = "https://generativelanguage.googleapis.com/v1"
 
 OUTPUT_DIR = Path("hook_test_output")
 
@@ -141,15 +126,48 @@ def load_keys() -> list[str]:
 
 # ── Step 1: Amazon product ─────────────────────────────────────────────────────
 
-def get_first_deal_url() -> str:
+def get_random_deal_url() -> str:
+    """
+    Collect ALL /dp/ ASINs from the fully-rendered deals page and pick one at random.
+    Amazon's deals page is a React SPA — requests only gets a skeleton with 1-2 static
+    ASINs (always the same featured product). Selenium loads the full page for real variety.
+    """
+    import random
+
+    def _extract_asins(html: str) -> list:
+        return list(dict.fromkeys(re.findall(r"/dp/([A-Z0-9]{10})", html)))
+
+    # Selenium path — needed for true randomness (full JS-rendered page)
+    try:
+        import undetected_chromedriver as uc
+        opts = uc.ChromeOptions()
+        opts.add_argument("--headless=new")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        driver = uc.Chrome(options=opts)
+        try:
+            driver.get("https://www.amazon.com/deals")
+            time.sleep(5)   # let React render the deal cards
+            asins = _extract_asins(driver.page_source)
+        finally:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        if asins:
+            log(f"  Selenium: found {len(asins)} products — picking at random")
+            return f"https://www.amazon.com/dp/{random.choice(asins)}"
+    except ImportError:
+        log("  undetected_chromedriver not installed — falling back to requests (limited variety)")
+
+    # requests fallback — static HTML, low variety but better than nothing
     resp = requests.get("https://www.amazon.com/deals", headers=HEADERS, timeout=20)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    for a in soup.find_all("a", href=True):
-        m = re.search(r"/dp/([A-Z0-9]{10})", a["href"])
-        if m:
-            return f"https://www.amazon.com/dp/{m.group(1)}"
-    raise RuntimeError("No /dp/ links found — run with --url")
+    asins = _extract_asins(resp.text)
+    if not asins:
+        raise RuntimeError("No /dp/ ASINs found on deals page — run with --url instead")
+    log(f"  requests: found {len(asins)} products — picking at random")
+    return f"https://www.amazon.com/dp/{random.choice(asins)}"
 
 
 def _parse_bullets(soup) -> tuple:
@@ -218,7 +236,7 @@ def generate_hook_concept(title: str, bullets: list, keys: list) -> dict:
         "generationConfig": {"temperature": 0.9, "maxOutputTokens": 8192},
     }
     for i, key in enumerate(keys):
-        url = f"{GEMINI_API_BASE}/models/{GEMINI_TEXT_MODEL}:generateContent?key={key}"
+        url = f"{GEMINI_API_BASE_BETA}/models/{GEMINI_TEXT_MODEL}:generateContent?key={key}"
         log(f"  Gemini text (key {i+1}/{len(keys)})...")
         resp = requests.post(url, json=payload, timeout=60)
         if resp.status_code == 429:
@@ -233,7 +251,7 @@ def generate_hook_concept(title: str, bullets: list, keys: list) -> dict:
     raise RuntimeError("All Gemini keys exhausted for concept generation.")
 
 
-# ── Step 3: Imagen 3 still images ─────────────────────────────────────────────
+# ── Step 3: Image generation — gemini-2.5-flash-image only ───────────────────
 
 def _save_img_bytes(b64: str, output_path: Path) -> Path:
     output_path.write_bytes(base64.b64decode(b64))
@@ -241,82 +259,33 @@ def _save_img_bytes(b64: str, output_path: Path) -> Path:
     return output_path
 
 
-def generate_imagen(prompt: str, keys: list, output_path: Path, seed: int = None) -> Path:
-    """Generate one image. Tries Imagen 3 first, falls back to Gemini Flash image gen."""
-
-    # ── Path A: Imagen 3 (high quality, needs special access) ────────────────
-    imagen_payload = {
-        "instances": [{"prompt": prompt}],
-        "parameters": {
-            "sampleCount": 1,
-            "aspectRatio": "9:16",
-            "safetyFilterLevel": "block_only_high",
-            "personGeneration": "allow_adult",
-        },
-    }
-    if seed is not None:
-        imagen_payload["parameters"]["seed"] = seed
-
-    for model in IMAGEN_MODELS:
-        url_tpl = f"{GEMINI_API_BASE}/models/{model}:predict?key={{key}}"
-        all_404_for_model = True
-        for i, key in enumerate(keys):
-            log(f"  Imagen ({model}, key {i+1}/{len(keys)})...")
-            resp = requests.post(url_tpl.format(key=key), json=imagen_payload, timeout=90)
-            if resp.status_code == 404:
-                # 404 may be tier-dependent (billing unlocks the model) — try all keys
-                log(f"  Key {i+1} → 404 (tier/billing restriction — trying next key)")
-                continue
-            all_404_for_model = False
-            if resp.status_code == 429:
-                log(f"  Key {i+1} → 429 — trying next key...")
-                continue
-            if resp.status_code not in (200,):
-                log(f"  Key {i+1} → {resp.status_code}: {resp.text[:300]}")
-                continue
-            predictions = resp.json().get("predictions", [])
-            if predictions and predictions[0].get("bytesBase64Encoded"):
-                return _save_img_bytes(predictions[0]["bytesBase64Encoded"], output_path)
-        if all_404_for_model:
-            log(f"  All keys → 404 for {model} — trying next model...")
-
-    log("  Imagen exhausted — falling back to Gemini Flash image generation...")
-
-    # ── Path B: Gemini Flash native image generation (works on free-tier keys) ─
-    # Append vertical format hint to the prompt since we can't pass aspectRatio
-    flash_prompt = prompt.rstrip(".") + ", 9:16 vertical portrait format."
-    flash_payload = {
-        "contents": [{"parts": [{"text": flash_prompt}]}],
-        "generationConfig": {"responseModalities": ["IMAGE"], "temperature": 1.0},
-    }
-    for model in GEMINI_IMG_MODELS:
-        url_tpl = f"{GEMINI_API_BASE}/models/{model}:generateContent?key={{key}}"
-        for i, key in enumerate(keys):
-            log(f"  Gemini Flash img ({model}, key {i+1}/{len(keys)})...")
-            resp = requests.post(url_tpl.format(key=key), json=flash_payload, timeout=90)
-            if resp.status_code == 404:
-                log(f"  {model} → 404, trying next model...")
-                break
-            if resp.status_code == 429:
-                log(f"  Key {i+1} → 429 — trying next key...")
-                continue
-            if resp.status_code not in (200,):
-                log(f"  Key {i+1} → {resp.status_code}: {resp.text[:200]}")
-                continue
-            # Extract inlineData image from response parts
-            parts = resp.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
-            for part in parts:
-                inline = part.get("inlineData", {})
-                if inline.get("data"):
-                    return _save_img_bytes(inline["data"], output_path)
-            log(f"  No image in response parts — trying next key...")
-
-    raise RuntimeError(
-        "All image generation paths failed.\n"
-        "  • Imagen 3: needs special API access (apply at aistudio.google.com)\n"
-        "  • Gemini Flash img: model may not be available on your key tier\n"
-        "Try running test_hook_pollinations.py as a no-key fallback."
-    )
+def generate_image(prompt: str, keys: list, output_path: Path) -> Path:
+    """Generate one image via gemini-2.5-flash-image. Tries all keys on 429, fails hard otherwise."""
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    url = f"{GEMINI_IMG_BASE}/models/{GEMINI_IMG_MODEL}:generateContent"
+    for i, key in enumerate(keys):
+        log(f"  {GEMINI_IMG_MODEL} (key {i+1}/{len(keys)})...")
+        resp = requests.post(
+            url, json=payload,
+            headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+            timeout=90,
+        )
+        if resp.status_code in (400, 404):
+            raise RuntimeError(f"{GEMINI_IMG_MODEL} → {resp.status_code}: {resp.text[:300]}")
+        if resp.status_code == 429:
+            log(f"  Key {i+1} → 429, trying next key...")
+            continue
+        if resp.status_code != 200:
+            raise RuntimeError(f"{GEMINI_IMG_MODEL} → {resp.status_code}: {resp.text[:300]}")
+        parts = (
+            resp.json().get("candidates", [{}])[0]
+            .get("content", {}).get("parts", [])
+        )
+        for part in parts:
+            if part.get("inlineData", {}).get("data"):
+                return _save_img_bytes(part["inlineData"]["data"], output_path)
+        raise RuntimeError(f"{GEMINI_IMG_MODEL} returned 200 but no image in response parts")
+    raise RuntimeError(f"All {len(keys)} keys rate-limited (429) for {GEMINI_IMG_MODEL}")
 
 
 # ── Step 4: FFmpeg Ken Burns animation ────────────────────────────────────────
@@ -412,10 +381,6 @@ def main():
     parser.add_argument("--url",          help="Amazon product URL (skip deals scrape)")
     parser.add_argument("--skip-concept", action="store_true",
                         help="Reuse existing hook_concept_imagen.json (no Gemini text call)")
-    parser.add_argument("--seed",         type=int, default=None,
-                        help="Imagen seed for reproducible images")
-    parser.add_argument("--billing-key",  type=int, default=None,
-                        help="1-based index of the key with billing/credits (used exclusively for Imagen)")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(exist_ok=True)
@@ -436,7 +401,7 @@ def main():
             product_url = args.url
             log(f"  URL: {product_url}")
         else:
-            product_url = get_first_deal_url()
+            product_url = get_random_deal_url()
             log(f"  Found: {product_url}")
 
         title, bullets, price = get_product_info(product_url)
@@ -461,18 +426,9 @@ def main():
         ))
         log(f"\n  Concept saved → {concept_out}")
 
-    # ── Step 3: Generate images via Imagen ───────────────────────────────────
-    log("\n═══ Step 3: Imagen 3 still images ═══")
-    all_keys   = load_keys()
-    if args.billing_key:
-        idx        = args.billing_key - 1   # convert to 0-based
-        if idx < 0 or idx >= len(all_keys):
-            sys.exit(f"--billing-key {args.billing_key} out of range (have {len(all_keys)} keys)")
-        imagen_keys = [all_keys[idx]]
-        log(f"  Using billing key #{args.billing_key} exclusively for Imagen")
-    else:
-        imagen_keys = all_keys
-    keys = all_keys   # keep full list for Gemini text fallback
+    # ── Step 3: Generate images via Gemini native image generation ───────────
+    log("\n═══ Step 3: Gemini image generation ═══")
+    all_keys = load_keys()
     image_prompts = concept.get("image_prompts", [])
     if len(image_prompts) != 3:
         sys.exit("Concept missing 'image_prompts' array of 3. Delete concept file and rerun.")
@@ -480,8 +436,7 @@ def main():
     image_paths = []
     for i, prompt in enumerate(image_prompts, 1):
         img_path = OUTPUT_DIR / f"hook_gi_{i}.jpg"
-        seed = (args.seed + i) if args.seed is not None else None
-        generate_imagen(prompt, imagen_keys, img_path, seed=seed)
+        generate_image(prompt, all_keys, img_path)
         image_paths.append(img_path)
 
     # ── Step 4: Assemble hook video ───────────────────────────────────────────

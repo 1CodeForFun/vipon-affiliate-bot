@@ -2865,7 +2865,23 @@ def _fetch_amazon_pool(tld, want, exclude_pids, exclude_sigs=None):
         log(f"  ⚠️ Amazon deals module unavailable: {e.__class__.__name__}")
         return []
     try:
-        deals = fetch_brand_deals(AMAZON_MIN_PCT, scrolls=16, tld=tld)
+        # Randomise the floor ABOVE the minimum each run. Always asking for the
+        # same >=40% returns the same deepest-discounted items day after day,
+        # which is why products kept repeating. Sampling the threshold reshuffles
+        # which slice of the catalogue is offered — 40% stays the hard floor, so
+        # nothing weaker ever qualifies.
+        floor = random.choice([AMAZON_MIN_PCT, AMAZON_MIN_PCT,
+                               AMAZON_MIN_PCT + 5, AMAZON_MIN_PCT + 10,
+                               AMAZON_MIN_PCT + 15])
+        log(f"  🎲 Amazon {tld}: this run asks for {floor}%+ "
+            f"(floor {AMAZON_MIN_PCT}%)")
+        deals = fetch_brand_deals(floor, scrolls=16, tld=tld)
+        if len(deals) < want and floor > AMAZON_MIN_PCT:
+            # Too few at the higher bar — drop back to the floor and top up.
+            log(f"  ↳ only {len(deals)} at {floor}%+ — retrying at {AMAZON_MIN_PCT}%+")
+            extra = fetch_brand_deals(AMAZON_MIN_PCT, scrolls=16, tld=tld)
+            have  = {d["asin"] for d in deals}
+            deals += [d for d in extra if d["asin"] not in have]
     except Exception as e:
         log(f"  ⚠️ Amazon deals fetch failed: {e.__class__.__name__}")
         return []
@@ -2943,8 +2959,15 @@ def _amazon_deal_to_product(d, tld):
     }
 
 
-def _write_amazon_row(ws, pool, tld, ws_p=None):
-    """Write ONE deal from the pool. Returns True if a row landed."""
+def _write_amazon_row(ws, pool, tld, ws_p=None, visited=None):
+    """Write ONE deal from the pool. Returns True if a row landed.
+
+    `visited` is the run's PID set that gets flushed to the 7-day history. Amazon
+    rows never passed through `scraped` (only Vipon products do), so their PIDs
+    were never recorded — the only thing keeping them from coming back was the
+    sheet itself, and once a row was consumed the deal was eligible again the
+    next day. That is why deals kept repeating.
+    """
     while pool:
         d = pool.pop(0)
         try:
@@ -2956,6 +2979,8 @@ def _write_amazon_row(ws, pool, tld, ws_p=None):
             continue
         try:
             _write_product_row(ws, prod, tld=tld, ws_p=ws_p)
+            if visited is not None:
+                visited.add(str(prod["pid"]).strip())
             tag = f" [{d['brand']}]" if d.get("brand") else ""
             log(f"🛒 Amazon row: {d['pct']}% off{tag} — {d['title'][:52]}")
             return True
@@ -3227,13 +3252,13 @@ def main():
                 log(f"  ⚠️ inline sheet write failed for PID {data['pid']}: {e.__class__.__name__}")
 
             # Alternate: one Amazon deal after each Vipon product.
-            if us_amz_written < us_amz_cap and _write_amazon_row(ws, us_amz_pool, "com", ws_p):
+            if us_amz_written < us_amz_cap and _write_amazon_row(ws, us_amz_pool, "com", ws_p, visited_us):
                 us_amz_written += 1
 
         # Vipon may have fallen short (caps, throttles); fill the rest from deals,
         # which cost no quota — the sheet still reaches PRODUCT_LIMIT.
         while us_amz_written < us_amz_cap and us_amz_pool:
-            if not _write_amazon_row(ws, us_amz_pool, "com", ws_p):
+            if not _write_amazon_row(ws, us_amz_pool, "com", ws_p, visited_us):
                 break
             us_amz_written += 1
         log(f"  🛒 US Amazon rows written: {us_amz_written}/{us_amz_cap}")
@@ -3328,12 +3353,13 @@ def main():
                 log(f"  ⚠️ inline CA sheet write failed for PID {data_ca['pid']}: {e.__class__.__name__}")
 
             # Alternate on the CA sheet too.
-            if ca_amz_written < ca_amz_cap and _write_amazon_row(ws2, ca_amz_pool,
-                                                                 AMAZON_TLD_CA):
+            if ca_amz_written < ca_amz_cap and _write_amazon_row(
+                    ws2, ca_amz_pool, AMAZON_TLD_CA, visited=visited_ca):
                 ca_amz_written += 1
 
         while ca_amz_written < ca_amz_cap and ca_amz_pool:
-            if not _write_amazon_row(ws2, ca_amz_pool, AMAZON_TLD_CA):
+            if not _write_amazon_row(ws2, ca_amz_pool, AMAZON_TLD_CA,
+                                     visited=visited_ca):
                 break
             ca_amz_written += 1
         log(f"  🛒 CA Amazon rows written: {ca_amz_written}/{ca_amz_cap}")
