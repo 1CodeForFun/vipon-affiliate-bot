@@ -331,7 +331,7 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=14, want=0,
     try:
         driver.get(_goldbox_url(min_pct, 100, tld=tld))
         time.sleep(6)                      # let the refinement apply
-        stalls = 0
+        stalls, last_h = 0, 0
         for i in range(max(1, scrolls)):
             got = [d for d in _parse_cards(driver.page_source, min_pct, require_brand)
                    if d["asin"] not in seen]
@@ -340,25 +340,42 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=14, want=0,
             found += got
             if got:
                 log(f"  deals: +{len(got)} (total {len(found)})")
-                stalls = 0
-            else:
-                stalls += 1
             if want and len(found) >= want:
                 break
 
+            # Walk DOWN the page rather than teleporting to the bottom. The grid
+            # lazy-loads off intersection observers as cards pass through the
+            # viewport; scrollTo(bottom) skips them, so the page stops growing
+            # and the run looks exhausted after two rounds when it is not.
             driver.execute_script(
-                "window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(1.8)
+                "window.scrollBy(0, window.innerHeight*2.5);")
+            time.sleep(2.0)
 
-            # The grid is finite and ends in a "View more deals" button. Scrolling
-            # alone just parks at the bottom and re-parses the same cards, which
-            # is why the pool stayed small however many scrolls were configured.
-            # Clicking it appends the next page of deals in place.
-            if not _click_load_more(driver):
-                if stalls >= 2:
-                    log("  deals: no more to load")
+            h = driver.execute_script("return document.body.scrollHeight;") or 0
+            grew = h > last_h
+            last_h = h
+
+            # Only when the page has stopped growing do we go looking for the
+            # "View more deals" button that ends the grid.
+            clicked = False
+            if not grew:
+                driver.execute_script(
+                    "window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(1.2)
+                clicked = _click_load_more(driver)
+                if clicked:
+                    time.sleep(3.0)
+
+            # A stall is no new cards AND no page growth AND no button. CI
+            # runners are slow enough that a single quiet round is routine, so
+            # only give up after several consecutive ones.
+            if got or grew or clicked:
+                stalls = 0
+            else:
+                stalls += 1
+                if stalls >= 4:
+                    log(f"  deals: no more to load (after {i+1} rounds)")
                     break
-            time.sleep(2.2)
     except Exception as e:
         log(f"  brand deals: scrape error ({str(e)[:70]})")
     finally:
