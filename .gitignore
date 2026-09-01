@@ -43,3 +43,11 @@ flux_test_output/
 cf_probe_output/
 localfont.ttf
 paapi5_python_sdk/
+
+# secrets — never commit
+buffer_API_Key.txt
+*API_Key*.txt
+*apikey*.txt
+geminipro.txt
+*.token
+.env
