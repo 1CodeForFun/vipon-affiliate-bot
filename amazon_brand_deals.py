@@ -33,7 +33,11 @@ from urllib.parse import quote
 
 import requests
 
-MIN_PCT_DEFAULT = 40
+# 0 = take the deals page as it comes. The 40% bar was throwing away most of
+# a page that is full of perfectly good products; sorting still puts branded
+# and deepest-discounted items first, so quality is preserved by ordering
+# rather than by exclusion. Set AMAZON_MIN_PCT to reimpose a floor.
+MIN_PCT_DEFAULT = 0
 
 _UA = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -86,6 +90,13 @@ def _goldbox_url(min_pct=MIN_PCT_DEFAULT, max_pct=100, page=1, tld="com"):
     inner quotes are escaped, then double URL-encoded. Reverse-engineered from
     the live deals-page slider; reused from publish_reel_hook.
     """
+    # No floor asked for -> request the unrefined deals page. Sending a
+    # percentOff refinement of min 0 still narrows the grid to items Amazon
+    # has tagged with a discount band, which is not the same as "everything".
+    if min_pct <= 0 and max_pct >= 100:
+        url = f"https://www.amazon.{tld}/gp/goldbox/"
+        return url + (f"?page={page}" if page > 1 else "")
+
     obj = {"state": {"rangeRefinementFilters": {"percentOff": {"min": min_pct,
                                                               "max": max_pct}}},
            "version": 1}

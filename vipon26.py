@@ -248,7 +248,12 @@ PROMO_URL_CA  = "https://www.myvipon.com/promotion/index?type=instant"  # CA ful
 PRODUCT_LIMIT    = int(os.getenv("PRODUCT_LIMIT")    or "48")   # US per-sheet total
 PRODUCT_LIMIT_CA = int(os.getenv("PRODUCT_LIMIT_CA") or "30")   # CA per-sheet total
 AMAZON_SHARE     = float(os.getenv("AMAZON_SHARE")   or "0.5")  # fraction from deals
-AMAZON_MIN_PCT   = int(os.getenv("AMAZON_MIN_PCT")   or "40")
+# 0 = no discount floor; take the deals page as it comes. The 40% bar was
+# discarding most of a page full of good products. Quality is preserved by
+# ORDER, not exclusion: deals sort branded-first then deepest-discount-first,
+# so the strongest still fill the sheet first. Set AMAZON_MIN_PCT to restore
+# a floor.
+AMAZON_MIN_PCT   = int(os.getenv("AMAZON_MIN_PCT")   or "0")
 
 # FIXED delay (seconds) between code reveals. Vipon rate-limits the GET-CODE
 # endpoint per IP by requests-per-minute — the old VM never tripped it because it
@@ -2870,11 +2875,15 @@ def _fetch_amazon_pool(tld, want, exclude_pids, exclude_sigs=None):
         # which is why products kept repeating. Sampling the threshold reshuffles
         # which slice of the catalogue is offered — 40% stays the hard floor, so
         # nothing weaker ever qualifies.
-        floor = random.choice([AMAZON_MIN_PCT, AMAZON_MIN_PCT,
-                               AMAZON_MIN_PCT + 5, AMAZON_MIN_PCT + 10,
-                               AMAZON_MIN_PCT + 15])
+        # Only jitter when a floor is actually set. At 0 the pool is the whole
+        # deals page, so dedup handles variety and a random bar would just be
+        # the filter we removed, reintroduced.
+        floor = AMAZON_MIN_PCT if AMAZON_MIN_PCT <= 0 else random.choice(
+            [AMAZON_MIN_PCT, AMAZON_MIN_PCT,
+             AMAZON_MIN_PCT + 5, AMAZON_MIN_PCT + 10, AMAZON_MIN_PCT + 15])
         log(f"  🎲 Amazon {tld}: this run asks for {floor}%+ "
-            f"(floor {AMAZON_MIN_PCT}%)")
+            f"(floor {AMAZON_MIN_PCT}%)" if floor > 0
+            else f"  🛍️ Amazon {tld}: taking the deals page unfiltered")
         deals = fetch_brand_deals(floor, scrolls=16, tld=tld)
         if len(deals) < want and floor > AMAZON_MIN_PCT:
             # Too few at the higher bar — drop back to the floor and top up.
@@ -2907,7 +2916,8 @@ def _fetch_amazon_pool(tld, want, exclude_pids, exclude_sigs=None):
         if sig:
             seen_sigs.add(sig)
         pool.append(d)
-    log(f"  🛒 Amazon {tld}: {len(deals)} deal(s) at {AMAZON_MIN_PCT}%+, "
+    _bar = f"at {AMAZON_MIN_PCT}%+" if AMAZON_MIN_PCT > 0 else "(no discount floor)"
+    log(f"  🛒 Amazon {tld}: {len(deals)} deal(s) {_bar}, "
         f"{len(pool)} usable, {blocked} blocked, {dupes} near-duplicate, "
         f"{len([d for d in pool if d['brand']])} branded")
     return pool[:want * 3]          # headroom for image/link failures
