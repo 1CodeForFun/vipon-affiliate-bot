@@ -164,6 +164,23 @@ def match_brand(title):
     return max(hits, key=len) if hits else None
 
 
+def _is_usable_title(title: str) -> bool:
+    """Is this a real product name, or price-block wreckage?
+
+    The old check was `len(title) < 8`, which "99 Typical:" clears at 11
+    characters — so it reached the sheet, the caption and the reel as the
+    product name. A genuine product title has at least two real words.
+    """
+    if not title or len(title) < 8:
+        return False
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z'&+-]{2,}", title)]
+    if len(words) < 2:
+        return False
+    # Mostly digits and punctuation is a mangled price, not a name.
+    letters = sum(c.isalpha() for c in title)
+    return letters >= max(8, len(title) * 0.45)
+
+
 def _parse_cards(html, min_pct, require_brand=False):
     """Parse deal cards -> [{asin, title, pct, ends_in, brand}]. Branded only."""
     try:
@@ -206,12 +223,23 @@ def _parse_cards(html, min_pct, require_brand=False):
             if sub:
                 title = title.replace(_despace(re.sub(r"\s+", " ",
                                      sub.get_text(" ", strip=True))), " ")
+        # Price LABELS have to go before the money regex runs, otherwise a card
+        # using Amazon's "Typical price: $34.99" layout leaves "99 Typical:"
+        # behind as the product name — which then reaches the sheet, the caption
+        # and the reel. Seen live on B0G2HMN9X1.
+        title = re.sub(r"typical\s+price\s*:?|typical\s*:|list\s+price\s*:?|list\s*:|"
+                       r"deal\s+price\s*:?|was\s*:|now\s*:|price\s*:|with\s+coupon|"
+                       r"save\s+\$\s?[\d,]+(?:\s?\.\s?\d+)?|save\s+extra",
+                       " ", title, flags=re.I)
         title = re.sub(r"\d+\s*%\s*off|save\s+\d+\s*%|limited time deal|"
                        r"deal of the day|best seller|prime exclusive|ends? in\b[^|]*|"
-                       r"list:|deal price:|\$\s?[\d,]+(?:\s?\.\s?\d+)?",
+                       r"\$\s?[\d,]+(?:\s?\.\s?\d+)?",
                        " ", title, flags=re.I)
-        title = re.sub(r"\s+", " ", title).strip(" -|·,")
-        if len(title) < 8:
+        # Orphaned cents left by a partially-stripped price ("$34." -> "99").
+        title = re.sub(r"^\s*\d{1,2}\b(?!\s*(?:pcs?|pack|pk|ct|count|oz|ml|l|g|kg|"
+                       r"lb|in|ft|cm|mm|w|v|k|x)\b)", " ", title, flags=re.I)
+        title = re.sub(r"\s+", " ", title).strip(" -|·,:")
+        if not _is_usable_title(title):
             continue
         # Reject anything still letter-spaced after _despace — a handful of cards
         # use a layout it cannot recover, and a mangled title would end up in the
@@ -232,13 +260,33 @@ def _parse_cards(html, min_pct, require_brand=False):
         # so the first money value is what you pay and the last is the list price.
         price = list_price = ""
         psec = c.find(attrs={"data-testid": "price-section"})
+        money = []
         if psec:
             money = re.findall(r"\$\s?([\d,]+(?:\.\d{2})?)",
                                _despace(re.sub(r"\s+", " ", psec.get_text(" ", strip=True))))
-            if money:
-                price = "$" + money[0]
-                if len(money) > 1:
-                    list_price = "$" + money[-1]
+        if not money:
+            # Not every card exposes a price-section: the "Typical price" layout
+            # puts the money straight on the card, which left the sheet with a
+            # blank price and a caption that could not mention one.
+            money = re.findall(r"\$\s?([\d,]+(?:\s?\.\s?\d{2})?)",
+                               _despace(re.sub(r"\s+", " ", text)))
+            money = [m.replace(" ", "") for m in money]
+        if money:
+            # Decide by VALUE, not position. "Deal Price: $37.89 List: $69.99"
+            # puts what you pay first; "Typical price: $34.99 $28.65" puts it
+            # last. What you pay is always the lower of the two.
+            vals = []
+            for m in money:
+                try:
+                    vals.append(float(m.replace(",", "")))
+                except ValueError:
+                    pass
+            if vals:
+                lo, hi = min(vals), max(vals)
+                fmt = lambda x: f"${x:,.2f}".rstrip("0").rstrip(".") if x % 1 else f"${x:,.0f}"
+                price = fmt(lo)
+                if hi > lo:
+                    list_price = fmt(hi)
 
         # Product image straight off the card. Re-fetching it from the product
         # page was failing constantly on the CI runner ("HTTP image fallback: 0"),
