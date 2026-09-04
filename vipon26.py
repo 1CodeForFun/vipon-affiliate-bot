@@ -1188,6 +1188,12 @@ def _worker_smartlink(asin: str, tag: str, tld: str = "com",
     still get the same instant redirect. Harmless if the worker is not updated:
     the extra params are simply ignored.
     """
+    # Amazon renditions are encoded in the filename: _SL500_ is a 500px box.
+    # Facebook needs at least 600x315 to render a large preview card and shows a
+    # small square thumbnail below that, so ask Amazon for the 1500px rendition.
+    if image:
+        image = re.sub(r"\._(?:AC_)?(?:S[LXY]|UX|UY|CR)[\d,]*_", "._AC_SL1500_", image)
+
     dp = _build_affiliate_dp_link(asin, tld)
     if not WORKER_BASE:
         return dp
@@ -1199,8 +1205,9 @@ def _worker_smartlink(asin: str, tag: str, tld: str = "com",
     qs = urllib.parse.urlencode(params)
     return f"{WORKER_BASE}/a?{qs}"
 
-def get_affiliate_link(asin: str, tld: str = "com") -> str:
-    link = _worker_smartlink(asin, AFFILIATE_ID, tld)
+def get_affiliate_link(asin: str, tld: str = "com",
+                       image: str = "", title: str = "") -> str:
+    link = _worker_smartlink(asin, AFFILIATE_ID, tld, image, title)
     if os.getenv("VIPON_SHORT_LINK", "0") in ("1","true","TRUE","yes","YES"):
         try:
             resp = requests.get("http://tinyurl.com/api-create.php",
@@ -2200,11 +2207,15 @@ def scrape_product_page(driver, wait, pid, tld="com", allow_deal_only=False):
 
     if tld == "ca":
         # Canada: single tag for all platforms
-        link           = _worker_smartlink(asin, AFFILIATE_ID_CA, tld) if asin else ""
+        link           = _worker_smartlink(asin, AFFILIATE_ID_CA, tld,
+                                           images[0] if images else "",
+                                           title) if asin else ""
         platform_links = {k: (_worker_smartlink(asin, AFFILIATE_ID_CA, tld) if asin else "")
                           for k in ["reel", "ig", "youtube", "tiktok", "pinterest"]}
     else:
-        link           = get_affiliate_link(asin, tld) if asin else ""
+        link           = get_affiliate_link(asin, tld,
+                                            images[0] if images else "",
+                                            title) if asin else ""
         platform_links = (get_platform_links(asin, tld) if asin
                           else {"reel":"","ig":"","youtube":"","tiktok":"","pinterest":""})
 
@@ -2621,7 +2632,8 @@ def process_seller_forms(ws_main) -> None:
         reel_url = ""
 
         # ── Links + post text ─────────────────────────────────────
-        aff_link       = get_affiliate_link(asin, "com")
+        aff_link       = get_affiliate_link(asin, "com",
+                                            images[0] if images else "", title)
         platform_links = get_platform_links(asin, "com")
         post_text      = generate_social_post(aff_link, code, disc_txt, expiry, t_short, price)
 
@@ -2750,7 +2762,8 @@ def process_seller_forms_ca(ws2_main) -> None:
 
         title = _fetch_amazon_title_simple(asin, tld=AMAZON_TLD_CA)
         t_short = shorten_title(title, MAX_TITLE_LEN)
-        aff_link = _worker_smartlink(asin, AFFILIATE_ID_CA, AMAZON_TLD_CA)
+        aff_link = _worker_smartlink(asin, AFFILIATE_ID_CA, AMAZON_TLD_CA,
+                                     images[0] if images else "", title)
         platform_links = {k: aff_link for k in ["reel","ig","youtube","tiktok","pinterest"]}
 
         post_text = generate_social_post(aff_link, code, disc_txt, expiry, t_short, price)
@@ -2932,14 +2945,9 @@ def _amazon_deal_to_product(d, tld):
     drops the "use the code at checkout" line by itself.
     """
     asin = d["asin"]
-    if tld == "ca":
-        links = {k: _worker_smartlink(asin, AFFILIATE_ID_CA, tld)
-                 for k in ("reel", "ig", "youtube", "tiktok", "pinterest")}
-        primary = _worker_smartlink(asin, AFFILIATE_ID_CA, tld)
-    else:
-        links = get_platform_links(asin, tld)
-        primary = get_affiliate_link(asin, tld)
 
+    # Resolve the image BEFORE building the links: the primary link carries it as
+    # the og:image the Facebook crawler reads, so it has to be known first.
     # Prefer the image the deals page already gave us. Fetching the product page
     # for images fails often on the CI runner (Amazon rate-limits it), and a deal
     # with no image was being discarded — which is why the sheet was getting a
@@ -2950,6 +2958,15 @@ def _amazon_deal_to_product(d, tld):
         log(f"  ↳ using deals-page image for {asin}")
     if not imgs:
         return None
+
+    if tld == "ca":
+        links = {k: _worker_smartlink(asin, AFFILIATE_ID_CA, tld)
+                 for k in ("reel", "ig", "youtube", "tiktok", "pinterest")}
+        primary = _worker_smartlink(asin, AFFILIATE_ID_CA, tld,
+                                    imgs[0], d["title"])
+    else:
+        links = get_platform_links(asin, tld)
+        primary = get_affiliate_link(asin, tld, imgs[0], d["title"])
     return {
         "pid":        asin,                 # no Vipon PID — the ASIN is the key
         "title":      d["title"],
