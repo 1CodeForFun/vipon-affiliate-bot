@@ -117,6 +117,64 @@ No sale of personal data.</p>
 <h2>Changes</h2><p>We may update this policy.</p>
 <h2>Contact</h2><p><a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a></p>`;
 
+// Image hosts we are willing to proxy. This is an allowlist, not a filter:
+// without it /img would be an open proxy able to fetch anything, including
+// internal addresses.
+const IMAGE_HOSTS = [
+  "m.media-amazon.com",
+  "images-na.ssl-images-amazon.com",
+  "images-eu.ssl-images-amazon.com",
+  "images-fe.ssl-images-amazon.com",
+];
+
+/**
+ * /img?u=<encoded Amazon image URL> — fetch the image and re-serve it from
+ * this worker.
+ *
+ * WHY: the Sharing Debugger showed Facebook failing with
+ *   "Error while downloading https://m.media-amazon.com/images/I/...jpg
+ *    with HTTP response code: 429"
+ * Amazon rate-limits Facebook's crawler. Handing Facebook an Amazon CDN URL
+ * therefore works sometimes and 429s other times, which is exactly the
+ * "some products show, some don't" pattern. Serving the bytes ourselves
+ * removes Amazon from Facebook's path entirely: Cloudflare fetches the image
+ * once, caches it at the edge, and every crawler is then served from cache.
+ */
+async function proxyImage(u) {
+  const raw = u.searchParams.get("u") || "";
+  let target;
+  try {
+    target = new URL(raw);
+  } catch {
+    return new Response("Bad image url", { status: 400 });
+  }
+  if (target.protocol !== "https:" || !IMAGE_HOSTS.includes(target.hostname)) {
+    return new Response("Image host not allowed", { status: 403 });
+  }
+
+  const upstream = await fetch(target.toString(), {
+    headers: {
+      // Amazon is friendlier to a browser-shaped request than to a bare fetch.
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      "Accept": "image/avif,image/webp,image/jpeg,image/png,*/*;q=0.8",
+      "Referer": "https://www.amazon.com/",
+    },
+    cf: { cacheEverything: true, cacheTtl: 604800 },   // 7 days at the edge
+  });
+
+  if (!upstream.ok) {
+    // Do not hand Facebook an error page: fall back to the original URL so the
+    // behaviour is no worse than pointing og:image straight at Amazon.
+    return Response.redirect(target.toString(), 302);
+  }
+
+  const headers = new Headers();
+  headers.set("content-type", upstream.headers.get("content-type") || "image/jpeg");
+  headers.set("cache-control", "public, max-age=604800, immutable");
+  return new Response(upstream.body, { status: 200, headers });
+}
+
 /** Preview card for social crawlers, built from the params the pipeline sends.
  *
  * `self` MUST be this worker's own URL, not the Amazon link. og:url is how
@@ -154,6 +212,8 @@ export default {
     const q = u.searchParams;
     const path = u.pathname.replace(/\/+$/, "") || "/";
 
+    if (path === "/img") return proxyImage(u);
+
     if (path === "/terms")   return new Response(TERMS_HTML,   { headers: HTML_HEADERS });
     if (path === "/privacy") return new Response(PRIVACY_HTML, { headers: HTML_HEADERS });
 
@@ -182,8 +242,11 @@ export default {
     if (CRAWLERS.some((c) => L.includes(c))) {
       const img = (q.get("img") || "").trim();
       if (!img) return Response.redirect(dp, 302);
+      // Serve the image through our own /img so Facebook never has to fetch
+      // from Amazon, which 429s its crawler.
+      const proxied = `${u.origin}/img?u=${encodeURIComponent(img)}`;
       return new Response(
-        crawlerCard(u.toString(), dp, img, (q.get("t") || "").trim()), {
+        crawlerCard(u.toString(), dp, proxied, (q.get("t") || "").trim()), {
           status: 200,
           headers: HTML_HEADERS,
         });
