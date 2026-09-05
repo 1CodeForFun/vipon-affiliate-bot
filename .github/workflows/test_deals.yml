@@ -1,0 +1,61 @@
+name: TEST — Deals page probe
+
+# TEMPORARY diagnostic workflow. Delete along with test_deals_scrape.py once
+# the Amazon deals shortfall on CI is resolved.
+#
+# Runs the deals fetch ONLY — no sheet, no Vipon login, no video build — so it
+# finishes in ~2 minutes instead of the full pipeline's hour, and records what
+# Amazon actually serves the GitHub runner.
+#
+# Manual dispatch only: nothing schedules this.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tld:
+        description: 'Marketplace: com, ca, or both'
+        required: false
+        default: 'both'
+      scrolls:
+        description: 'Scroll rounds (default 8)'
+        required: false
+        default: '8'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Same Chrome install as scrape_and_build.yml, so the probe sees exactly
+      # what the real run sees. No secrets are needed: the deals page is public.
+      - name: Install Chrome
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y chromium-browser chromium-chromedriver
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Probe the deals page
+        run: |
+          python test_deals_scrape.py \
+            --tld "${{ github.event.inputs.tld || 'both' }}" \
+            --scrolls "${{ github.event.inputs.scrolls || '8' }}"
+
+      - name: Upload what Amazon served
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deals-probe
+          path: debug_artifacts/
+          if-no-files-found: warn
+          retention-days: 7

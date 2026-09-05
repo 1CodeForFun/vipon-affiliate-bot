@@ -26,7 +26,6 @@ Usage:
 
 import argparse
 import json
-import os
 import re
 import sys
 import time
@@ -39,11 +38,6 @@ import requests
 # and deepest-discounted items first, so quality is preserved by ordering
 # rather than by exclusion. Set AMAZON_MIN_PCT to reimpose a floor.
 MIN_PCT_DEFAULT = 0
-
-# Below this many deals, save a screenshot + page HTML to debug_artifacts/ so we
-# can see what Amazon served. The CI runner routinely gets single digits where a
-# home connection gets 300+.
-DEBUG_SNAPSHOT_BELOW = int(os.getenv("DEALS_DEBUG_BELOW") or "60")
 
 _UA = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -453,27 +447,6 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=14, want=0,
     except Exception as e:
         log(f"  brand deals: scrape error ({str(e)[:70]})")
     finally:
-        # Capture what Amazon actually served when the yield is poor. The CI
-        # runner gets a fraction of what a home connection does — 6 cards
-        # against 337 locally — and without a picture of the page there is no
-        # way to tell a throttled/empty grid from a captcha or a layout change.
-        # debug_artifacts/ is already uploaded by the scrape workflow.
-        try:
-            if len(found) < DEBUG_SNAPSHOT_BELOW:
-                d = os.path.join(os.getcwd(), "debug_artifacts")
-                os.makedirs(d, exist_ok=True)
-                stamp = time.strftime("%H%M%S")
-                png = os.path.join(d, f"deals_{tld}_{stamp}.png")
-                htm = os.path.join(d, f"deals_{tld}_{stamp}.html")
-                driver.save_screenshot(png)
-                with open(htm, "w", encoding="utf-8") as fh:
-                    fh.write(driver.page_source)
-                # Plain ASCII: this line has to survive the Windows cp1252
-                # console during local testing as well as UTF-8 on CI.
-                log(f"  [snapshot] only {len(found)} deals - saved "
-                    f"{os.path.basename(png)} + .html to debug_artifacts/")
-        except Exception as _e:
-            log(f"  (could not save deals snapshot: {_e.__class__.__name__})")
         try:
             driver.quit()
         except Exception:
