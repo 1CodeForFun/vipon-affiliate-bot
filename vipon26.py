@@ -636,6 +636,33 @@ BLOCKED_TITLE_KEYWORDS = [
     "nunchuck", "nunchaku",
 ]
 
+def _prescreen_tile(pid, title, has_code, existing_sigs=None) -> str:
+    """Should we skip this product WITHOUT opening its page?
+
+    Returns a short reason, or "" to go ahead and open it.
+
+    Opening a product page is what consumes Vipon reveal quota, and the listing
+    tile already tells us enough to reject the obvious losers. Measured on the
+    live listing: 37 of 92 tiles were deal-only, and blocked-keyword products
+    were previously only caught after the code had been revealed.
+
+    Deliberately conservative: a MISSING title or unknown code status means
+    open it as before. Only a definite negative skips.
+    """
+    if has_code is False:
+        return "deal-only (no promo code on tile)"
+    if not title:
+        return ""                      # nothing to judge on — open it
+    hit = _blocked_keyword_hit(title)
+    if hit:
+        return f"blocked keyword '{hit}'"
+    if existing_sigs:
+        sig = _title_signature(title)
+        if sig and sig in existing_sigs:
+            return f"near-duplicate of '{sig}'"
+    return ""
+
+
 def _blocked_keyword_hit(title: str) -> str:
     """Return the blocked keyword found in the title, or '' if the title is clean.
 
@@ -1701,6 +1728,35 @@ def fetch_amazon_images(driver, asin: str, tld: str = "com", max_imgs: int = 9) 
 #  TILE DISCOVERY
 # ════════════════════════════════════════════════════════════════
 
+# Read what each listing tile already shows, keyed by PID. Verified against the
+# live logged-in page: every tile carries the full title, and coupon listings
+# are labelled "Promo Code" while deal-only ones say "Price Drop". Tiles with a
+# code also carry the class `getpro`, so the two signals can corroborate.
+#
+# Tile text looks like:
+#   Verified | 50% OFF | Promo Code | 70 | $9.49 $18.99 | <full product title>
+# The title is the longest line that is not a price or a badge.
+TILE_META_JS = r"""
+const out = {};
+document.querySelectorAll('div.box.solid[data-id]').forEach(e => {
+  const id = e.getAttribute('data-id') || '';
+  if (!/^\d{6,}$/.test(id)) return;
+  const txt = e.innerText || '';
+  const parts = txt.split('\n').map(s => s.trim()).filter(Boolean);
+  const cands = parts.filter(p => p.length > 18 && !/^[\$\d%]/.test(p));
+  cands.sort((a, b) => b.length - a.length);
+  const img = e.querySelector('img');
+  out[id] = {
+    title: cands[0] || '',
+    image: img ? (img.getAttribute('src') || img.getAttribute('data-src') || '') : '',
+    has_code: /(^|\n)\s*Promo Code\s*(\n|$)/i.test(txt) ||
+              /\bgetpro\b/.test(String(e.className))
+  };
+});
+return out;
+"""
+
+
 def collect_promo_tiles_random(driver, wait, start_url: str = PROMO_URL):
     log(f"▶ Loading promotions (random scroll)… {start_url}")
     driver.get(start_url)
@@ -1757,10 +1813,29 @@ def collect_promo_tiles_random(driver, wait, start_url: str = PROMO_URL):
         driver.get(PROMO_URL); _dismiss_overlays(driver); time.sleep(2)
         pids = snapshot_pids()
 
+    # Read the tile text too. Verified on the live logged-in listing: 92 of 92
+    # tiles expose the full title, and the badge distinguishes real coupons
+    # ("Promo Code", 55 tiles) from deal-only listings ("Price Drop", 37).
+    # Opening a product page is what spends reveal quota, so knowing the title
+    # and whether a code even exists BEFORE opening lets us skip the ones we
+    # would only have thrown away afterwards.
+    meta = {}
+    try:
+        meta = driver.execute_script(TILE_META_JS) or {}
+    except Exception as _e:
+        log(f"  ⚠️ tile metadata unavailable ({_e.__class__.__name__}) — "
+            f"falling back to opening every product")
+
     random.shuffle(pids)
     pids = pids[:min(MAX_DISCOVERY, len(pids))]
-    log(f"✓ Discovered {len(pids)} product IDs")
-    return [(pid, "", "") for pid in pids]
+    coded = sum(1 for p in pids if (meta.get(str(p)) or {}).get("has_code"))
+    log(f"✓ Discovered {len(pids)} product IDs "
+        f"({len(meta)} with tile data, {coded} showing a promo code)")
+    return [(pid,
+             (meta.get(str(pid)) or {}).get("title", ""),
+             (meta.get(str(pid)) or {}).get("image", ""),
+             (meta.get(str(pid)) or {}).get("has_code", None))
+            for pid in pids]
 
 # ════════════════════════════════════════════════════════════════
 #  DISCOUNT CODE EXTRACTION
@@ -3176,6 +3251,7 @@ def main():
     # Every PID whose page we open this run, successful or not — written to the
     # rolling history so rejects are not reopened tomorrow.
     visited_us, visited_ca = set(), set()
+    prescreened_us = prescreened_ca = 0   # skipped without spending reveal quota
     scrape_start = time.time()                          # for the time-budget early stop
     _budget_sec  = EARLY_STOP_AFTER_MIN * 60
     def _time_up():
@@ -3229,11 +3305,21 @@ def main():
             except Exception as _e:
                 log(f"  ⚠️ Re-login after rotation failed: {_e.__class__.__name__} — continuing")
 
-        for pid, _, _ in tiles:
+        for pid, _tile_title, _tile_img, _has_code in tiles:
             if count >= us_target:
                 break
             if str(pid).strip() in us_pids:
                 continue                 # already on the sheet — don't re-scrape
+            # PRE-SCREEN, before the page is opened. Opening is what costs
+            # reveal quota, and roughly 40% of what we used to open was never
+            # usable: deal-only listings with no code, and products the keyword
+            # screen rejects only AFTER the code was spent.
+            skip = _prescreen_tile(pid, _tile_title, _has_code, _existing_sigs)
+            if skip:
+                prescreened_us += 1
+                log(f"  ⏭  {skip} — skipping PID {pid} without opening")
+                visited_us.add(str(pid).strip())
+                continue
             # Remember every PID we open, whatever the outcome, so tomorrow's run
             # does not reopen the ones that turn out to be rejects.
             visited_us.add(str(pid).strip())
@@ -3337,10 +3423,16 @@ def main():
         ca_count = 0
         ca_consecutive_fails = 0     # throttle fails since last CA rotation
         ca_rotations_no_success = 0  # how many CA accounts have been tried with 0 codes
-        for pid, _, _ in ca_tiles:
+        for pid, _tile_title, _tile_img, _has_code in ca_tiles:
             if ca_count >= ca_target:
                 break
             if str(pid).strip() in ca_pids:
+                continue
+            skip = _prescreen_tile(pid, _tile_title, _has_code, _existing_sigs)
+            if skip:
+                prescreened_ca += 1
+                log(f"  ⏭  {skip} — skipping PID {pid} without opening")
+                visited_ca.add(str(pid).strip())
                 continue
             visited_ca.add(str(pid).strip())   # record rejects too — see _write_pid_history
             time.sleep(REVEAL_PACE_SEC)
@@ -3424,6 +3516,9 @@ def main():
 
     finally:
         _write_account_state(ws.spreadsheet)
+        if prescreened_us or prescreened_ca:
+            log(f"  ⏭  pre-screened without opening: {prescreened_us} US, "
+                f"{prescreened_ca} CA — reveal quota not spent on these")
         # Union of visited and scraped: visited covers rejects, scraped covers the
         # rows written (and survives if the loop broke before a PID was recorded).
         _write_pid_history(
