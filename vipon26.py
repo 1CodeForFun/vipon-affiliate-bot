@@ -2908,11 +2908,17 @@ def _fetch_amazon_pool(tld, want, exclude_pids, exclude_sigs=None):
         log(f"  🎲 Amazon {tld}: this run asks for {floor}%+ "
             f"(floor {AMAZON_MIN_PCT}%)" if floor > 0
             else f"  🛍️ Amazon {tld}: taking the deals page unfiltered")
-        deals = fetch_brand_deals(floor, scrolls=16, tld=tld)
+        # Ask for a TARGET, and tell it what we already have, so it stops as
+        # soon as it has enough genuinely new deals instead of scrolling the
+        # whole grid every run. want*2 gives headroom for the keyword screen,
+        # near-duplicates and image failures that come after this.
+        deals = fetch_brand_deals(floor, scrolls=70, want=want * 2, tld=tld,
+                                  exclude_pids=exclude_pids)
         if len(deals) < want and floor > AMAZON_MIN_PCT:
             # Too few at the higher bar — drop back to the floor and top up.
             log(f"  ↳ only {len(deals)} at {floor}%+ — retrying at {AMAZON_MIN_PCT}%+")
-            extra = fetch_brand_deals(AMAZON_MIN_PCT, scrolls=16, tld=tld)
+            extra = fetch_brand_deals(AMAZON_MIN_PCT, scrolls=70, want=want * 2,
+                                      tld=tld, exclude_pids=exclude_pids)
             have  = {d["asin"] for d in deals}
             deals += [d for d in extra if d["asin"] not in have]
     except Exception as e:

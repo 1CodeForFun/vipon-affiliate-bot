@@ -378,15 +378,47 @@ def _new_driver(headless=True):
         return webdriver.Chrome(options=o)
 
 
-def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=14, want=0,
-                      headless=True, require_brand=False, tld="com"):
-    """Branded deals at >= min_pct, highest discount first. [] on failure.
+# Pull only the cards currently in the page, not the whole 1.5MB document.
+# The grid recycles cards constantly, so we read after every scroll; feeding
+# BeautifulSoup the entire page 50 times over is what made that too slow.
+_CARDS_JS = """
+const out = [];
+document.querySelectorAll('[data-testid="product-card"]').forEach(c => {
+  out.push(c.outerHTML);
+});
+return out;
+"""
 
-    Selenium is required, not a nicety. Fetching the same URL with requests
-    returns the UNFILTERED page — the percentOff refinement is applied by the
-    page's own JavaScript — so every card comes back at 13-36% and nothing
-    clears a 40% bar. `&page=N` is ignored too: all six pages returned the same
-    30 cards. Under a real browser the filter applies and scrolling loads more.
+
+def _wheel(driver, pixels=900):
+    """Scroll with a REAL mouse wheel event.
+
+    Measured on the GitHub runner, same page, same minute:
+        driver.execute_script("window.scrollBy(...)")  ->   6 deals
+        ActionChains(...).scroll_by_amount(...)        -> 496 deals
+    Amazon's grid only loads more when it sees genuine input; a scripted scroll
+    moves the viewport but triggers nothing, so the page sat at 4,256px for 24
+    rounds. Locally BOTH methods work (395 vs 494), which is exactly why this
+    never showed up in local testing.
+    """
+    from selenium.webdriver.common.action_chains import ActionChains
+    ActionChains(driver).scroll_by_amount(0, pixels).perform()
+
+
+def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=60, want=0,
+                      headless=True, require_brand=False, tld="com",
+                      exclude_pids=None):
+    """Deals, highest discount first, branded ahead of unbranded. [] on failure.
+
+    Selenium is required, not a nicety: fetching the same URL with `requests`
+    returns the unfiltered page, because the refinement is applied by the page's
+    own JavaScript.
+
+    `want` is a target of USABLE, NOT-ALREADY-SEEN deals. Pass `exclude_pids`
+    (the ASINs already on the sheet or in the recent history) and collection
+    stops as soon as that many genuinely new deals are in hand, instead of
+    scrolling the whole grid every run. Without a target it collects everything
+    the page will give.
     """
     driver = None
     try:
@@ -395,57 +427,57 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=14, want=0,
         log(f"  brand deals: cannot start Chrome ({str(e)[:70]})")
         return []
 
-    found, seen = [], set()
+    excl = {str(p) for p in (exclude_pids or ())}
+    found, seen, fresh = [], set(), 0
     try:
         driver.get(_goldbox_url(min_pct, 100, tld=tld))
-        time.sleep(6)                      # let the refinement apply
+        time.sleep(8)
         stalls, last_h = 0, 0
         for i in range(max(1, scrolls)):
-            got = [d for d in _parse_cards(driver.page_source, min_pct, require_brand)
+            # Read the cards present RIGHT NOW. They are unmounted as they
+            # scroll out of view, so a card missed this round is gone.
+            try:
+                html = "".join(driver.execute_script(_CARDS_JS) or [])
+            except Exception:
+                html = driver.page_source
+            got = [d for d in _parse_cards(html, min_pct, require_brand)
                    if d["asin"] not in seen]
             for d in got:
                 seen.add(d["asin"])
+                if d["asin"] not in excl:
+                    fresh += 1
             found += got
             if got:
-                log(f"  deals: +{len(got)} (total {len(found)})")
-            if want and len(found) >= want:
+                log(f"  deals: +{len(got)} (total {len(found)}, {fresh} new)")
+
+            # Stop as soon as we have enough deals we have not posted recently.
+            if want and fresh >= want:
+                log(f"  deals: reached {fresh} new deals (target {want}) "
+                    f"after {i+1} rounds")
                 break
 
-            # Walk DOWN the page rather than teleporting to the bottom. The grid
-            # lazy-loads off intersection observers as cards pass through the
-            # viewport; scrollTo(bottom) skips them, so the page stops growing
-            # and the run looks exhausted after two rounds when it is not.
-            driver.execute_script(
-                "window.scrollBy(0, window.innerHeight*2.5);")
-            time.sleep(2.0)
+            _wheel(driver, 900)
+            time.sleep(0.9)
 
             h = driver.execute_script("return document.body.scrollHeight;") or 0
             grew = h > last_h
             last_h = h
 
-            # Only when the page has stopped growing do we go looking for the
-            # "View more deals" button that ends the grid.
             clicked = False
             if not grew:
-                driver.execute_script(
-                    "window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(1.2)
                 clicked = _click_load_more(driver)
                 if clicked:
-                    time.sleep(3.0)
+                    time.sleep(3.5)
 
-            # A stall is no new cards AND no page growth AND no button. CI
-            # runners are slow enough that a single quiet round is routine, so
-            # only give up after several consecutive ones.
             if got or grew or clicked:
                 stalls = 0
             else:
                 stalls += 1
-                if stalls >= 4:
+                if stalls >= 8:
                     log(f"  deals: no more to load (after {i+1} rounds)")
                     break
     except Exception as e:
-        log(f"  brand deals: scrape error ({str(e)[:70]})")
+        log(f"  brand deals: scrape error ({e.__class__.__name__}: {str(e)[:70]})")
     finally:
         try:
             driver.quit()
