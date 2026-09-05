@@ -300,7 +300,8 @@ CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET = _load_cloudin
 CLOUDINARY_VIDEO_FOLDER = "vipon_reels"
 
 MAX_TILES_SNAPSHOT = 300
-WORKER_BASE        = "https://amz.ifreshdeals.workers.dev"
+WORKER_BASE        = (os.getenv("WORKER_BASE")
+                      or "https://amz.ifreshdeals.workers.dev")
 
 MAX_TITLE_LEN = 100
 
