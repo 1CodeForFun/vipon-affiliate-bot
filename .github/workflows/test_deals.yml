@@ -51,6 +51,13 @@ jobs:
             --tld "${{ github.event.inputs.tld || 'both' }}" \
             --scrolls "${{ github.event.inputs.scrolls || '8' }}"
 
+      # Scripted vs real-wheel scrolling, with continuous collection.
+      # Locally, headless, both marketplaces reach 400-500 deals either way.
+      # This is the identical test on the runner that returns single digits.
+      - name: Scroll-method comparison
+        if: always()
+        run: python test_wheel_scroll.py --tld "${{ github.event.inputs.tld || 'both' }}" --rounds 55
+
       - name: Upload what Amazon served
         if: always()
         uses: actions/upload-artifact@v4
