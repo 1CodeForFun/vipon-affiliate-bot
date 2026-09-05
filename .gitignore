@@ -53,3 +53,6 @@ geminipro.txt
 .env
 test.py
 output_image.png
+
+cf_deploy_token.txt
+cf_amz_account_id.txt
