@@ -111,7 +111,54 @@ def ensure_row_length(row, min_len):
     return row
 
 
+def prescrape_link(link: str, page_token: str, graph_api_version: str,
+                   tries: int = 3, delay: float = 2.0) -> bool:
+    """Make Facebook fetch and CACHE the link's preview before we post it.
+
+    Posting to /feed only QUEUES a scrape. When the post renders before that
+    scrape finishes, the card shows a blank image box — which is why opening
+    the post in the editor and waiting a couple of seconds makes the picture
+    appear: the editor forces a synchronous re-scrape that succeeds.
+
+    Sleeping after the post cannot fix that; the post already exists with an
+    empty card. So we scrape FIRST. POST ?id=<url>&scrape=true is synchronous
+    and returns the og: data Facebook extracted, so by the time the post is
+    created the preview is already in Facebook's cache.
+
+    Retries because the very first scrape of a brand-new URL occasionally comes
+    back without the image even when the page is correct. Returns True when
+    Facebook reports an image. A False is not fatal — we still post, and the
+    card simply behaves as it did before this function existed.
+    """
+    endpoint = f"https://graph.facebook.com/{graph_api_version}/"
+    for attempt in range(1, tries + 1):
+        try:
+            r = requests.post(endpoint,
+                              data={"id": link, "scrape": "true",
+                                    "access_token": page_token},
+                              timeout=TIMEOUT)
+            data = r.json() if r.content else {}
+            image = (data.get("image") or [])
+            img_url = image[0].get("url") if image else ""
+            if r.ok and img_url:
+                print(f"   ✓ FB pre-scrape cached image on attempt {attempt}")
+                return True
+            why = data.get("error", {}).get("message") or "no image in response"
+            print(f"   … FB pre-scrape attempt {attempt}/{tries}: {why}")
+        except Exception as e:
+            print(f"   … FB pre-scrape attempt {attempt}/{tries} failed: "
+                  f"{e.__class__.__name__}")
+        if attempt < tries:
+            time.sleep(delay)
+    print("   ⚠️ FB pre-scrape did not return an image — posting anyway")
+    return False
+
+
 def publish_link_post_to_facebook(page_id: str, page_token: str, graph_api_version: str, message: str, link: str):
+    # Warm Facebook's cache first so the card is populated the moment the post
+    # appears, instead of racing an asynchronous scrape.
+    prescrape_link(link, page_token, graph_api_version)
+
     url = f"https://graph.facebook.com/{graph_api_version}/{page_id}/feed"
     payload = {
         "message": message,
