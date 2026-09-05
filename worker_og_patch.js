@@ -97,6 +97,6 @@
      curl -sI "https://amz.ifreshdeals.workers.dev/?asin=B07FZ8S74R&tag=t-20&tld=com"   # 302
      curl -s  "https://amz.ifreshdeals.workers.dev/terms"   | head -2
      curl -s  "https://amz.ifreshdeals.workers.dev/privacy" | head -2
-     curl -s  "https://amz.ifreshdeals.workers.dev/tiktokEUViA1mjO0sRuVVGBp11d7eJV7fEj3AF.txt"
+     curl -s  "https://amz.ifreshdeals.workers.dev/tiktok<YOUR_VERIFY_FILE>.txt   # the TIKTOK_VERIFY_PATH in worker.js"
      curl -sI "https://amz.ifreshdeals.workers.dev/auth/start"                          # 302 tiktok
 */
