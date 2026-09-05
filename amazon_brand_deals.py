@@ -231,8 +231,17 @@ def _parse_cards(html, min_pct, require_brand=False):
                        r"deal\s+price\s*:?|was\s*:|now\s*:|price\s*:|with\s+coupon|"
                        r"save\s+\$\s?[\d,]+(?:\s?\.\s?\d+)?|save\s+extra",
                        " ", title, flags=re.I)
-        title = re.sub(r"\d+\s*%\s*off|save\s+\d+\s*%|limited time deal|"
-                       r"deal of the day|best seller|prime exclusive|ends? in\b[^|]*|"
+        # Badges. Amazon writes these with hyphens as often as spaces
+        # ("Limited-time deal"), and the old space-only pattern let the
+        # hyphenated form through — which is why sheet rows read
+        # "Limited-time deal Alienware Gaming Desktop". [\s-]+ covers both.
+        title = re.sub(r"\d+\s*%\s*off|save\s+\d+\s*%|"
+                       r"limited[\s-]+time[\s-]+(?:deal|offer)|"
+                       r"deal[\s-]+of[\s-]+the[\s-]+day|best[\s-]+seller|"
+                       r"prime[\s-]+exclusive(?:[\s-]+deal)?|"
+                       r"exclusive[\s-]+deal|lightning[\s-]+deal|"
+                       r"with[\s-]+coupon|clip[\s-]+coupon|coupon|"
+                       r"ends? in\b[^|]*|"
                        r"\$\s?[\d,]+(?:\s?\.\s?\d+)?",
                        " ", title, flags=re.I)
         # Orphaned cents left by a partially-stripped price ("$34." -> "99").

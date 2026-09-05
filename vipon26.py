@@ -596,8 +596,18 @@ BLOCKED_TITLE_KEYWORDS = [
     "smoking", "tobacco", "tobaco",
     "wine", "vodka", "whiskey", "whisky", "beer",
 
-    # Religious (brand-safety on faith-targeted pages)
-    "christian", "bible",
+    # Religious (brand-safety on faith-targeted pages).
+    # A bare "cross" is deliberately NOT listed: word-boundary matching would
+    # block "Cross Body Bag", "Cross Stitch Kit" and "Cross Training Sneakers"
+    # while still missing "Crucifix" and "Rosary". The phrases below catch the
+    # symbol as jewellery or decor, which is what actually needs filtering, and
+    # leave the ordinary senses of the word alone. "crosses" is safe on its own
+    # — as a plural noun in a product title it is essentially always the symbol.
+    "christian", "bible", "jesus", "crucifix", "rosary", "crosses",
+    "cross necklace", "cross pendant", "cross bracelet", "cross charm",
+    "cross earring", "cross ring", "cross jewelry", "cross jewellery",
+    "cross keychain", "cross decor", "cross wall", "cross statue",
+    "cross sign", "cross art",
 
     # ── Adult / sexual entertainment ──────────────────────────────────────────
     "anal",          # covers "anal plug", "anal beads", etc. — \b...\b won't match "analysis"
@@ -2996,14 +3006,23 @@ def _write_amazon_row(ws, pool, tld, ws_p=None, visited=None):
     sheet itself, and once a row was consumed the deal was eligible again the
     next day. That is why deals kept repeating.
     """
+    tried = dropped_img = errored = 0
     while pool:
         d = pool.pop(0)
+        tried += 1
         try:
             prod = _amazon_deal_to_product(d, tld)
         except Exception as e:
+            errored += 1
             log(f"  ⚠️ Amazon deal {d.get('asin')} failed: {e.__class__.__name__}")
             continue
         if not prod:
+            # Only reason _amazon_deal_to_product returns None is no image.
+            # Counting these makes a shrinking pool visible in the log instead
+            # of the run just quietly writing fewer rows than it asked for.
+            dropped_img += 1
+            if dropped_img <= 5:
+                log(f"  ⊘ no image for {d.get('asin')} — {str(d.get('title'))[:40]}")
             continue
         try:
             _write_product_row(ws, prod, tld=tld, ws_p=ws_p)
@@ -3013,7 +3032,12 @@ def _write_amazon_row(ws, pool, tld, ws_p=None, visited=None):
             log(f"🛒 Amazon row: {d['pct']}% off{tag} — {d['title'][:52]}")
             return True
         except Exception as e:
-            log(f"  ⚠️ Amazon row write failed: {e.__class__.__name__}")
+            errored += 1
+            log(f"  ⚠️ Amazon row write failed: {e.__class__.__name__}: {str(e)[:80]}")
+    # Pool exhausted without landing a row. Say why, so a short Amazon count in
+    # the sheet points at the cause instead of just being a smaller number.
+    log(f"  ⊘ Amazon pool exhausted after {tried} candidate(s): "
+        f"{dropped_img} had no image, {errored} errored")
     return False
 
 
