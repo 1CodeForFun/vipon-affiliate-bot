@@ -117,23 +117,34 @@ No sale of personal data.</p>
 <h2>Changes</h2><p>We may update this policy.</p>
 <h2>Contact</h2><p><a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a></p>`;
 
-/** Preview card for social crawlers, built from the params the pipeline sends. */
-function crawlerCard(dp, img, title) {
+/** Preview card for social crawlers, built from the params the pipeline sends.
+ *
+ * `self` MUST be this worker's own URL, not the Amazon link. og:url is how
+ * Facebook decides which page the card actually represents: pointing it at
+ * Amazon made Facebook treat the Amazon page as the canonical object and
+ * re-scrape THAT, where there is no og:image — so the card came back with a
+ * title (from Amazon's <title>) and a blank picture, labelled AMAZON.COM.
+ * canonical and the meta refresh did the same thing. All three now stay on
+ * this page so the image we supply is the one Facebook uses.
+ *
+ * Humans never see this page; they get the 302 further down.
+ */
+function crawlerCard(self, dp, img, title) {
   const ttl = title || "Today's Amazon deal";
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>${esc(ttl)}</title>
-<link rel="canonical" href="${esc(dp)}">
+<link rel="canonical" href="${esc(self)}">
 <meta property="og:type" content="product">
+<meta property="og:site_name" content="${BRAND}">
 <meta property="og:title" content="${esc(ttl)}">
 <meta property="og:description" content="Limited-time Amazon deal. Tap to see the current price.">
-<meta property="og:url" content="${esc(dp)}">
+<meta property="og:url" content="${esc(self)}">
 <meta property="og:image" content="${esc(img)}">
 <meta property="og:image:secure_url" content="${esc(img)}">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="${esc(ttl)}">
 <meta name="twitter:image" content="${esc(img)}">
-<meta http-equiv="refresh" content="0;url=${esc(dp)}">
 </head><body><a href="${esc(dp)}">${esc(ttl)}</a></body></html>`;
 }
 
@@ -171,10 +182,11 @@ export default {
     if (CRAWLERS.some((c) => L.includes(c))) {
       const img = (q.get("img") || "").trim();
       if (!img) return Response.redirect(dp, 302);
-      return new Response(crawlerCard(dp, img, (q.get("t") || "").trim()), {
-        status: 200,
-        headers: HTML_HEADERS,
-      });
+      return new Response(
+        crawlerCard(u.toString(), dp, img, (q.get("t") || "").trim()), {
+          status: 200,
+          headers: HTML_HEADERS,
+        });
     }
 
     const isAndroid = L.includes("android");
