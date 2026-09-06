@@ -37,6 +37,10 @@ const BRAND         = "FreshDeals US";
 const CONTACT_EMAIL = "ifreshdeals@gmail.com";
 const LAST_UPDATED  = "2025-10-19";
 
+// Cloudinary account used only to pad product photos to Facebook's large-card
+// shape. The cloud name appears in every delivery URL and is not a secret.
+const CLOUDINARY_CLOUD = "diufrf8l7";
+
 const AMAZON_ANDROID_PKG = "com.amazon.mShop.android.shopping";
 const AMAZON_IOS_APP_ID  = "297606951";
 
@@ -152,18 +156,42 @@ async function proxyImage(u) {
     return new Response("Image host not allowed", { status: 403 });
   }
 
-  const upstream = await fetch(target.toString(), {
-    headers: {
-      // Amazon is friendlier to a browser-shaped request than to a bare fetch.
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-      "Accept": "image/avif,image/webp,image/jpeg,image/png,*/*;q=0.8",
-      "Referer": "https://www.amazon.com/",
-    },
-    cf: { cacheEverything: true, cacheTtl: 604800 },   // 7 days at the edge
-  });
+  // Amazon product photos are TALL (the Hanes hoodie is 1026x1500, ratio 0.68).
+  // Facebook only renders the wide banner card for images near 1.91:1 and at
+  // least 600x315; a portrait image gets the compact layout instead — small
+  // thumbnail, text taking the rest. Cloudinary pads the photo onto a
+  // 1200x630 white canvas, which is exactly the large-card shape. Verified:
+  // 1200x630, ratio 1.90, 25KB.
+  const padded = `https://res.cloudinary.com/${CLOUDINARY_CLOUD}/image/fetch/` +
+                 `c_pad,w_1200,h_630,b_white,f_auto,q_auto/` +
+                 encodeURIComponent(target.toString());
 
-  if (!upstream.ok) {
+  const fetchHeaders = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                  "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "image/avif,image/webp,image/jpeg,image/png,*/*;q=0.8",
+    // Amazon is friendlier to a browser-shaped request than to a bare fetch.
+    "Referer": "https://www.amazon.com/",
+  };
+
+  // Padded version first; the raw Amazon image is the fallback so a Cloudinary
+  // outage degrades to the previous behaviour rather than to no image at all.
+  let upstream = null;
+  try {
+    upstream = await fetch(padded, { cf: { cacheEverything: true, cacheTtl: 604800 } });
+    if (!upstream.ok) upstream = null;
+  } catch { upstream = null; }
+
+  if (!upstream) {
+    try {
+      upstream = await fetch(target.toString(), {
+        headers: fetchHeaders,
+        cf: { cacheEverything: true, cacheTtl: 604800 },
+      });
+    } catch { upstream = null; }
+  }
+
+  if (!upstream || !upstream.ok) {
     // Do not hand Facebook an error page: fall back to the original URL so the
     // behaviour is no worse than pointing og:image straight at Amazon.
     return Response.redirect(target.toString(), 302);
@@ -200,6 +228,9 @@ function crawlerCard(self, dp, img, title) {
 <meta property="og:url" content="${esc(self)}">
 <meta property="og:image" content="${esc(img)}">
 <meta property="og:image:secure_url" content="${esc(img)}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:type" content="image/jpeg">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="${esc(ttl)}">
 <meta name="twitter:image" content="${esc(img)}">
