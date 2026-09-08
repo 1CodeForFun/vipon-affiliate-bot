@@ -451,6 +451,44 @@ def _thumb_as_jpeg(path: str) -> str:
         return path
 
 
+def _yt_aftercare(video_id: str, product: dict, token_file: str) -> None:
+    """After a Short goes live: refresh the bio list, and comment its own link.
+
+    Both are best-effort. A failure here must never fail the publish — the video
+    is already up, and the link is still in its description either way.
+    """
+    link  = (product.get("yt_link") or product.get("link") or "").strip()
+    title = (product.get("title") or "").strip()
+    if not link:
+        log("  YT aftercare: no affiliate link on the row — skipping")
+        return
+
+    try:
+        import yt_bio_queue as Q
+        token = Q._access_token(token_file)
+    except Exception as e:
+        log(f"  YT aftercare: unavailable ({e.__class__.__name__}: {str(e)[:90]})")
+        return
+
+    try:
+        Q.push(title, link, token=token)
+    except Exception as e:
+        log(f"  YT bio update failed ({e.__class__.__name__}: {str(e)[:90]})")
+
+    # The API cannot pin a comment — commentThreads exposes only insert and
+    # list, and no isPinned field exists in the v3 schema. Posted as the
+    # channel so it can be pinned by hand in Studio.
+    if video_id:
+        code = (product.get("code") or "").strip()
+        body = (f"🛒 {Q.short_title(title)}\n{link}"
+                + (f"\n🏷️ Use code {code} at checkout" if code else "")
+                + "\n\nAs an Amazon Associate we earn from qualifying purchases.")
+        try:
+            Q.comment_on_video(video_id, body, token=token)
+        except Exception as e:
+            log(f"  YT comment failed ({e.__class__.__name__}: {str(e)[:90]})")
+
+
 def post_youtube_short(video_url: str, title: str, description: str,
                        yt_token_file: str = None, thumbnail_path: str = None) -> str:
     video_bytes = _download_video(video_url)
@@ -601,9 +639,20 @@ def main() -> None:
             if not os.path.exists(yt_file):
                 log(f"  warning: {yt_file} not found — skipping"); continue
             try:
-                post_youtube_short(video_url, title, yt_desc, yt_token_file=yt_file,
-                                   thumbnail_path=thumb_path)
+                _vid = post_youtube_short(video_url, title, yt_desc,
+                                          yt_token_file=yt_file,
+                                          thumbnail_path=thumb_path)
                 yt_success = True
+                # The voiceover now says "today's links are in the bio", so the
+                # bio has to carry them. Push this product onto the top of the
+                # list; the oldest falls off. Driven from here rather than the
+                # scrape so the bio always reflects what was actually
+                # published, in publish order.
+                #
+                # Only for the FreshDeals channel — that is the one the VO names
+                # and the one the bio belongs to.
+                if yt_file == YT_TOKEN_FILE:
+                    _yt_aftercare(_vid, product, yt_file)
             except Exception as e:
                 log(f"ERROR (YT {yt_label}): {e}"); errors.append(f"YT-{yt_label}: {e}")
 
