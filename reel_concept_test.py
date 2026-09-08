@@ -28,6 +28,7 @@ import base64
 import hashlib
 import json
 import math
+import random
 import os
 import re
 import struct
@@ -625,6 +626,43 @@ def gen_beats(duration, td, ffmpeg):
         return out
 
 # ─── REUSABLE BUILDER ──────────────────────────────────────────────────────────
+# Spoken sign-off, appended to the voiceover at BUILD time only.
+#
+# Deliberately not added to Column O: that same text is also the Facebook post
+# body (FBP_ready.py reads it), and on Facebook the link is already a clickable
+# card right under the post — telling those viewers to look in a bio or
+# description would point them at nothing.
+#
+# "Bio" is the right word on YouTube, TikTok and Instagram alike, and it stays
+# true as the daily list changes. Note it says TODAY'S links, not "this
+# product's link": the channel bio is refreshed daily, so a video watched next
+# week would otherwise promise a link that is no longer listed.
+#
+# ~9 words is roughly 3 seconds. Reels currently run 14-17s, so this lands
+# inside the 20s target without shortening the deal copy.
+_VO_CTA_LINES = [
+    "Today's links are in the bio — follow Fresh Deals for more.",
+    "All of today's links are in the bio, so follow us for daily deals.",
+    "Grab today's links from the bio, and follow for more deals like this.",
+    "Today's deals are linked in the bio — hit follow so you don't miss the next one.",
+    "Links to today's picks are in the bio. Follow Fresh Deals for more savings.",
+]
+
+
+def _append_cta(vo_text: str) -> str:
+    """Add the spoken call-to-action to the end of the voiceover."""
+    txt = (vo_text or "").strip()
+    if not txt:
+        return txt
+    # Already ends with a CTA (e.g. a re-run on an old row) — don't stack them.
+    low = txt.lower()
+    if "in the bio" in low or "follow fresh deals" in low:
+        return txt
+    if txt[-1] not in ".!?":
+        txt += "."
+    return f"{txt} {random.choice(_VO_CTA_LINES)}"
+
+
 def build_concept_video(p, keys, ffmpeg, font, td, vo_text=None, tld="com"):
     """Build the v4 concept reel and return the LOCAL mp4 path (no upload).
 
@@ -637,6 +675,7 @@ def build_concept_video(p, keys, ffmpeg, font, td, vo_text=None, tld="com"):
 
     if not vo_text:
         vo_text, _piece2, _expd = build_fb_pieces(p, keys)
+    vo_text = _append_cta(vo_text)
     log(f"  VO text: {vo_text[:90]}…")
 
     imgs, shot, pw, ph, price_box, rev_box, title_box, _social = capture_page(
