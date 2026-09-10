@@ -315,6 +315,13 @@ export default {
     // The redirect is still instant for everyone else; only iOS pays the extra
     // hop, and only because a 302 could never open the app for them.
     if (isIOS) {
+      // Amazon's iOS app registers this scheme. Unlike a Universal Link it does
+      // not depend on a genuine tap gesture, and it is not disabled once the
+      // user has picked "open in browser" for amazon.com — which is why the
+      // https:// version kept landing in the browser. Same class of mechanism
+      // as the intent:// already used on Android, which is why Android worked
+      // and iOS did not.
+      const appUrl = `com.amazon.mobile.shopping.web://${dp.replace(/^https:\/\//, "")}`;
       const html = `<!doctype html><html><head>
 <meta charset="utf-8"><title>Opening in Amazon…</title>
 <meta property="al:ios:url" content="${esc(dp)}">
@@ -325,20 +332,43 @@ export default {
 <meta name="apple-itunes-app" content="app-id=${AMAZON_IOS_APP_ID}">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>${PAGE_CSS}
-.wrap{text-align:center;margin-top:18vh}
+.wrap{text-align:center;margin-top:16vh}
 a.go{display:inline-block;background:#FFD814;border:1px solid #FCD200;border-radius:999px;
-padding:16px 30px;font-size:19px;font-weight:600;color:#0F1111;text-decoration:none}
-p.sub{color:#565959;font-size:14px;margin-top:14px}</style>
+padding:16px 32px;font-size:19px;font-weight:600;color:#0F1111;text-decoration:none}
+p.sub{color:#565959;font-size:14px;margin-top:16px}
+a.web{color:#007185;font-size:14px}</style>
 </head><body>
 <div class="wrap">
 <p>Your deal is ready.</p>
-<p><a class="go" id="go" href="${esc(dp)}">Open in Amazon</a></p>
-<p class="sub">Opens the Amazon app if you have it installed.</p>
+<p><a class="go" id="go" href="${esc(appUrl)}">Open in Amazon</a></p>
+<p class="sub"><a class="web" id="web" href="${esc(dp)}">or continue in the browser</a></p>
 </div>
 <script>
-  // A tap is what triggers the Universal Link, so try a synthetic one first and
-  // leave the button for anyone it does not work for.
-  setTimeout(function(){ try { document.getElementById('go').click(); } catch(e){} }, 350);
+(function(){
+  var app = ${JSON.stringify(appUrl)};
+  var web = ${JSON.stringify(dp)};
+  var go  = document.getElementById('go');
+
+  // No synthetic click. iOS fires Universal Links only on a genuine user
+  // gesture, so a scripted click cannot open the app — it just navigates to
+  // the web URL, which is what made the previous version behave exactly like
+  // the redirect it replaced.
+  go.addEventListener('click', function(e){
+    e.preventDefault();
+    var left = false;
+    // If the app takes over, the page is backgrounded and these fire.
+    function bail(){ left = true; }
+    document.addEventListener('visibilitychange', function(){
+      if (document.hidden) bail();
+    });
+    window.addEventListener('pagehide', bail);
+
+    location.href = app;          // custom scheme: opens the app directly
+
+    // Nothing happened after 1.2s means the app is not installed.
+    setTimeout(function(){ if (!left && !document.hidden) location.href = web; }, 1200);
+  });
+})();
 </script>
 </body></html>`;
       return new Response(html, { headers: NO_STORE });
