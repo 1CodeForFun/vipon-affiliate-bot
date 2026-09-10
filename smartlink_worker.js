@@ -301,8 +301,20 @@ export default {
     const isInApp   = L.includes("fban") || L.includes("fbav") ||
                       L.includes("fbios") || L.includes("instagram");
 
-    // In-app on iOS: App Links let Facebook/Instagram offer "Open in Amazon".
-    if (isInApp && isIOS) {
+    // ALL iOS visitors get this page — not just the Facebook/Instagram in-app
+    // browser, which is what it used to be limited to.
+    //
+    // WHY: iOS does not fire Universal Links for a URL pasted into Safari's
+    // address bar. That is Apple's behaviour, so a viewer who copies the link
+    // out of a video description and pastes it always landed on the website —
+    // signed out, no saved payment or address — however the redirect was
+    // written. Tapping a link INSIDE a page does fire Universal Links, so
+    // serving a page with a tappable link is the only way to reach the app
+    // from a pasted URL.
+    //
+    // The redirect is still instant for everyone else; only iOS pays the extra
+    // hop, and only because a 302 could never open the app for them.
+    if (isIOS) {
       const html = `<!doctype html><html><head>
 <meta charset="utf-8"><title>Opening in Amazon…</title>
 <meta property="al:ios:url" content="${esc(dp)}">
@@ -312,16 +324,25 @@ export default {
 <meta property="al:web:should_fallback" content="true">
 <meta name="apple-itunes-app" content="app-id=${AMAZON_IOS_APP_ID}">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<style>${PAGE_CSS}</style>
+<style>${PAGE_CSS}
+.wrap{text-align:center;margin-top:18vh}
+a.go{display:inline-block;background:#FFD814;border:1px solid #FCD200;border-radius:999px;
+padding:16px 30px;font-size:19px;font-weight:600;color:#0F1111;text-decoration:none}
+p.sub{color:#565959;font-size:14px;margin-top:14px}</style>
 </head><body>
-<p>Opening in Amazon…</p>
-<p>If nothing happens, Facebook should show <b>Open in Amazon</b> at the top.</p>
-<p><a class="btn" href="${esc(dp)}">Continue on the web</a></p>
+<div class="wrap">
+<p>Your deal is ready.</p>
+<p><a class="go" id="go" href="${esc(dp)}">Open in Amazon</a></p>
+<p class="sub">Opens the Amazon app if you have it installed.</p>
+</div>
+<script>
+  // A tap is what triggers the Universal Link, so try a synthetic one first and
+  // leave the button for anyone it does not work for.
+  setTimeout(function(){ try { document.getElementById('go').click(); } catch(e){} }, 350);
+</script>
 </body></html>`;
       return new Response(html, { headers: NO_STORE });
     }
-
-    if (isIOS) return Response.redirect(dp, 302);
 
     if (isAndroid) {
       // Correct intent:// syntax. The previous version had markdown link
