@@ -1215,7 +1215,7 @@ def _build_affiliate_dp_link(asin: str, tld: str = "com") -> str:
     return base + f"{sep}tag={tag}"
 
 def _worker_smartlink(asin: str, tag: str, tld: str = "com",
-                      image: str = "", title: str = "") -> str:
+                      image: str = "", title: str = "", cart: bool = False) -> str:
     """Affiliate smartlink. image/title are optional and only feed link previews.
 
     Amazon product pages carry NO Open Graph tags at all — verified against both
@@ -1236,6 +1236,10 @@ def _worker_smartlink(asin: str, tag: str, tld: str = "com",
     if not WORKER_BASE:
         return dp
     params = {"asin": asin.upper(), "tag": tag, "tld": tld}
+    # Add-to-cart instead of the product page. Only for Amazon deals, where the
+    # discount is already in the price — see _amazon_deal_to_product.
+    if cart:
+        params["cart"] = "1"
     if image:
         params["img"] = image
     if title:
@@ -1244,8 +1248,8 @@ def _worker_smartlink(asin: str, tag: str, tld: str = "com",
     return f"{WORKER_BASE}/a?{qs}"
 
 def get_affiliate_link(asin: str, tld: str = "com",
-                       image: str = "", title: str = "") -> str:
-    link = _worker_smartlink(asin, AFFILIATE_ID, tld, image, title)
+                       image: str = "", title: str = "", cart: bool = False) -> str:
+    link = _worker_smartlink(asin, AFFILIATE_ID, tld, image, title, cart)
     if os.getenv("VIPON_SHORT_LINK", "0") in ("1","true","TRUE","yes","YES"):
         try:
             resp = requests.get("http://tinyurl.com/api-create.php",
@@ -1256,16 +1260,16 @@ def get_affiliate_link(asin: str, tld: str = "com",
             pass
     return link
 
-def get_platform_links(asin: str, tld: str = "com") -> dict:
+def get_platform_links(asin: str, tld: str = "com", cart: bool = False) -> dict:
     if not asin:
         return {"reel": "", "ig": "", "youtube": "", "tiktok": "", "pinterest": ""}
     asin = asin.upper()
     return {
-        "reel":      _worker_smartlink(asin, TAG_REEL,      tld),
-        "ig":        _worker_smartlink(asin, TAG_IG,        tld),
-        "youtube":   _worker_smartlink(asin, TAG_YOUTUBE,   tld),
-        "tiktok":    _worker_smartlink(asin, TAG_TIKTOK,    tld),
-        "pinterest": _worker_smartlink(asin, TAG_PINTEREST, tld),
+        "reel":      _worker_smartlink(asin, TAG_REEL,      tld, cart=cart),
+        "ig":        _worker_smartlink(asin, TAG_IG,        tld, cart=cart),
+        "youtube":   _worker_smartlink(asin, TAG_YOUTUBE,   tld, cart=cart),
+        "tiktok":    _worker_smartlink(asin, TAG_TIKTOK,    tld, cart=cart),
+        "pinterest": _worker_smartlink(asin, TAG_PINTEREST, tld, cart=cart),
     }
 
 # ════════════════════════════════════════════════════════════════
@@ -3051,14 +3055,19 @@ def _amazon_deal_to_product(d, tld):
     if not imgs:
         return None
 
+    # Amazon deals go straight to the cart: the discount is already in the
+    # price, so the cart shows what the video promised. Vipon coded products
+    # deliberately do NOT — their price only drops once the code is entered at
+    # checkout, so a cart would show the full list price at the moment of
+    # commitment (measured: $24.99 in cart for a product advertised at $12.49).
     if tld == "ca":
-        links = {k: _worker_smartlink(asin, AFFILIATE_ID_CA, tld)
+        links = {k: _worker_smartlink(asin, AFFILIATE_ID_CA, tld, cart=True)
                  for k in ("reel", "ig", "youtube", "tiktok", "pinterest")}
         primary = _worker_smartlink(asin, AFFILIATE_ID_CA, tld,
-                                    imgs[0], d["title"])
+                                    imgs[0], d["title"], cart=True)
     else:
-        links = get_platform_links(asin, tld)
-        primary = get_affiliate_link(asin, tld, imgs[0], d["title"])
+        links = get_platform_links(asin, tld, cart=True)
+        primary = get_affiliate_link(asin, tld, imgs[0], d["title"], cart=True)
     return {
         "pid":        asin,                 # no Vipon PID — the ASIN is the key
         "title":      d["title"],

@@ -262,7 +262,20 @@ export default {
       return new Response("Missing or invalid asin/tag", { status: 400 });
     }
 
-    const dp = `https://www.amazon.${tld}/dp/${asin}?tag=${encodeURIComponent(tag)}`;
+    // cart=1 sends the shopper to Amazon's add-to-cart confirmation instead of
+    // the product page. Set by the pipeline for AMAZON DEALS only, where the
+    // discount is already in the price. Vipon coded products deliberately do
+    // NOT use it: their price only drops once the code is entered at checkout,
+    // so the cart would show the full list price right at the moment of
+    // commitment (verified: $24.99 in cart for a product advertised at $12.49).
+    //
+    // Absent the parameter this is byte-identical to before, so every link
+    // already published is unaffected.
+    const wantCart = (q.get("cart") || "") === "1";
+    const dp = wantCart
+      ? `https://www.amazon.${tld}/gp/aws/cart/add.html` +
+        `?AssociateTag=${encodeURIComponent(tag)}&ASIN.1=${asin}&Quantity.1=1`
+      : `https://www.amazon.${tld}/dp/${asin}?tag=${encodeURIComponent(tag)}`;
 
     const ua = request.headers.get("user-agent") || "";
     const L  = ua.toLowerCase();
@@ -315,7 +328,7 @@ export default {
       // syntax baked into this string, so it never parsed and every Android
       // visitor silently fell through to the web fallback.
       const androidIntent =
-        `intent://www.amazon.${tld}/dp/${asin}?tag=${encodeURIComponent(tag)}` +
+        `intent://${dp.replace(/^https:\/\//, "")}` +
         `#Intent;scheme=https;package=${AMAZON_ANDROID_PKG};` +
         `S.browser_fallback_url=${encodeURIComponent(dp)};end`;
 
