@@ -50,6 +50,17 @@ GOOGLE_CREDS_FILE = "vipon_google_creds.json"
 
 # ── Canada market ────────────────────────────────────────────────
 AFFILIATE_ID_CA    = "fdcanada00-20"   # single tag for all CA platforms (amazon.ca)
+
+# US AMAZON DEALS get their own tracking ID so their clicks can be told apart
+# from Vipon's in Associates reporting. Amazon reports by tracking ID only —
+# there is no per-link breakdown — so sharing one ID across both sources made
+# it impossible to tell which was producing clicks. Confirmed unused before
+# adopting it: 0 clicks and $0 for Sep 1-9.
+#
+# Vipon products keep the existing per-platform tags, so their platform split
+# is preserved; deals trade that breakdown for source attribution, which is
+# the question actually worth answering right now.
+AFFILIATE_ID_DEALS = os.getenv("AFFILIATE_ID_DEALS") or "fdcanada00-20"
 AMAZON_TLD_CA      = "ca"
 SHEET2_TAB         = "Sheet2"          # Canada products sheet
 SELLER_FORM_TAB_CA = "Form Responses 3" # Canada seller form responses
@@ -3066,8 +3077,12 @@ def _amazon_deal_to_product(d, tld):
         primary = _worker_smartlink(asin, AFFILIATE_ID_CA, tld,
                                     imgs[0], d["title"], cart=True)
     else:
-        links = get_platform_links(asin, tld, cart=True)
-        primary = get_affiliate_link(asin, tld, imgs[0], d["title"], cart=True)
+        # One tag across all six links so every deals click lands in the same
+        # bucket, whatever platform it came from.
+        links = {k: _worker_smartlink(asin, AFFILIATE_ID_DEALS, tld, cart=True)
+                 for k in ("reel", "ig", "youtube", "tiktok", "pinterest")}
+        primary = _worker_smartlink(asin, AFFILIATE_ID_DEALS, tld,
+                                    imgs[0], d["title"], cart=True)
     return {
         "pid":        asin,                 # no Vipon PID — the ASIN is the key
         "title":      d["title"],
