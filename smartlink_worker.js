@@ -271,7 +271,12 @@ export default {
     //
     // Absent the parameter this is byte-identical to before, so every link
     // already published is unaffected.
-    const wantCart = (q.get("cart") || "") === "1";
+    // DISABLED. Add-to-cart was trialled for Amazon deals and reverted: clicks
+    // collapsed while it was live. Forced off here rather than only in the
+    // pipeline so that links ALREADY PUBLISHED carrying cart=1 also go back to
+    // the product page, instead of sending people to a cart indefinitely.
+    // Flip to the commented line to trial it again.
+    const wantCart = false;   // (q.get("cart") || "") === "1";
     const dp = wantCart
       ? `https://www.amazon.${tld}/gp/aws/cart/add.html` +
         `?AssociateTag=${encodeURIComponent(tag)}&ASIN.1=${asin}&Quantity.1=1`

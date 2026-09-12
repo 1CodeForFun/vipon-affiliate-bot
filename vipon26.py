@@ -3066,23 +3066,22 @@ def _amazon_deal_to_product(d, tld):
     if not imgs:
         return None
 
-    # Amazon deals go straight to the cart: the discount is already in the
-    # price, so the cart shows what the video promised. Vipon coded products
-    # deliberately do NOT — their price only drops once the code is entered at
-    # checkout, so a cart would show the full list price at the moment of
-    # commitment (measured: $24.99 in cart for a product advertised at $12.49).
+    # Add-to-cart links were tried for deals and reverted: clicks collapsed
+    # while they were live. Deals go to the product page like everything else.
+    # The separate tracking ID stays, so deals and Vipon remain distinguishable
+    # in Associates reporting.
     if tld == "ca":
-        links = {k: _worker_smartlink(asin, AFFILIATE_ID_CA, tld, cart=True)
+        links = {k: _worker_smartlink(asin, AFFILIATE_ID_CA, tld)
                  for k in ("reel", "ig", "youtube", "tiktok", "pinterest")}
         primary = _worker_smartlink(asin, AFFILIATE_ID_CA, tld,
-                                    imgs[0], d["title"], cart=True)
+                                    imgs[0], d["title"])
     else:
         # One tag across all six links so every deals click lands in the same
         # bucket, whatever platform it came from.
-        links = {k: _worker_smartlink(asin, AFFILIATE_ID_DEALS, tld, cart=True)
+        links = {k: _worker_smartlink(asin, AFFILIATE_ID_DEALS, tld)
                  for k in ("reel", "ig", "youtube", "tiktok", "pinterest")}
         primary = _worker_smartlink(asin, AFFILIATE_ID_DEALS, tld,
-                                    imgs[0], d["title"], cart=True)
+                                    imgs[0], d["title"])
     return {
         "pid":        asin,                 # no Vipon PID — the ASIN is the key
         "title":      d["title"],
