@@ -104,39 +104,54 @@ frustrating moment — BEFORE they found the product. This frame opens the video
 must make a scrolling viewer think "that is exactly me" and stop.
 
 STEP 1 — DERIVE THE WORLD FROM THE PRODUCT (do this first, it drives everything):
-Decide the room or place where this product is ACTUALLY used, then pick lighting and
-a colour palette that belong to that world. Match the product category:
-  • Outdoor / garden / patio / sports -> real daylight, open sky, greenery,
-      warm golden-hour or bright midday sun, saturated natural colour
-  • Beauty / skincare / hair -> clean bright bathroom or vanity, soft flattering
-      light, warm creamy tones, gentle highlights
-  • Kitchen / food -> warm domestic kitchen, appetising warm light, rich colour
-  • Bedroom / sleep / comfort -> cosy bedroom, soft warm lamplight, inviting textures
-  • Fitness / wellness -> bright gym or sunlit home space, energetic clean light
-  • Office / tech -> tidy desk with natural window light
-  • Cleaning / storage / garage -> the real utility space, but still naturally lit
+Decide the room or place where this product is ACTUALLY used — the real one, not a
+generic interior. Kitchen, patio, bathroom vanity, car footwell, garage shelf,
+hallway, desk, laundry room, bedside table at 3am: be specific.
+
+THE LOOK IS ASSIGNED, NOT CHOSEN. Use exactly this lighting and colour treatment:
+
+    {look}
+
+Build the scene so that look makes sense — pick the time of day, the window, the
+lamp or the weather that would actually produce it. If it genuinely cannot exist in
+the room you chose, move to the nearest room where it can, or adjust the time of
+day. Do NOT quietly substitute warm golden light: that is what made every previous
+image look identical, and variety is the whole point of this instruction.
+
 The frustration must come from the PERSON'S BODY LANGUAGE AND THE SITUATION — never
-from making the room dark, grim or depressing. Do NOT default to cold, drab, grey,
-industrial, warehouse or basement settings. A cheerful, well-lit room containing a
-visibly frustrated person is far more relatable, and far more clickable, than a
-gloomy one. Never depict despair, illness, injury or distress.
+from making the room dark, grim or depressing. Whatever the assigned colour
+temperature, the space itself should look like somewhere real people live and
+would happily be. Do NOT drift to drab, industrial, warehouse or basement settings.
+A well-kept room containing a visibly frustrated person is far more relatable, and
+far more clickable, than a gloomy one. Never depict despair, illness, injury or
+distress.
 
 STEP 2 — WRITE THE IMAGE PROMPT:
 
   ** RULE 1 — THE FACE MUST NEVER BE CLEARLY VISIBLE, AND IT MUST LOOK NATURAL **
-  A person MAY appear. What must not appear is a readable face. Hide it the way
-  a real photographer would, as a consequence of the composition — pick ONE:
-    - shallow depth of field with focus on the hands or the product, so the face
-      falls softly out of focus in the background
-    - shot from behind or over the shoulder, the person genuinely facing away
-      because that is where the task is
-    - head naturally lowered, looking down at what the hands are doing
-    - framed from the shoulders or chest down, the head simply above the frame
-    - backlit against a window so the figure reads as a soft silhouette
-    - close on the hands and forearms, the rest of the person out of frame
+  A person MAY appear. What must not appear is a readable face.
+
+  THE COMPOSITION IS ASSIGNED, NOT CHOSEN. Use exactly this one:
+
+    {framing}
+
+  Write the scene so that composition happens naturally — the person is doing
+  something that genuinely puts them in that position. Do not also add a second
+  face-hiding trick on top of it; one is enough, and stacking them is what makes
+  the figures look posed and strange.
+  UNLESS the assigned composition is the from-behind one, the person must be
+  turned broadly TOWARDS the scene and the camera side. Do not write "facing
+  away", "back to the camera", "turned away" or "rear view" — the assigned
+  composition already keeps the face unreadable on its own, and back-turned
+  figures have dominated far too many of these images.
+  Keep the person CLOSE and involved in the scene — in among the objects, hands
+  actually touching things, at a normal conversational distance from the camera.
+  Not far away, not small in the frame, not hovering at the edge of the room.
   NEVER a body facing the camera with the head turned backwards, twisted,
   smudged, deleted or awkwardly chopped. That is what produced the uncanny
-  figures. The pose must be one a real person would actually hold.
+  figures. The pose must be one a real person would actually hold, and the body
+  must be upright and relaxed in a normal everyday posture — no contorting,
+  no straining, no unnatural reach or arch to keep the face out of shot.
   Do not sacrifice the scene to hide the face — the photograph should look
   natural first, with the face incidentally unreadable.
   Watch for reflections: do NOT place a mirror, window, screen or other
@@ -148,20 +163,20 @@ STEP 2 — WRITE THE IMAGE PROMPT:
       loose relaxed fit. No bare arms, shoulders, legs, midriff or back.
       No short sleeves, no shorts, no tight or form-fitting clothing, no
       swimwear, no underwear, no sheer fabric.
-    - Do not describe gender, body shape, figure or attractiveness. Prefer a
-      person only where the product needs one; otherwise show the scene alone.
-      Where a person adds nothing (homeware, cleaning, kitchen clutter, storage,
-      garden, tech on a desk), show the SITUATION instead — tangled cables, a
-      sink of crusted pans, muddy pawprints, a duvet thrown back at 3am.
+    - Do not describe gender, body shape, figure or attractiveness.
+      The assigned composition above decides whether a person appears at all.
+      When it calls for no person, show the SITUATION instead — tangled cables,
+      a sink of crusted pans, muddy pawprints, a duvet thrown back at 3am.
   Zero nudity, zero suggestive framing, zero body emphasis of any kind.
 
   OTHER RULES:
   • Open with: "Photorealistic vertical photograph,"
-  • Name the specific room from STEP 1 and the exact lighting and colour palette
+  • Name the specific room from STEP 1 and restate the assigned lighting and
+    colour palette in your own concrete words — the bulb, the window, the sky
   • Describe the physical scene precisely: objects, surfaces, mess, aftermath
   • Do NOT show the product — this is the "before" state
   • One clear subject, uncluttered — it is viewed on a phone screen
-  • Close with: "vertical 9:16, cinematic depth of field, sharp foreground, Canon EOS R5"
+  • Close with exactly: "{camera}"
   • No text, no logos, no captions, no watermarks
   • Max 120 words — dense and specific beats long and vague
 
@@ -171,8 +186,18 @@ STEP 3 — WRITE THE ON-SCREEN HOOK:
 {styles}
     MAX 8 WORDS TOTAL including the opening. No product name, no price, no
     hashtags, no quotes, no emoji in this field.
-  • emojis: exactly 2 or 3 emoji characters that match the pain point and product
-    (food, household, activity, weather, reaction faces are all fine). Emoji only.
+  • emojis: exactly 2 or 3 emoji characters. Emoji only, no words.
+    Draw them from these angles, which rotate every run:
+{emoji_angles}
+    HARD LIMITS:
+{face_rule}
+      - NEVER use a crying, sobbing, weeping or tearful face. Not
+        {banned}. They have been used on
+        almost every video already and they read as miserable, not funny.
+      - If you do use a face, make it dry, exasperated or absurd rather than
+        sad — the tone is "ugh, this again", not "I am suffering".
+      - Prefer emoji that carry INFORMATION about this specific product and
+        scene. A viewer should half-guess the situation from the emoji alone.
 
 Respond ONLY in valid JSON. No markdown fences. No explanation.
 {{
@@ -222,11 +247,162 @@ _HOOK_STYLES = [
     'That moment when ...',
 ]
 
+# ── Rotating look, framing and emoji menus ────────────────────────────────────
+# Same mechanism as _HOOK_STYLES above, for the same reason. Left to decide for
+# itself, Gemini converged hard: measured over 10 runs it produced warm light in
+# 5 and cool or neutral in ZERO, put the subject back-to-camera in 5, and used a
+# sad or crying face in 7. Assigning one option per run at random is the only
+# thing that reliably breaks that — asking for "variety" in prose does not.
+
+# ONE is assigned per run. Deliberately weighted away from warm: golden hour is
+# the model's default attractor, so it gets one slot out of twelve like anything
+# else rather than winning by gravity.
+_LOOK_STYLES = [
+    "cool overcast daylight through a large window, soft blue-grey shadows, gently desaturated palette",
+    "crisp early-morning light, pale blues and clean whites, long low shadows",
+    "bright neutral midday daylight, true whites, high clarity, almost no colour cast",
+    "warm late-afternoon golden hour, amber highlights, long soft shadows",
+    "soft evening lamplight, warm pools of light against a cooler darker room",
+    "open shade outdoors, even cool blue-grey light, no harsh sun, natural greens",
+    "clean daylight-balanced indoor lighting, neutral greys and cool whites, office-calm",
+    "bright high-key white lighting, crisp and fresh, minimal shadow",
+    "flat even overcast afternoon light, muted greens, greys and soft colour",
+    "dusk outside the window with the interior lights on, cool blue glass against warm room",
+    "hard direct sunlight cutting through, graphic shadow shapes, high contrast, saturated colour",
+    "grey rainy-day light, cool and soft, rain visible on the glass",
+]
+
+# ONE is assigned per run. "From behind" stays in the pool because it is
+# sometimes genuinely the right shot — but as one option in seven (~14%) rather
+# than the model's reflex answer to "hide the face" (~50% measured).
+_FRAMING_CHOICES = [
+    "shallow depth of field with sharp focus on the hands and the objects, the person soft and unreadable just behind them",
+    "head naturally lowered, looking down at what the hands are doing, hair and angle covering the features",
+    "framed from the shoulders or the chest down, the head simply above the top of the frame",
+    "close on the hands and forearms mid-task, the rest of the person out of frame entirely",
+    "backlit against a bright window so the figure reads as a soft natural silhouette",
+    "seen from behind or over the shoulder, genuinely facing away because that is where the task is",
+    "no person in the frame at all — only the situation itself and the aftermath it left behind",
+]
+
+# ONE is assigned per run, and it replaces the old fixed
+# "cinematic depth of field, sharp foreground, Canon EOS R5" closer, which was
+# appended verbatim to every prompt ever generated and flattened the look of the
+# whole feed regardless of what the rest of the prompt said.
+_CAMERA_STYLES = [
+    "vertical 9:16, 35mm lens, natural perspective, crisp detail, cinematic depth of field",
+    "vertical 9:16, 50mm lens, shallow depth of field, creamy background blur",
+    "vertical 9:16, wide 24mm lens, the whole space in context, deep focus",
+    "vertical 9:16, 85mm telephoto compression, tight and intimate, softly blurred background",
+    "vertical 9:16, handheld documentary photograph, available light, honest and unposed",
+    "vertical 9:16, fine 35mm film grain, muted analogue colour, soft contrast",
+    "vertical 9:16, crisp editorial photography, clean deliberate composition, sharp foreground",
+    "vertical 9:16, macro close detail on the texture, very shallow focus, everything else soft",
+]
+
+# THREE are offered per run. The old instruction was "emoji that match the pain
+# point", and since the pain point is always a frustration the match was always
+# a crying face. These angles push most of the set toward objects and situation.
+_EMOJI_ANGLES = [
+    "the object or the mess that is causing the problem",
+    "the room or the place the scene happens in",
+    "the weather, the season or the time of day",
+    "the activity being attempted and failing",
+    "a physical sensation — heat, cold, sweat, sparkle, sleep, noise",
+    "the scale of the problem — a pile, a stack, a clock, money draining away",
+    "one dry or exasperated reaction face (never a sad or crying one)",
+    "something deliberately absurd or exaggerated, played for comedy",
+    "a before-and-after pairing, the bad thing plus the arrow or the fix",
+    "a small visual pun on the product category",
+]
+
+# Named explicitly so the instruction cannot be read loosely. These are the exact
+# characters that dominated the output.
+_BANNED_EMOJI = "😭 😢 😩 😫 😓 😖 😣 😞 😔 🥺 😰"
+
+# ...and enforced in code, because naming them in the prompt was not enough:
+# 😩 still came back in a run where it was listed as banned two paragraphs
+# earlier. Same belt-and-braces reasoning as _HARD_NEGATIVES — a filter cannot
+# be talked out of it. Covers weeping, pleading, sick and fearful faces.
+_BANNED_CP = {
+    0x1F622, 0x1F62D, 0x1F629, 0x1F62B, 0x1F613, 0x1F616, 0x1F623, 0x1F61E,
+    0x1F614, 0x1F97A, 0x1F630, 0x1F625, 0x1F62A, 0x1F63F, 0x1F915, 0x1F912,
+    0x1F61F, 0x1F641, 0x2639,  0x1F628, 0x1F631, 0x1F627, 0x1F626,
+}
+# Ranges that read as a FACE, for the "at most one" cap. Includes the gesture
+# faces (🤦 🤷) on purpose — they occupy the same slot in the viewer's eye.
+_FACE_RANGES = ((0x1F600, 0x1F64A), (0x1F910, 0x1F92F),
+                (0x1F970, 0x1F97A), (0x1FAE0, 0x1FAE8))
+_ZWJ       = "‍"
+_MODIFIERS = "️︎⃣" + "".join(chr(c) for c in range(0x1F3FB, 0x1F400))
+_MAX_EMOJI = 3
+
+
+def _emoji_clusters(s):
+    """Split a string into whole emoji, keeping ZWJ sequences (🤦‍♀️) and skin-tone
+    modifiers attached to their base. Dropping a bare codepoint out of a ZWJ
+    sequence leaves orphaned joiner junk on screen, so filtering must work on
+    whole clusters."""
+    clusters, cur, prev_zwj = [], "", False
+    for ch in s or "":
+        if not cur:
+            if ch.isspace():
+                continue
+            cur, prev_zwj = ch, ch == _ZWJ
+        elif prev_zwj or ch in _MODIFIERS or ch == _ZWJ:
+            cur += ch
+            prev_zwj = ch == _ZWJ
+        else:
+            clusters.append(cur)
+            if ch.isspace():
+                cur, prev_zwj = "", False
+            else:
+                cur, prev_zwj = ch, False
+    if cur:
+        clusters.append(cur)
+    return clusters
+
+
+def _clean_emojis(s, max_faces=1):
+    """Drop banned sad/crying faces and cap the set at max_faces faces, 3 emoji."""
+    clusters = [c for c in _emoji_clusters(s) if ord(c[0]) not in _BANNED_CP]
+    kept, faces = [], 0
+    for c in clusters:
+        cp = ord(c[0])
+        if any(lo <= cp <= hi for lo, hi in _FACE_RANGES):
+            if faces >= max_faces:
+                continue
+            faces += 1
+        kept.append(c)
+        if len(kept) >= _MAX_EMOJI:
+            break
+    # If the face cap emptied the set entirely, relax it rather than ship nothing.
+    return "".join(kept or clusters[:_MAX_EMOJI])
+
 
 def _gemini_concept(title, features, keys):
     styles = "\n".join(f"        - {s}" for s in random.sample(_HOOK_STYLES, 3))
+    angles = "\n".join(f"      - {a}" for a in random.sample(_EMOJI_ANGLES, 3))
+    # Half the runs forbid faces outright. Capping faces at one just moved the
+    # monoculture rather than ending it — with 😩 banned, 🤦 took its place in
+    # 6 of 12 runs. Rotating the budget itself is what actually varies the feed.
+    max_faces = random.choice((0, 1))
+    face_rule = (
+        "      - NO face emoji at all this time. Objects, places, weather,\n"
+        "        activities and symbols only — let the situation speak."
+        if not max_faces else
+        "      - AT MOST ONE face emoji in the whole set. The other one or two\n"
+        "        must be objects, places, weather, activities or symbols."
+    )
+    look     = random.choice(_LOOK_STYLES)
+    framing  = random.choice(_FRAMING_CHOICES)
+    camera   = random.choice(_CAMERA_STYLES)
+    log(f"  CF hook look:       {look[:72]}")
+    log(f"  CF hook framing:    {framing[:72]}")
     prompt_text = _CONCEPT_PROMPT.format(title=title, features=features or title,
-                                         styles=styles)
+                                         styles=styles, look=look, framing=framing,
+                                         camera=camera, emoji_angles=angles,
+                                         banned=_BANNED_EMOJI, face_rule=face_rule)
     payload = {
         "contents": [{"parts": [{"text": prompt_text}]}],
         "generationConfig": {
@@ -251,7 +427,10 @@ def _gemini_concept(title, features, keys):
             if not text:
                 raise ValueError("no text part in Gemini response")
             text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
-            return json.loads(text.strip())
+            data = json.loads(text.strip())
+            if isinstance(data, dict):
+                data["emojis"] = _clean_emojis(data.get("emojis"), max_faces)
+            return data
         except Exception as e:
             log(f"  CF hook: Gemini error ({e}) — trying next key")
     return None
