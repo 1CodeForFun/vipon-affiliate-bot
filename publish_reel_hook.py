@@ -20,6 +20,8 @@ from pathlib import Path
 
 import requests
 from PIL import Image, ImageDraw
+
+from smartlink import smartlink
 from google import genai
 import google.genai.types as gtypes
 
@@ -872,13 +874,20 @@ def publish_platforms(video_url, deal, script, thumbnail_path=None):
     """Post the reel to FreshDeals + Ultafind on FB / IG / YT."""
     title   = (deal.get("title_text") or deal.get("title") or "Deal Alert!")[:100]
     asin    = deal["asin"]
-    fb_link = f"https://www.amazon.com/dp/{asin}?tag={AFF_TAG_FB}"
-    yt_link = f"https://www.amazon.com/dp/{asin}?tag={AFF_TAG_YT}"
+    # Through the worker, not raw /dp/ — otherwise a pasted link opens the
+    # Amazon website instead of the Amazon app, and Facebook has no og: tags to
+    # build a preview card from. See smartlink.py.
+    fb_link = smartlink(asin, AFF_TAG_FB, "com",
+                        deal.get("image") or "", title)
+    yt_link = smartlink(asin, AFF_TAG_YT, "com")
 
+    # Facebook auto-links captions, so the label is fine there.
     fb_cap  = f"{script}\n\n🛒 Grab the deal → {fb_link}"
+    # YouTube descriptions are NOT tappable — the viewer copies the URL by hand,
+    # so it goes last, alone on its line, with nothing touching it.
     yt_desc = (f"{script}\n\n"
-               f"⚡ {deal['pct']}% off — limited time!\n"
-               f"🛒 {yt_link}")
+               f"⚡ {deal['pct']}% off — limited time!\n\n"
+               f"{yt_link}")
 
     errors = []
 

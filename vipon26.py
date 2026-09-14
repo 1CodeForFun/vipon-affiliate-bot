@@ -32,6 +32,7 @@ from selenium.common.exceptions import SessionNotCreatedException
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from gspread.exceptions import APIError
+from smartlink import smartlink as _smartlink
 
 # ════════════════════════════════════════════════════════════════
 #  CONFIG
@@ -1228,43 +1229,16 @@ def _build_affiliate_dp_link(asin: str, tld: str = "com") -> str:
 def _worker_smartlink(asin: str, tag: str, tld: str = "com",
                       image: str = "", title: str = "", cart: bool = False,
                       badge: str = "", pct: int = 0) -> str:
-    """Affiliate smartlink. image/title are optional and only feed link previews.
+    """Affiliate smartlink — see smartlink.py for the implementation and for why
+    every published link has to go through the worker rather than straight to
+    /dp/ (app hand-off on iOS, and og: tags for link previews).
 
-    Amazon product pages carry NO Open Graph tags at all — verified against both
-    the Facebook crawler and a normal browser — so Facebook has nothing to build
-    a preview from and falls back to guessing, which is why link posts showed a
-    grey placeholder at random. Passing the image and title lets the worker
-    answer crawlers with real og: tags (see smartlink_worker.js) while humans
-    still get the same instant redirect. Harmless if the worker is not updated:
-    the extra params are simply ignored.
+    Delegated rather than duplicated: buffer_publish.py and publish_reel_hook.py
+    were each building their own raw /dp/ links, so TikTok, Pinterest, FB and YT
+    silently lost both behaviours. One builder, used everywhere.
     """
-    # Amazon renditions are encoded in the filename: _SL500_ is a 500px box.
-    # Facebook needs at least 600x315 to render a large preview card and shows a
-    # small square thumbnail below that, so ask Amazon for the 1500px rendition.
-    if image:
-        image = re.sub(r"\._(?:AC_)?(?:S[LXY]|UX|UY|CR)[\d,]*_", "._AC_SL1500_", image)
+    return _smartlink(asin, tag, tld, image, title, cart, badge, pct)
 
-    dp = _build_affiliate_dp_link(asin, tld)
-    if not WORKER_BASE:
-        return dp
-    params = {"asin": asin.upper(), "tag": tag, "tld": tld}
-    # Add-to-cart instead of the product page. Only for Amazon deals, where the
-    # discount is already in the price — see _amazon_deal_to_product.
-    if cart:
-        params["cart"] = "1"
-    if image:
-        params["img"] = image
-    if title:
-        params["t"] = title[:110]
-    # Stamps a badge on the link-preview card (see BADGES in smartlink_worker.js).
-    # The worker only honours known keys, so an unrecognised value degrades to
-    # the plain card rather than failing.
-    if badge:
-        params["badge"] = badge
-        if pct:
-            params["pct"] = str(int(pct))
-    qs = urllib.parse.urlencode(params)
-    return f"{WORKER_BASE}/a?{qs}"
 
 def get_affiliate_link(asin: str, tld: str = "com",
                        image: str = "", title: str = "", cart: bool = False) -> str:

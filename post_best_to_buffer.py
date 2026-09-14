@@ -75,6 +75,17 @@ def main():
         if posted != "yes" or not video_url:
             continue
 
+        # TikTok and Pinterest take AMAZON DEALS only. A deals row carries no
+        # discount code — the price is already cut — whereas a Vipon row always
+        # has one, so an empty code column is the discriminator.
+        #
+        # In practice only deals rows ever reach here anyway (they are the ones
+        # that get videos built), but that was incidental rather than intended:
+        # the moment a Vipon row got a video it would have gone out too, with a
+        # code that is shown in the video and nowhere in the caption.
+        if row[COL_F_CODE - 1].strip():
+            continue
+
         link = row[COL_A_AFF_LINK - 1].strip()
         asin = _asin_from_link(link)
         if not asin:

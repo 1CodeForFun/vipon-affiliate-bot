@@ -581,19 +581,16 @@ def _build_yt_description(aff_link: str, code: str, disc: str) -> str:
     phone then turns a two-second action into a minute of fiddling with the
     selection handles. Measured by hand: about a minute to get the URL alone.
 
-    So the link goes FIRST, on a line of its own, with nothing before it, no
-    punctuation touching it, and a blank line after it so a paragraph-level
-    selection still stops at the end of the URL. The code sits underneath, where
-    it can be read without being in the way of the thing being copied.
+    So the description is the link and NOTHING ELSE — no label, no emoji, no
+    code, no punctuation touching it. Anything else on the page is one more
+    thing a selection can catch on.
+
+    The discount code is deliberately not here. _overlay_codepct burns
+    "Code: XXXX" onto every frame of the video, so the viewer already has it on
+    screen; repeating it under the URL only made the URL harder to grab. code
+    and disc stay in the signature because callers pass them positionally.
     """
-    parts = []
-    if aff_link:
-        parts.append(aff_link)
-        parts.append("")
-    if code:
-        discount_str = f" ({disc} off)" if disc else ""
-        parts.append(f"🏷️ Discount code: {code}{discount_str}")
-    return "\n".join(parts).strip()
+    return (aff_link or "").strip()
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────

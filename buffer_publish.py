@@ -22,6 +22,8 @@ Connected channels (Free plan): freshdealsusa (TikTok), FreshDeals (Pinterest Bu
 import os
 import requests
 
+from smartlink import smartlink
+
 BUFFER_ENDPOINT = "https://api.buffer.com"
 
 # Per-channel Amazon Associates tracking IDs (so Amazon reports attribute sales per platform)
@@ -346,14 +348,20 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
     # without dragging the other along.
     tk = _find_channel(channels, "tiktok")
     if tk:
-        tk_link = f"https://www.amazon.com/dp/{asin}?tag={TIKTOK_TAG}"
-        code     = (deal.get("code") or "").strip()
+        # Through the worker, NOT a raw /dp/ link. A pasted raw link opens the
+        # Amazon website in whatever browser the tap happened in; the worker
+        # hands off to the Amazon app. TikTok captions are not tappable, so
+        # every viewer copies this by hand — which is exactly the case iOS
+        # Universal Links do not cover.
+        tk_link = smartlink(asin, TIKTOK_TAG, "com")
 
+        # Link LAST and alone on its line, with nothing touching it. Any
+        # neighbouring text gets swept into a long-press selection on a phone.
+        # The discount code is deliberately not here: it is spoken and shown in
+        # the video, and putting it under the URL made the URL harder to grab.
         tk_text = (f"{title[:150]}\n\n"
                    f"🔥 {pct}% OFF — limited time!\n\n"
-                   f"🛒 {tk_link}")
-        if code:
-            tk_text += f"\n\n🏷️ Code: {code}"
+                   f"{tk_link}")
 
         try:
             pid = _create_post(key, tk["id"], tk_text, video_url,
@@ -373,8 +381,11 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
     # ── Pinterest (destination URL is natively clickable; pin needs a board) ──
     pin = _find_channel(channels, "pinterest")
     if pin:
-        pin_link = f"https://www.amazon.com/dp/{asin}?tag={PINTEREST_TAG}"
-        pin_text = f"{title[:200]} — {pct}% off today. 🛒 {pin_link}"
+        # Pinterest's destination URL is natively clickable, so nobody copies
+        # this one — but it still goes through the worker, because a tap from
+        # the Pinterest in-app browser should land in the Amazon app too.
+        pin_link = smartlink(asin, PINTEREST_TAG, "com")
+        pin_text = f"{title[:200]} — {pct}% off today.\n\n{pin_link}"
         try:
             board_id = _get_pinterest_board_id(key, pin["id"], PINTEREST_BOARD_NAME)
             if not board_id:
