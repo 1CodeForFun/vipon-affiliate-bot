@@ -83,9 +83,22 @@ _HOOK_SECS     = 3.5
 # grant is gone (HTTP 429), so rather than tracking a budget we just walk down
 # the chain: a cheaper image beats no image. Schnell costs ~5x less than Lucid
 # Origin, so it still works long after the premium budget is spent.
+#
+# Entries are (model, extra_body, accepts_size). THE THIRD FIELD MATTERS:
+# flux-1-schnell rejects width, height AND num_steps outright —
+#   400 "Additional or unevaluated properties '/width, /height, /num_steps'"
+# — and _cf_generate_one used to send all three to every model. So every single
+# fallback attempt 400'd instantly and the reel went out with no hook at all.
+# That is what the neuron report's "flux-1-schnell: 7 call(s), 0 n" was: not the
+# grant being spent, a malformed request. The chain had never once fired.
+#
+# It matters more than it looks, because the grant is a CEILING not a switch: at
+# ~9,300 of 10,000 used, another 1,033-neuron Lucid call is refused while a
+# 62-neuron flux call still fits underneath. Fixed, the cheap model covers the
+# tail of the day instead of the tail of the day having no image.
 _MODEL_CHAIN = [
-    ("@cf/leonardo/lucid-origin",            {}),
-    ("@cf/black-forest-labs/flux-1-schnell",  {"num_steps": 4}),
+    ("@cf/leonardo/lucid-origin",             {},            True),
+    ("@cf/black-forest-labs/flux-1-schnell",  {"steps": 4},  False),
 ]
 
 _IMAGE_MODEL = _MODEL_CHAIN[0][0]   # preferred model, for logging/tests
@@ -458,11 +471,21 @@ _HARD_NEGATIVES = (
 )
 
 
-def _cf_generate_one(account_id, api_token, prompt, model, extra=None):
-    """Generate one image with a specific model. Returns PNG bytes. Raises on failure."""
+def _cf_generate_one(account_id, api_token, prompt, model, extra=None, sized=True):
+    """Generate one image with a specific model. Returns PNG bytes. Raises on failure.
+
+    sized=False omits width/height for models that reject them (flux-1-schnell
+    returns a 400 rather than ignoring them). Those models pick their own size —
+    flux returns a SQUARE image, which _zoom_clip then scales to cover 720x1280
+    and centre-crops, so the composition tightens. Acceptable for a 3.5s Ken
+    Burns behind a text overlay; worth knowing when comparing the two models.
+    """
     url  = _CF_API_BASE.format(account_id=account_id, model=model)
     prompt = (prompt or "").rstrip().rstrip(".") + "." + _HARD_NEGATIVES
-    body = {"prompt": prompt, "width": _IMG_W, "height": _IMG_H, **(extra or {})}
+    body = {"prompt": prompt}
+    if sized:
+        body.update({"width": _IMG_W, "height": _IMG_H})
+    body.update(extra or {})
     r = requests.post(
         url,
         headers={"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"},
@@ -492,17 +515,19 @@ def _cf_generate(account_id, api_token, prompt):
     """
     last_err = None
     last_i   = len(_MODEL_CHAIN) - 1
-    for i, (model, extra) in enumerate(_MODEL_CHAIN):
+    for i, (model, extra, sized) in enumerate(_MODEL_CHAIN):
         more = " — trying next model" if i < last_i else ""
         try:
             log(f"  CF hook: generating image via {model}...")
-            return _cf_generate_one(account_id, api_token, prompt, model, extra), model
+            return _cf_generate_one(account_id, api_token, prompt, model,
+                                    extra, sized), model
         except QuotaExhausted as e:
-            # 429 is ACCOUNT-WIDE, not per-model: once the grant is spent every
-            # metered model refuses, so falling through to a cheaper one does not
-            # help here. The chain still earns its keep when a single model is
-            # unavailable or rejects the request.
-            log(f"  CF hook: {model} — neuron grant spent (account-wide){more}")
+            # The remaining grant is a CEILING, so a cheaper model genuinely can
+            # get through where the expensive one cannot: at ~9,300 of 10,000
+            # used, another 1,033-neuron Lucid call is refused while a
+            # 62-neuron flux call still fits. Only once the grant is fully spent
+            # does every model refuse.
+            log(f"  CF hook: {model} — refused (429, grant nearly/fully spent){more}")
             last_err = e
         except Exception as e:
             log(f"  CF hook: {model} failed ({e}){more}")
