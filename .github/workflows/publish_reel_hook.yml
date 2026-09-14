@@ -69,6 +69,11 @@ jobs:
       - name: Run hook reel publisher
         env:
           SECRETS_DIR: secrets
+          # TikTok + Pinterest now have their own flow (post_best_to_buffer.py),
+          # which builds one video per cron firing. This run pushing to Buffer as
+          # well would make the daily count 3 + 2 = 5 rather than the 3 the cron
+          # asks for, so its Buffer step is off. Set to 1 to restore it.
+          POST_BUFFER: "0"
         run: python publish_reel_hook.py
 
       - name: Upload reel artifacts
