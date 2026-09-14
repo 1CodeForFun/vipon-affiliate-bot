@@ -573,14 +573,27 @@ def post_youtube_short(video_url: str, title: str, description: str,
 
 # ─── YOUTUBE DESCRIPTION ─────────────────────────────────────────────────────
 def _build_yt_description(aff_link: str, code: str, disc: str) -> str:
-    """Short, copy-friendly YouTube description with clickable affiliate link."""
+    """Description shaped so the LINK IS EASY TO COPY, which is its only real job.
+
+    Shorts descriptions are not tappable, so every viewer has to select the URL
+    by hand. Anything sharing a line with it — a label, an emoji, a trailing
+    colon or full stop — gets swept into the selection, and long-pressing on a
+    phone then turns a two-second action into a minute of fiddling with the
+    selection handles. Measured by hand: about a minute to get the URL alone.
+
+    So the link goes FIRST, on a line of its own, with nothing before it, no
+    punctuation touching it, and a blank line after it so a paragraph-level
+    selection still stops at the end of the URL. The code sits underneath, where
+    it can be read without being in the way of the thing being copied.
+    """
     parts = []
+    if aff_link:
+        parts.append(aff_link)
+        parts.append("")
     if code:
         discount_str = f" ({disc} off)" if disc else ""
         parts.append(f"🏷️ Discount code: {code}{discount_str}")
-    if aff_link:
-        parts.append(f"\n🛒 Get the deal:\n{aff_link}")
-    return "\n".join(parts) if parts else ""
+    return "\n".join(parts).strip()
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
