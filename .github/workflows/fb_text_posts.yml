@@ -26,8 +26,15 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Chrome is needed by the flash-deal section, which scrapes one live
+      # lightning deal at the end of the run. The posting itself needs none of it.
+      - name: Install system dependencies (Chrome)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y chromium-browser chromium-chromedriver
+
       - name: Install Python dependencies
-        run: pip install gspread oauth2client requests
+        run: pip install -r requirements.txt
 
       - name: Copy credential files to working directory
         run: |

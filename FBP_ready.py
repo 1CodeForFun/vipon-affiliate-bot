@@ -45,6 +45,10 @@ TIMEOUT              = 60
 # 48-product sheet in 12 hours.
 POSTS_PER_RUN        = int(os.environ.get("POSTS_PER_RUN") or "4")
 
+# One live Amazon lightning deal appended to each run of this flow. Set to 0 to
+# turn it off without touching the workflow.
+FLASH_DEAL_ENABLED   = (os.environ.get("FLASH_DEAL_ENABLED") or "1") not in ("0", "false", "no")
+
 # Column numbers (1-based)
 COL_A_LINK       = 1
 COL_F_CODE       = 6    # discount code — appended to the post body
@@ -274,6 +278,21 @@ def main():
     except Exception as e:
         log(f"CA section error: {e}")
         p2 = s2 = f2 = 0
+
+    # ── Flash deal: one live Amazon lightning deal, scraped and posted now ───
+    # Runs AFTER the scheduled rows, so the day's planned posts always go out
+    # first. Entirely best-effort — a scrape or Facebook failure here must never
+    # affect the section above, which is why it is wrapped and never re-raises.
+    if FLASH_DEAL_ENABLED:
+        log("\n=== Flash deal (US) ===")
+        try:
+            from flash_deal import post_flash_deal
+            ws_flash = open_sheet()
+            fb_id, fb_tok, fb_ver = load_fb_config(TOKEN_FILE)
+            post_flash_deal(ws_flash.spreadsheet, fb_id, fb_tok, fb_ver,
+                            publish_link_post_to_facebook, tld="com")
+        except Exception as e:
+            log(f"Flash deal section error: {e.__class__.__name__}: {e}")
 
     log("\n----- DONE -----")
     log(f"Posted:  {p + p2}")
