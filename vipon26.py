@@ -1226,7 +1226,8 @@ def _build_affiliate_dp_link(asin: str, tld: str = "com") -> str:
     return base + f"{sep}tag={tag}"
 
 def _worker_smartlink(asin: str, tag: str, tld: str = "com",
-                      image: str = "", title: str = "", cart: bool = False) -> str:
+                      image: str = "", title: str = "", cart: bool = False,
+                      badge: str = "", pct: int = 0) -> str:
     """Affiliate smartlink. image/title are optional and only feed link previews.
 
     Amazon product pages carry NO Open Graph tags at all — verified against both
@@ -1255,6 +1256,13 @@ def _worker_smartlink(asin: str, tag: str, tld: str = "com",
         params["img"] = image
     if title:
         params["t"] = title[:110]
+    # Stamps a badge on the link-preview card (see BADGES in smartlink_worker.js).
+    # The worker only honours known keys, so an unrecognised value degrades to
+    # the plain card rather than failing.
+    if badge:
+        params["badge"] = badge
+        if pct:
+            params["pct"] = str(int(pct))
     qs = urllib.parse.urlencode(params)
     return f"{WORKER_BASE}/a?{qs}"
 

@@ -131,9 +131,37 @@ const IMAGE_HOSTS = [
   "images-fe.ssl-images-amazon.com",
 ];
 
+// Badge overlays for the link-preview card. The KEY is what travels in the URL,
+// never the text: letting a caller put arbitrary text in the parameter would let
+// anyone render whatever they liked onto an image served from this domain, and
+// the text is interpolated into a Cloudinary transformation where a stray comma
+// or slash also breaks out of the layer spec. A fixed map avoids both.
+//
+// rgb(204,12,57) is Amazon's own deal-badge red, sampled from the deals page, so
+// the badge reads as native rather than as a sticker added afterwards.
+const BADGES = {
+  lightning: "LIGHTNING DEAL",
+  deal:      "TODAY'S DEAL",
+};
+const BADGE_RGB = "CC0C39";
+
+/** Cloudinary text-layer chain for a badge, or "" when none applies. */
+function badgeLayer(key, pct) {
+  const label = BADGES[(key || "").toLowerCase()];
+  if (!label) return "";
+  // pct is validated as 1-3 digits by the caller; anything else is dropped
+  // rather than passed through.
+  const text = pct ? `${label}  ${pct}% OFF` : label;
+  // bo_ supplies the padding around the text that b_ alone does not.
+  return `l_text:Arial_58_bold:${encodeURIComponent(text)}` +
+         `,co_rgb:FFFFFF,b_rgb:${BADGE_RGB},bo_20px_solid_rgb:${BADGE_RGB},r_12/` +
+         `fl_layer_apply,g_north_west,x_44,y_44/`;
+}
+
 /**
- * /img?u=<encoded Amazon image URL> — fetch the image and re-serve it from
- * this worker.
+ * /img?u=<encoded Amazon image URL>[&badge=lightning][&pct=68] — fetch the
+ * image, pad it to the Facebook card shape, optionally stamp a badge on it,
+ * and re-serve it from this worker.
  *
  * WHY: the Sharing Debugger showed Facebook failing with
  *   "Error while downloading https://m.media-amazon.com/images/I/...jpg
@@ -162,8 +190,11 @@ async function proxyImage(u) {
   // thumbnail, text taking the rest. Cloudinary pads the photo onto a
   // 1200x630 white canvas, which is exactly the large-card shape. Verified:
   // 1200x630, ratio 1.90, 25KB.
+  const rawPct = u.searchParams.get("pct") || "";
+  const pct    = /^\d{1,3}$/.test(rawPct) ? rawPct : "";
   const padded = `https://res.cloudinary.com/${CLOUDINARY_CLOUD}/image/fetch/` +
                  `c_pad,w_1200,h_630,b_white,f_auto,q_auto/` +
+                 badgeLayer(u.searchParams.get("badge"), pct) +
                  encodeURIComponent(target.toString());
 
   const fetchHeaders = {
@@ -292,8 +323,16 @@ export default {
       const img = (q.get("img") || "").trim();
       if (!img) return Response.redirect(dp, 302);
       // Serve the image through our own /img so Facebook never has to fetch
-      // from Amazon, which 429s its crawler.
-      const proxied = `${u.origin}/img?u=${encodeURIComponent(img)}`;
+      // from Amazon, which 429s its crawler. badge/pct ride along so the card
+      // can carry a "LIGHTNING DEAL" stamp; both are validated inside /img, and
+      // a link without them renders exactly as before.
+      const bKey = (q.get("badge") || "").trim().toLowerCase();
+      const bPct = (q.get("pct")   || "").trim();
+      let proxied = `${u.origin}/img?u=${encodeURIComponent(img)}`;
+      if (BADGES[bKey]) {
+        proxied += `&badge=${encodeURIComponent(bKey)}`;
+        if (/^\d{1,3}$/.test(bPct)) proxied += `&pct=${bPct}`;
+      }
       return new Response(
         crawlerCard(u.toString(), dp, proxied, (q.get("t") || "").trim()), {
           status: 200,

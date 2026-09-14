@@ -35,7 +35,7 @@ import json
 import os
 import random
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 from bs4 import BeautifulSoup
@@ -240,12 +240,13 @@ def mark_posted(ss, asin):
 
 # ── The post ──────────────────────────────────────────────────────────────────
 # Rotated so an hourly post does not read as the same template every hour.
+# ⏳ is reserved for the expiry line below, so it does not appear twice in one post.
 _OPENERS = [
     "⚡ FLASH DEAL",
-    "⏳ LIGHTNING DEAL — going fast",
+    "⚡ LIGHTNING DEAL — going fast",
     "🔥 ON THE CLOCK",
     "⚡ PRICE DROP — hours only",
-    "⏳ QUICK ONE",
+    "🔥 QUICK ONE",
     "🔥 FLASH PRICE",
 ]
 
@@ -258,7 +259,10 @@ _CLOSERS = [
 
 
 def _pretty_time(ends_in):
-    """'08:55:31' -> '8h 55m'. Never rounds up into a claim we cannot support."""
+    """'08:55:31' -> '8h 55m'. Never rounds up into a claim we cannot support.
+
+    Kept for logging only — see _ends_at for why the POST does not use this.
+    """
     try:
         h, m, _s = (int(x) for x in ends_in.split(":"))
     except Exception:
@@ -270,8 +274,37 @@ def _pretty_time(ends_in):
     return f"{m}m"
 
 
+def _ends_at(ends_in, now=None):
+    """'08:55:31' -> 'Ends 9:45 PM ET today'.
+
+    A Facebook post is frozen the moment it publishes: the text never updates
+    and the preview image is fetched and cached at post time, so there is no
+    such thing as a live countdown in a post. "Ends in 8h 55m" is therefore
+    accurate for one instant and wrong for the rest of the deal's life — and
+    wrong in the direction that makes the page look like it overstates urgency.
+    An absolute clock time stays true for as long as the post exists.
+
+    The page is US, so times are rendered in Eastern and labelled. Returns ''
+    when the countdown cannot be read, and the caller then omits the line
+    rather than guessing.
+    """
+    try:
+        h, m, s = (int(x) for x in ends_in.split(":"))
+    except Exception:
+        return ""
+    now = now or datetime.now(timezone.utc)
+    end = now + timedelta(hours=h, minutes=m, seconds=s)
+    # Fixed -4 (EDT). The alternative is a tz database the runner may not carry;
+    # an hour's drift for part of the year is not worth that dependency on a
+    # line whose job is "roughly when does this stop".
+    et = end + timedelta(hours=-4)
+    when = et.strftime("%-I:%M %p") if os.name != "nt" else et.strftime("%I:%M %p").lstrip("0")
+    day = "today" if et.date() == (now + timedelta(hours=-4)).date() else "tomorrow"
+    return f"Ends {when} ET {day}"
+
+
 def build_post_text(deal):
-    left = _pretty_time(deal["ends_in"])
+    left = _ends_at(deal["ends_in"])
     lines = [f"{random.choice(_OPENERS)} — {deal['pct']}% off", "", deal["title"]]
 
     if deal["price"] and deal["list_price"]:
@@ -280,7 +313,7 @@ def build_post_text(deal):
         lines.append(f"${deal['price']:,.2f}")
 
     if left:
-        tail = f"⏳ Ends in {left}"
+        tail = f"⏳ {left}"
         # Only mention the claimed bar once it means something — "0% claimed"
         # reads as nobody wants it.
         if deal["claimed"] >= 15:
@@ -328,7 +361,8 @@ def post_flash_deal(ss, page_id, page_token, graph_api_version, publish_fn, tld=
         return ""
 
     link = _worker_smartlink(chosen["asin"], AFFILIATE_ID_DEALS, tld,
-                             chosen["image"], chosen["title"])
+                             chosen["image"], chosen["title"],
+                             badge="lightning", pct=chosen["pct"])
     message = build_post_text(chosen)
     log(f"  ⚡ flash: posting {chosen['asin']} — {chosen['pct']}% off, "
         f"ends in {_pretty_time(chosen['ends_in'])}")

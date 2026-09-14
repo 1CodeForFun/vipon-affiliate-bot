@@ -33,8 +33,14 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y chromium-browser chromium-chromedriver
 
+      # Deliberately NOT -r requirements.txt: this flow's job is posting, and the
+      # full file pulls edge-tts, openai, cloudinary and the Google API stack,
+      # none of which are used here. Every extra package is one more way for the
+      # install step to fail and take the day's posts down with it.
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install gspread oauth2client requests
+          pip install selenium undetected-chromedriver beautifulsoup4 Pillow
 
       - name: Copy credential files to working directory
         run: |
