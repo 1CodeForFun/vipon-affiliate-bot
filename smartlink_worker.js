@@ -345,20 +345,30 @@ export default {
     const isInApp   = L.includes("fban") || L.includes("fbav") ||
                       L.includes("fbios") || L.includes("instagram");
 
-    // ALL iOS visitors get this page — not just the Facebook/Instagram in-app
-    // browser, which is what it used to be limited to.
+    // ONLY the Facebook/Instagram in-app browser gets this page. This is the
+    // pre-10-Sep gate, restored.
     //
-    // WHY: iOS does not fire Universal Links for a URL pasted into Safari's
-    // address bar. That is Apple's behaviour, so a viewer who copies the link
-    // out of a video description and pastes it always landed on the website —
-    // signed out, no saved payment or address — however the redirect was
-    // written. Tapping a link INSIDE a page does fire Universal Links, so
-    // serving a page with a tappable link is the only way to reach the app
-    // from a pasted URL.
+    // On 10 Sep it was widened to every iOS visitor, on the theory that someone
+    // pasting a link from a video description into Safari could be handed to
+    // the Amazon app. Two things went wrong with that:
     //
-    // The redirect is still instant for everyone else; only iOS pays the extra
-    // hop, and only because a 302 could never open the app for them.
-    if (isIOS) {
+    //   1. It did not work. Tested twice on a real phone, Safari and Chrome:
+    //      still opened the Amazon website, not the app. Neither the Universal
+    //      Link nor the com.amazon.mobile.shopping.web:// scheme fired.
+    //   2. It cost a page load and a delay for every iOS visitor who was
+    //      previously getting an instant 302.
+    //
+    // And the population it changed is exactly the one that fell. Facebook text
+    // posts open in the FB in-app browser, which was already on this page
+    // before 10 Sep and is unaffected either way — those held up. Video
+    // descriptions are not tappable, so their viewers copy the link into Safari
+    // or Chrome, and those are the visitors who newly got an interstitial
+    // instead of a redirect. Reels, YouTube, TikTok and IG all fell from 9 Sep;
+    // FB text did not.
+    //
+    // So: in-app keeps the page (it works there, and Facebook renders its own
+    // "Open in Amazon" affordance), everyone else on iOS goes straight through.
+    if (isIOS && isInApp) {
       // Amazon's iOS app registers this scheme. Unlike a Universal Link it does
       // not depend on a genuine tap gesture, and it is not disabled once the
       // user has picked "open in browser" for amazon.com — which is why the
