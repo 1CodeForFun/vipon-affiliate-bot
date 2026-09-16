@@ -108,20 +108,29 @@ def header_of(desc):
     return desc.split(MARKER)[0].rstrip() if MARKER in desc else (desc or "").rstrip()
 
 
+# Blank line before every entry, so each link sits in a paragraph of its own.
+# Without it the link and the NEXT title are on consecutive lines, and a
+# long-press on a phone drags the neighbouring text into the selection — the
+# same reason the video descriptions were cut back to the bare URL. One newline
+# per entry is a cheap price for a link people can actually copy.
+def _block(title, link):
+    return f"\n\n{title}\n{link}"
+
+
 def render(header, entries):
     """Header + as many entries as fit, dropping the oldest that do not."""
     header = (header or "").rstrip()
     budget = BIO_LIMIT - SAFETY - len(header) - len(MARKER) - 4
     kept, used = [], 0
     for title, link in entries:                     # newest first
-        block = f"\n{title}\n{link}"
+        block = _block(title, link)
         if used + len(block) > budget:
             break                                   # everything after is older
         kept.append((title, link))
         used += len(block)
     if not kept:
         return header, []
-    body = "".join(f"\n{t}\n{l}" for t, l in kept)
+    body = "".join(_block(t, l) for t, l in kept)
     return f"{header}\n\n{MARKER}{body}", kept
 
 
