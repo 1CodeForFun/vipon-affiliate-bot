@@ -35,7 +35,15 @@ PINTEREST_BOARD_NAME = "Daily Coupons and Discounts"
 # Pinterest gets a VIDEO pin, scheduled a short lead ahead rather than published
 # instantly — see PINTEREST_LEAD_SECONDS. Set False to fall back to a static
 # image pin built from the hook thumbnail.
-PINTEREST_VIDEO_PINS = True
+# Video pins vs static image pins. Pinterest analytics for 10-17 Sep: 13.24k
+# impressions, 817 engagements, ONE outbound click. Engagements count pin opens
+# and saves, so people are opening the pins and not going through — which fits
+# Pinterest surfacing the destination link far less prominently on a video pin
+# than on a static one. Unverified (pinterest.com is blocked from here), but it
+# is the cheapest explanation to test: the image-pin path already exists below
+# as the fallback, so PINTEREST_VIDEO_PINS=0 switches to a still with a proper
+# clickable destination. TikTok still gets the video either way.
+PINTEREST_VIDEO_PINS = (os.environ.get("PINTEREST_VIDEO_PINS") or "1") not in ("0", "false", "no")
 
 # Amazon disclosure required by both Amazon Associates and TikTok for affiliate content
 DISCLOSURE = "#ad As an Amazon Associate I earn from qualifying purchases."
