@@ -232,7 +232,22 @@ def _create_post_assets(key, channel_id, text, assets, metadata,
 
 # Which frame Buffer uses as the video cover, in ms — one second into the AI hook
 # clip, so the cover is the pain-point frame. Applies to TikTok and Pinterest.
-THUMB_OFFSET_MS = 1000
+# Cover frame for the PINTEREST pin (TikTok is posted through _create_post and
+# never touches this).
+#
+# Was 1000ms, which lands INSIDE the 3.5s AI pain-point hook — so every pin led
+# with a messy counter, a back-turned figure, spilled cereal. That image exists
+# to stop a TikTok scroll. Pinterest is an aspirational surface and does the
+# opposite with it. Per-pin numbers, same account, same week:
+#
+#     pain-point cover  (every other pin)     2-57 impressions,  0 saves
+#     clean bedroom + "40% OFF" badge          173 impressions, 19 saves
+#
+# Saves are Pinterest's ranking signal, which is why the clean one earned 30x
+# the distribution. 5000ms clears the hook and lands in the product carousel —
+# a real product photo carrying the discount overlay, which is what the pin that
+# worked looked like.
+THUMB_OFFSET_MS = int(os.environ.get("PIN_THUMB_OFFSET_MS") or "5000")
 
 # Seconds ahead to schedule the Pinterest video pin. 0 = publish immediately.
 #
