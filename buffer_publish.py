@@ -35,14 +35,15 @@ PINTEREST_BOARD_NAME = "Daily Coupons and Discounts"
 # Pinterest gets a VIDEO pin, scheduled a short lead ahead rather than published
 # instantly — see PINTEREST_LEAD_SECONDS. Set False to fall back to a static
 # image pin built from the hook thumbnail.
-# Video pins vs static image pins. Pinterest analytics for 10-17 Sep: 13.24k
-# impressions, 817 engagements, ONE outbound click. Engagements count pin opens
-# and saves, so people are opening the pins and not going through — which fits
-# Pinterest surfacing the destination link far less prominently on a video pin
-# than on a static one. Unverified (pinterest.com is blocked from here), but it
-# is the cheapest explanation to test: the image-pin path already exists below
-# as the fallback, so PINTEREST_VIDEO_PINS=0 switches to a still with a proper
-# clickable destination. TikTok still gets the video either way.
+# Video pins vs static image pins.
+#
+# DO NOT flip this on the theory that video pins lack a destination link — that
+# was checked on a live pin and is FALSE. A published video pin shows a proper
+# "Visit site" button and it opens the worker link correctly. So the one
+# outbound click against 13.24k impressions and 817 engagements (10-17 Sep) is
+# not a broken link; people are opening the pins and choosing not to go through.
+# The flag stays switchable for other reasons, but flipping it will not fix
+# clicks.
 PINTEREST_VIDEO_PINS = (os.environ.get("PINTEREST_VIDEO_PINS") or "1") not in ("0", "false", "no")
 
 # Amazon disclosure required by both Amazon Associates and TikTok for affiliate content
@@ -393,7 +394,13 @@ def post_to_buffer(video_url, deal, script, thumbnail_url=None, image_url=None):
         # this one — but it still goes through the worker, because a tap from
         # the Pinterest in-app browser should land in the Amazon app too.
         pin_link = smartlink(asin, PINTEREST_TAG, "com")
-        pin_text = f"{title[:200]} — {pct}% off today.\n\n{pin_link}"
+        # No URL in the description. Pinterest does NOT linkify description text
+        # — verified on a live pin, where the worker URL rendered as plain grey
+        # text nobody can tap — and the pin already carries the destination as
+        # its "Visit site" button. So the URL was ~90 characters of unusable
+        # noise sitting in the one field Pinterest actually indexes for search.
+        # Keywords there are what get the pin found in the first place.
+        pin_text = f"{title[:200]} — {pct}% off today. Tap Visit site for the deal."
         try:
             board_id = _get_pinterest_board_id(key, pin["id"], PINTEREST_BOARD_NAME)
             if not board_id:
