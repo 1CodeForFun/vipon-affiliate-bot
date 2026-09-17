@@ -3022,6 +3022,16 @@ def _fetch_amazon_pool(tld, want, exclude_pids, exclude_sigs=None):
     log(f"  🛒 Amazon {tld}: {len(deals)} deal(s) {_bar}, "
         f"{len(pool)} usable, {blocked} blocked, {dupes} near-duplicate, "
         f"{len([d for d in pool if d['brand']])} branded")
+    # Order by what the audience actually clicks (home/kitchen/tech ahead of
+    # apparel) rather than by discount alone — see deal_fit for the numbers.
+    # Ranking happens BEFORE the trim, so the slice keeps the best-fitting
+    # deals rather than the deepest-discounted ones.
+    try:
+        from deal_fit import rank, summarise
+        pool = rank(pool)
+        log(f"  🎯 Amazon {tld}: pool mix — {summarise(pool)}")
+    except Exception as e:
+        log(f"  ⚠️ deal_fit unavailable ({e.__class__.__name__}) — keeping discount order")
     return pool[:want * 3]          # headroom for image/link failures
 
 

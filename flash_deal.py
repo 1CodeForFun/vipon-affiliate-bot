@@ -45,7 +45,12 @@ from bs4 import BeautifulSoup
 from amazon_brand_deals import _new_driver, _wheel, _CARDS_JS
 from vipon26 import _blocked_keyword_hit, _worker_smartlink, AFFILIATE_ID_DEALS
 
-FLASH_MIN_PCT = int(os.getenv("FLASH_MIN_PCT") or "50")
+# Widened from 50 to 40 on the click data: at 50-70% the lightning pool measured
+# 73% clothing, against an audience that gives clothing 7% of its clicks. Dropping
+# the floor roughly triples the home/kitchen/tech supply at the cost of a less
+# dramatic headline number. Under test — put it back to 50 if the weaker discount
+# costs more than the better category fit gains.
+FLASH_MIN_PCT = int(os.getenv("FLASH_MIN_PCT") or "40")
 FLASH_MAX_PCT = int(os.getenv("FLASH_MAX_PCT") or "70")
 FLASH_SCROLLS = int(os.getenv("FLASH_SCROLLS") or "12")
 _CONFIG_TAB   = "_config"
@@ -194,8 +199,12 @@ def fetch_flash_deals(min_pct=FLASH_MIN_PCT, max_pct=FLASH_MAX_PCT,
         if driver:
             try: driver.quit()
             except Exception: pass
-    deals.sort(key=lambda d: -d["pct"])
+    # Best category fit first, deepest discount as the tiebreaker inside a tier —
+    # NOT discount first. See deal_fit for the click data behind that ordering.
+    from deal_fit import rank, summarise
+    deals = rank(deals)
     log(f"  ⚡ flash: {len(deals)} lightning deal(s) at {min_pct}-{max_pct}% with a live timer")
+    log(f"  ⚡ flash: pool mix — {summarise(deals)}")
     return deals
 
 

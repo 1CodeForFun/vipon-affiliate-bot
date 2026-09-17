@@ -125,9 +125,13 @@ def pick_deal(ss):
     recent = read_recent(ss)
     log(f"  {len(recent)} product(s) benched from the last {_REPEAT_DAYS} days")
 
+    from deal_fit import rank, summarise
     deals = fetch_brand_deals(BUFFER_MIN_PCT, scrolls=BUFFER_SCROLLS,
                               want=0, tld="com", exclude_pids=recent)
-    log(f"  {len(deals)} deal(s) on the page")
+    # Category fit first — see deal_fit for the click data. Nothing is dropped,
+    # so a thin page still fills the run.
+    deals = rank(deals)
+    log(f"  {len(deals)} deal(s) on the page — {summarise(deals)}")
 
     repeats = blocked = 0
     for d in deals:
