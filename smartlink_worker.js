@@ -345,30 +345,25 @@ export default {
     const isInApp   = L.includes("fban") || L.includes("fbav") ||
                       L.includes("fbios") || L.includes("instagram");
 
-    // ONLY the Facebook/Instagram in-app browser gets this page. This is the
-    // pre-10-Sep gate, restored.
+    // EVERY iOS visitor gets the app hand-off, however they arrived — pasted
+    // into Safari, tapped inside a post, or copied out of a comment or a video
+    // description. Asked for explicitly on 20 Sep.
     //
-    // On 10 Sep it was widened to every iOS visitor, on the theory that someone
-    // pasting a link from a video description into Safari could be handed to
-    // the Amazon app. Two things went wrong with that:
+    // HISTORY, so nobody re-litigates this by accident. This was widened to all
+    // iOS on 10 Sep, and the video channels fell from 9-10 Sep while Facebook
+    // text posts held up — FB text opens in the in-app browser, which already
+    // had this page, so the only population that changed was people pasting
+    // links from video descriptions. On that evidence it was reverted on 16 Sep
+    // and the videos recovered. It is being re-enabled deliberately, with the
+    // risk understood and accepted.
     //
-    //   1. It did not work. Tested twice on a real phone, Safari and Chrome:
-    //      still opened the Amazon website, not the app. Neither the Universal
-    //      Link nor the com.amazon.mobile.shopping.web:// scheme fired.
-    //   2. It cost a page load and a delay for every iOS visitor who was
-    //      previously getting an instant 302.
-    //
-    // And the population it changed is exactly the one that fell. Facebook text
-    // posts open in the FB in-app browser, which was already on this page
-    // before 10 Sep and is unaffected either way — those held up. Video
-    // descriptions are not tappable, so their viewers copy the link into Safari
-    // or Chrome, and those are the visitors who newly got an interstitial
-    // instead of a redirect. Reels, YouTube, TikTok and IG all fell from 9 Sep;
-    // FB text did not.
-    //
-    // So: in-app keeps the page (it works there, and Facebook renders its own
-    // "Open in Amazon" affordance), everyone else on iOS goes straight through.
-    if (isIOS && isInApp) {
+    // What is DIFFERENT this time: the page used to do nothing at all until the
+    // visitor tapped the yellow button, so anyone who did not tap experienced
+    // it as a slow redirect — which is very likely what "it still opens the
+    // browser" meant when it was tested on a real phone. It now fires the app
+    // scheme on load, which is legal for a custom scheme (unlike a Universal
+    // Link, which genuinely does need a tap).
+    if (isIOS) {
       // Amazon's iOS app registers this scheme. Unlike a Universal Link it does
       // not depend on a genuine tap gesture, and it is not disabled once the
       // user has picked "open in browser" for amazon.com — which is why the
@@ -403,25 +398,35 @@ a.web{color:#007185;font-size:14px}</style>
   var web = ${JSON.stringify(dp)};
   var go  = document.getElementById('go');
 
-  // No synthetic click. iOS fires Universal Links only on a genuine user
-  // gesture, so a scripted click cannot open the app — it just navigates to
-  // the web URL, which is what made the previous version behave exactly like
-  // the redirect it replaced.
-  go.addEventListener('click', function(e){
-    e.preventDefault();
-    var left = false;
-    // If the app takes over, the page is backgrounded and these fire.
-    function bail(){ left = true; }
-    document.addEventListener('visibilitychange', function(){
-      if (document.hidden) bail();
-    });
-    window.addEventListener('pagehide', bail);
-
-    location.href = app;          // custom scheme: opens the app directly
-
-    // Nothing happened after 1.2s means the app is not installed.
-    setTimeout(function(){ if (!left && !document.hidden) location.href = web; }, 1200);
+  var left = false;
+  // When the app takes over, the page is backgrounded and one of these fires.
+  // That is the ONLY reliable signal that the hand-off worked, so the web
+  // fallback is cancelled from here rather than guessed at.
+  function bail(){ left = true; }
+  document.addEventListener('visibilitychange', function(){
+    if (document.hidden) bail();
   });
+  window.addEventListener('pagehide', bail);
+  window.addEventListener('blur', bail);
+
+  function openApp(){
+    location.href = app;        // custom scheme — opens the app directly
+    // 2.5s, not 1.2s. A cold app start is regularly slower than 1.2s, and the
+    // old timer fired mid-launch: the browser navigated to the Amazon website
+    // underneath, so returning from the app showed the web page and the whole
+    // thing looked like it had never worked.
+    setTimeout(function(){
+      if (!left && !document.hidden) location.href = web;
+    }, 2500);
+  }
+
+  // FIRE ON LOAD. The previous version waited for a tap on the yellow button,
+  // so anyone who did not tap sat on a dead page and then bounced to the web —
+  // indistinguishable from a plain redirect. A CUSTOM SCHEME does not need a
+  // user gesture (a Universal Link does, which is why the https:// version
+  // could never work here). The button stays for a manual retry.
+  openApp();
+  go.addEventListener('click', function(e){ e.preventDefault(); left = false; openApp(); });
 })();
 </script>
 </body></html>`;
