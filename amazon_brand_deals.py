@@ -348,6 +348,38 @@ def _click_load_more(driver) -> bool:
     return False
 
 
+def _click_connection_retry(driver) -> bool:
+    """Click Amazon's own "Try again" button when the grid's background
+    pagination request fails. True if it was clicked.
+
+    This is NOT a bot block — verified via a saved screenshot/HTML: normal page
+    title, no redirect, no block markers, full-size page. Amazon's front end
+    just shows its own recovery UI:
+        "Looks like there's a problem with the connection." [Try again]
+      <input data-testid="connection-problem-retry-button">
+    Without clicking this, the page looks permanently exhausted: height frozen,
+    zero new cards, every subsequent scroll and "View more deals" click lands on
+    nothing — indistinguishable from genuinely reaching the end of the grid.
+    Confirmed to be what was capping both scripted AND real-wheel scrolling
+    identically on the GitHub runner (both stuck at the same ~20-30 total),
+    which is why the difference could never be about the scroll method.
+    """
+    from selenium.webdriver.common.by import By
+    try:
+        for el in driver.find_elements(
+                By.CSS_SELECTOR, '[data-testid="connection-problem-retry-button"]'):
+            if not el.is_displayed():
+                continue
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center'});", el)
+            time.sleep(0.4)
+            driver.execute_script("arguments[0].click();", el)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _new_driver(headless=True):
     """Chrome for the deals page. undetected_chromedriver where available (same
     as the Vipon scrape), plain Selenium otherwise."""
@@ -465,9 +497,19 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=60, want=0,
 
             clicked = False
             if not grew:
-                clicked = _click_load_more(driver)
-                if clicked:
-                    time.sleep(3.5)
+                # Connection-retry first: while that banner is up, "View more
+                # deals" is either absent or inert, so trying it first just
+                # burns a round establishing what clicking the retry button
+                # would have told us immediately.
+                retried = _click_connection_retry(driver)
+                if retried:
+                    log(f"  deals: connection-problem retry — clicking through")
+                    time.sleep(4.5)
+                    clicked = True
+                else:
+                    clicked = _click_load_more(driver)
+                    if clicked:
+                        time.sleep(3.5)
 
             if got or grew or clicked:
                 stalls = 0

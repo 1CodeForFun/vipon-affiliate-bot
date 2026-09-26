@@ -92,7 +92,20 @@ def run(tld, headless, mode, max_rounds=60):
 
             if len(seen) == before:
                 stagnant += 1
-                if stagnant in (6, 14, 22):
+                if stagnant in (2, 6, 14, 22):
+                    # Amazon's own background-request failure, not a block —
+                    # see _click_connection_retry in amazon_brand_deals.py for
+                    # what this looks like and why it was found. Checked BEFORE
+                    # "View more deals": while this banner is up, that button is
+                    # either absent or inert, so trying it first just burns a
+                    # stagnant round for nothing.
+                    retried = A._click_connection_retry(driver)
+                    if retried:
+                        log(f"    round {i}: clicked connection-problem 'Try again'")
+                        time.sleep(4.5)
+                        harvest(driver, seen)
+                        stagnant = 0
+                        continue
                     # At the bottom: try the load-more button.
                     clicked = driver.execute_script("""
                         const b = [...document.querySelectorAll('button,a,div[role="button"],span')]
