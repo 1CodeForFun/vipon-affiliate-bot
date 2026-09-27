@@ -601,16 +601,30 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=60, want=0,
 
         # Try the raw API first — see _api_walk. Only on amazon.com: that is
         # the marketplace this module exists to fix, and the only one this has
-        # ever worked on. On amazon.ca it has failed with an immediate 503
-        # BOTH times it was tried — once in testing, once in the first real
-        # production run, where .ca then also came back 0/0 from its
-        # scroll/click fallback in the same run, a result .ca has never once
-        # produced in this whole investigation. Not proven that the failed API
-        # call caused that — but proven that the API has never helped .ca, so
-        # there is nothing to lose by not attempting it there and every reason
-        # to remove it as a possible cause. .ca gets the exact pre-existing
-        # path, untouched.
-        api_products = _api_walk(driver, tld) if tld == "com" else []
+        # ever worked on. On amazon.ca it failed on both prior attempts, and
+        # excluding it entirely here proved it was never the cause of .ca's
+        # own (separate, still-open) problem — a later run with .ca fully
+        # excluded from the API still came back 0/0. .ca gets the exact
+        # pre-existing path, untouched.
+        #
+        # RETRIED up to 3 times on .com. Measured back to back on real
+        # production runs: attempt 1 returned 500 products one day, then
+        # returned NOTHING the next — same marketplace, same code, so this is
+        # an intermittent failure, not a permanent one. A single miss should
+        # not throw away a mechanism proven to outperform the scroll fallback
+        # by roughly 4x when it lands. Short pause between attempts rather
+        # than an immediate re-hit, in case the miss is rate-limiting rather
+        # than a one-off blip.
+        api_products = []
+        if tld == "com":
+            for attempt in range(1, 4):
+                api_products = _api_walk(driver, tld)
+                if api_products:
+                    break
+                log(f"  deals: API attempt {attempt}/3 returned nothing"
+                    + ("" if attempt == 3 else " — retrying"))
+                if attempt < 3:
+                    time.sleep(3)
         if api_products:
             log(f"  deals: API returned {len(api_products)} product(s) — using directly")
             for p in api_products:
