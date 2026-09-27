@@ -371,26 +371,33 @@ function buildUrl(startIndex, pageSize) {{
 }}
 (async () => {{
   const all = [];
+  const trace = [];
   let cursor = 0;
   for (let i = 0; i < {max_pages}; i++) {{
     try {{
       const r = await fetch(buildUrl(cursor, {page_size}), {{headers: {{accept: 'application/json'}}}});
-      if (!r.ok) break;
+      if (!r.ok) {{ trace.push({{i, status: r.status, ok: false}}); break; }}
       const j = await r.json();
       const got = j.products || [];
       all.push(...got);
+      trace.push({{i, status: r.status, ok: true, got: got.length, nextIndex: j.nextIndex}});
       if (!got.length || j.nextIndex == null || j.nextIndex === cursor) break;
       cursor = j.nextIndex;
-    }} catch (e) {{ break; }}
+    }} catch (e) {{ trace.push({{i, error: String(e && e.message || e)}}); break; }}
   }}
-  done(JSON.stringify(all));
+  done(JSON.stringify({{all, trace}}));
 }})();
 """
     try:
         raw = driver.execute_async_script(script)
-        return json.loads(raw) if raw else []
+        if not raw:
+            log(f"  deals: API walk — execute_async_script returned nothing at all")
+            return []
+        parsed = json.loads(raw)
+        log(f"  deals: API walk trace: {parsed.get('trace')}")
+        return parsed.get("all") or []
     except Exception as e:
-        log(f"  deals: API walk failed ({e.__class__.__name__}: {str(e)[:100]})")
+        log(f"  deals: API walk failed ({e.__class__.__name__}: {str(e)[:150]})")
         return []
 
 
@@ -616,14 +623,17 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=60, want=0,
         # than an immediate re-hit, in case the miss is rate-limiting rather
         # than a one-off blip.
         api_products = []
+        log(f"  deals: API path — tld={tld!r}, will attempt={tld == 'com'}")
         if tld == "com":
             for attempt in range(1, 4):
+                log(f"  deals: API attempt {attempt}/3 starting...")
                 api_products = _api_walk(driver, tld)
+                log(f"  deals: API attempt {attempt}/3 returned "
+                    f"{len(api_products)} raw item(s)")
                 if api_products:
                     break
-                log(f"  deals: API attempt {attempt}/3 returned nothing"
-                    + ("" if attempt == 3 else " — retrying"))
                 if attempt < 3:
+                    log(f"  deals: retrying in 3s...")
                     time.sleep(3)
         if api_products:
             log(f"  deals: API returned {len(api_products)} product(s) — using directly")
