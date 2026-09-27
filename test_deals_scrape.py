@@ -74,7 +74,7 @@ def snap(driver, name):
 
 def probe(tld, scrolls, headless):
     """One baseline pass. Records, at each stage, what the page actually is."""
-    url = A._goldbox_url(0, 100, tld=tld)
+    url = A._deals_url(0, 100, tld=tld)
     log(f"\n{'='*66}\nMARKETPLACE: amazon.{tld}\n  url: {url}\n{'='*66}")
 
     report = {"tld": tld, "url": url}

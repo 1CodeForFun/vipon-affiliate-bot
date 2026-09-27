@@ -68,7 +68,7 @@ def run(tld, headless, mode, max_rounds=60, source="goldbox"):
             same connection-problem wall on CI; that's what this option is for.
     """
     url = (f"https://www.amazon.{tld}/deals" if source == "deals"
-           else A._goldbox_url(0, 100, tld=tld))
+           else A._deals_url(0, 100, tld=tld))
     log(f"\n{'='*64}\n  amazon.{tld}  |  {'headless' if headless else 'visible'}  |  "
         f"{mode} scrolling  |  source={source}\n{'='*64}")
     driver = A._new_driver(headless)

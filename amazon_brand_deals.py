@@ -7,8 +7,20 @@ Amazon deals that are simply on sale for a limited window. So the pitch has to
 lean on the two things they do have — the discount PERCENTAGE and the fact that
 the deal EXPIRES — rather than on a code the viewer has to enter.
 
-Sourcing: the goldbox deals page with a percentOff>=40 filter, then filtered
-down to recognised brands.
+Sourcing: the same /deals page flash_deal.py uses for lightning deals (unfiltered
+here rather than bubble-id-scoped to lightning), with an optional percentOff
+filter, then filtered down to recognised brands.
+
+WAS /gp/goldbox/. Dropped 2026-09-27: on the GitHub runner, goldbox's own
+background pagination request started failing on amazon.com specifically —
+Amazon's real "Looks like there's a problem with the connection" retry wall,
+confirmed via a saved screenshot, not a bot block (no block markers, normal
+page, no redirect) — and kept failing on every retry for the rest of the
+session, capping the pool at ~20-30 regardless of scroll method, while
+amazon.ca on the identical run scaled past 400 either way. /deals uses the
+IDENTICAL card markup (data-testid=product-card, data-asin, the same
+p[id^=title-] title structure — confirmed directly), so this is a same-parser
+swap, not a rewrite.
 
 SELENIUM IS REQUIRED, not a convenience. Measured 2026-08-09: fetching the same
 URL with `requests` returns the UNFILTERED page — the percentOff refinement is
@@ -83,18 +95,20 @@ def log(m):
     print(m, flush=True)
 
 
-def _goldbox_url(min_pct=MIN_PCT_DEFAULT, max_pct=100, page=1, tld="com"):
-    """Goldbox with a working percentOff filter.
+def _deals_url(min_pct=MIN_PCT_DEFAULT, max_pct=100, page=1, tld="com"):
+    """/deals with a working percentOff filter. Was _goldbox_url / /gp/goldbox/
+    — see the module docstring for why that was dropped.
 
     The discounts-widget value is a JSON object, json-stringified AGAIN so the
     inner quotes are escaped, then double URL-encoded. Reverse-engineered from
-    the live deals-page slider; reused from publish_reel_hook.
+    the live deals-page slider; the same mechanism flash_deal.py uses for the
+    lightning-deals bubble, confirming it works identically on plain /deals.
     """
     # No floor asked for -> request the unrefined deals page. Sending a
     # percentOff refinement of min 0 still narrows the grid to items Amazon
     # has tagged with a discount band, which is not the same as "everything".
     if min_pct <= 0 and max_pct >= 100:
-        url = f"https://www.amazon.{tld}/gp/goldbox/"
+        url = f"https://www.amazon.{tld}/deals"
         return url + (f"?page={page}" if page > 1 else "")
 
     obj = {"state": {"rangeRefinementFilters": {"percentOff": {"min": min_pct,
@@ -102,7 +116,7 @@ def _goldbox_url(min_pct=MIN_PCT_DEFAULT, max_pct=100, page=1, tld="com"):
            "version": 1}
     inner = json.dumps(obj, separators=(",", ":"))
     enc   = quote(quote(json.dumps(inner), safe=""), safe="")
-    url   = f"https://www.amazon.{tld}/gp/goldbox/?discounts-widget={enc}"
+    url   = f"https://www.amazon.{tld}/deals?discounts-widget={enc}"
     return url + (f"&page={page}" if page > 1 else "")
 
 
@@ -462,7 +476,7 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=60, want=0,
     excl = {str(p) for p in (exclude_pids or ())}
     found, seen, fresh = [], set(), 0
     try:
-        driver.get(_goldbox_url(min_pct, 100, tld=tld))
+        driver.get(_deals_url(min_pct, 100, tld=tld))
         time.sleep(8)
         stalls, last_h = 0, 0
         for i in range(max(1, scrolls)):
@@ -539,7 +553,7 @@ def main():
     ap.add_argument("--branded-only", action="store_true")
     args = ap.parse_args()
 
-    log(f"searching goldbox for {args.min_pct}%+ deals from {len(BRANDS)} known brands...")
+    log(f"searching /deals for {args.min_pct}%+ deals from {len(BRANDS)} known brands...")
     deals = fetch_brand_deals(args.min_pct, args.scrolls,
                               headless=not args.show_browser,
                               require_brand=args.branded_only)

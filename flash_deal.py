@@ -70,8 +70,8 @@ def lightning_url(min_pct=FLASH_MIN_PCT, max_pct=FLASH_MAX_PCT, tld="com"):
       bubble-id        selects the Lightning deals pill
       discounts-widget the percentOff slider — a JSON object, json-stringified
                        AGAIN so the inner quotes escape, then double URL-encoded
-                       (same encoding as _goldbox_url; it is what the live page
-                       sends).
+                       (same encoding as amazon_brand_deals._deals_url; it is
+                       what the live page sends).
     """
     obj = {"state": {"rangeRefinementFilters": {"percentOff": {"min": min_pct,
                                                               "max": max_pct}}},
