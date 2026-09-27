@@ -331,6 +331,126 @@ def _parse_cards(html, min_pct, require_brand=False):
     return out
 
 
+_API_RANKING_CONTEXT = json.dumps({"pageTypeId": "deals", "rankGroup": "ESPEON_RANKING"})
+_API_FILTERS = json.dumps({
+    "includedDepartments": [], "excludedDepartments": [],
+    "includedTags": [], "excludedTags": ["restrictedasin", "noprime", "GS_DEAL",
+                                         "StudentDeal", "restrictedcontent"],
+    "promotionTypes": [], "accessTypes": [], "brandIds": [], "unifiedIds": [],
+})
+
+
+def _fmt_price(x):
+    return f"${x:,.2f}".rstrip("0").rstrip(".") if x % 1 else f"${x:,.0f}"
+
+
+def _api_walk(driver, tld, max_pages=14, page_size=50):
+    """Walk the raw JSON API behind /deals directly — found via the browser
+    pane 2026-09-27: the grid is backed by a plain endpoint
+
+        /d2b/api/v1/products/search?pageSize=N&startIndex=M&...
+
+    that the rendered page itself calls on scroll. Calling it directly from
+    inside an already-loaded /deals tab, bypassing the scroll/click/DOM path
+    entirely, measured 300 unique products on amazon.com from the GitHub
+    runner in ~10s — the runner that this whole module exists to work around,
+    which has never once given more than ~30 via scrolling. A bare HTTP
+    request with no browser session gets an immediate 503; this only works
+    from inside a real page load, which is why `driver` (already on /deals by
+    the time this is called) is required, not optional.
+
+    Returns raw product dicts (whatever the API gives back) or [] if the
+    endpoint refuses — the caller falls back to the scroll/click path when
+    that happens, which is exactly what was observed on amazon.ca in the same
+    test that proved this out on .com.
+    """
+    script = f"""
+const done = arguments[0];
+function buildUrl(startIndex, pageSize) {{
+  return `https://www.amazon.{tld}/d2b/api/v1/products/search?pageSize=${{pageSize}}&startIndex=${{startIndex}}&calculateRefinements=false&rankingContext=${{encodeURIComponent({_API_RANKING_CONTEXT!r})}}&filters=${{encodeURIComponent({_API_FILTERS!r})}}&pinnedPromotionsLayoutGroup=TDP26Devices`;
+}}
+(async () => {{
+  const all = [];
+  let cursor = 0;
+  for (let i = 0; i < {max_pages}; i++) {{
+    try {{
+      const r = await fetch(buildUrl(cursor, {page_size}), {{headers: {{accept: 'application/json'}}}});
+      if (!r.ok) break;
+      const j = await r.json();
+      const got = j.products || [];
+      all.push(...got);
+      if (!got.length || j.nextIndex == null || j.nextIndex === cursor) break;
+      cursor = j.nextIndex;
+    }} catch (e) {{ break; }}
+  }}
+  done(JSON.stringify(all));
+}})();
+"""
+    try:
+        raw = driver.execute_async_script(script)
+        return json.loads(raw) if raw else []
+    except Exception as e:
+        log(f"  deals: API walk failed ({e.__class__.__name__}: {str(e)[:100]})")
+        return []
+
+
+def _shape_api_product(p, min_pct, require_brand):
+    """One API product -> the same dict shape _parse_cards produces, so
+    nothing downstream (deal_fit, the sheet writer, the caption builder) has
+    to know which path a deal came from."""
+    asin = (p.get("asin") or "").strip()
+    if not re.fullmatch(r"[A-Z0-9]{10}", asin):
+        return None
+    title = (p.get("title") or "").strip()[:200]
+    if not title or not _is_usable_title(title):
+        return None
+
+    price_block = p.get("price") or {}
+    pay = (price_block.get("priceToPay") or {}).get("price")
+    basis = (price_block.get("basisPrice") or {}).get("price")
+    price = list_price = ""
+    pay_v = basis_v = None
+    try:
+        if pay is not None:
+            pay_v = float(str(pay).replace(",", ""))
+            price = _fmt_price(pay_v)
+        if basis is not None:
+            basis_v = float(str(basis).replace(",", ""))
+            list_price = _fmt_price(basis_v)
+    except ValueError:
+        pass
+
+    # Computed from the two labelled prices when both exist — more reliable
+    # than parsing the badge text, since these are exact numbers rather than a
+    # rendered string. Falls back to the badge only when a price is missing.
+    pct = None
+    if pay_v is not None and basis_v is not None and basis_v > 0:
+        pct = round((basis_v - pay_v) / basis_v * 100)
+    if pct is None:
+        badge_text = " ".join(
+            f.get("text", "")
+            for f in (((p.get("dealBadge") or {}).get("label") or {})
+                      .get("content", {}).get("fragments", []) or [])
+        )
+        m = re.search(r"(\d+)\s*%", badge_text)
+        pct = int(m.group(1)) if m else 0
+    if pct < min_pct:
+        return None
+
+    image = ""
+    hi = ((p.get("image") or {}).get("hiRes") or {})
+    if hi.get("baseUrl"):
+        image = f"{hi['baseUrl']}.{hi.get('extension', 'jpg')}"
+
+    brand = match_brand(title)
+    if require_brand and not brand:
+        return None
+
+    return {"asin": asin, "title": title, "pct": pct, "brand": brand or "",
+            "price": price, "list_price": list_price, "image": image,
+            "ends_in": ""}
+
+
 def _click_load_more(driver) -> bool:
     """Click the grid's "View more deals" button. True if it was clicked.
 
@@ -478,8 +598,34 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=60, want=0,
     try:
         driver.get(_deals_url(min_pct, 100, tld=tld))
         time.sleep(8)
+
+        # Try the raw API first — see _api_walk. Only falls through to the
+        # scroll/click path below when the API gives back nothing at all,
+        # which is the one failure mode actually observed (an immediate 503
+        # on amazon.ca in testing; amazon.com, the marketplace this module
+        # exists to fix, returned 300 products this way against ~30 the old
+        # path ever got there). Reversible by design: this is one extra check
+        # before the existing loop, not a replacement of it.
+        api_products = _api_walk(driver, tld)
+        if api_products:
+            log(f"  deals: API returned {len(api_products)} product(s) — using directly")
+            for p in api_products:
+                d = _shape_api_product(p, min_pct, require_brand)
+                if not d or d["asin"] in seen:
+                    continue
+                seen.add(d["asin"])
+                found.append(d)
+                if d["asin"] not in excl:
+                    fresh += 1
+                if want and fresh >= want:
+                    break
+            log(f"  deals: {len(found)} usable from the API "
+                f"({fresh} new against the {want or 'no'} target)")
+        else:
+            log(f"  deals: API path returned nothing — falling back to scroll/click")
+
         stalls, last_h = 0, 0
-        for i in range(max(1, scrolls)):
+        for i in range(max(1, scrolls) if not found else 0):
             # Read the cards present RIGHT NOW. They are unmounted as they
             # scroll out of view, so a card missed this round is gone.
             try:
@@ -519,7 +665,17 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=60, want=0,
                 if retried:
                     log(f"  deals: connection-problem retry — clicking through")
                     time.sleep(4.5)
-                    clicked = True
+                    # NOT credited as progress. A click succeeding just means the
+                    # button existed — it says nothing about whether the retry
+                    # actually loaded anything. Measured live: it usually loads
+                    # nothing, and the wall reappears every round. Crediting the
+                    # click itself (the old behaviour) kept resetting `stalls` to
+                    # 0 forever, so a page stuck behind this wall never hit the
+                    # give-up threshold below and ground through the entire
+                    # scroll budget instead of bailing in ~8 rounds like a
+                    # genuinely exhausted page does. Leaving `clicked` False here
+                    # lets the got/grew check next round be the only judge: real
+                    # new cards reset the counter, a bare click does not.
                 else:
                     clicked = _click_load_more(driver)
                     if clicked:
