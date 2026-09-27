@@ -54,7 +54,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Probe the deals page
-        if: ${{ github.event.inputs.mode != 'load-timing' }}
+        if: ${{ github.event.inputs.mode == 'full' || github.event.inputs.mode == '' }}
         run: |
           python test_deals_scrape.py \
             --tld "${{ github.event.inputs.tld || 'both' }}" \
@@ -64,7 +64,7 @@ jobs:
       # Locally, headless, both marketplaces reach 400-500 deals either way.
       # This is the identical test on the runner that returns single digits.
       - name: Scroll-method comparison
-        if: ${{ always() && github.event.inputs.mode != 'load-timing' }}
+        if: ${{ always() && (github.event.inputs.mode == 'full' || github.event.inputs.mode == '') }}
         run: |
           python test_wheel_scroll.py --tld "${{ github.event.inputs.tld || 'both' }}" \
             --rounds 55 --source "${{ github.event.inputs.source || 'goldbox' }}"
