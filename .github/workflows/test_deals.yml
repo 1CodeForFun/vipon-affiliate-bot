@@ -20,6 +20,10 @@ on:
         description: 'Scroll rounds (default 8)'
         required: false
         default: '8'
+      source:
+        description: 'Page for the scroll-method comparison: goldbox, deals, or both'
+        required: false
+        default: 'goldbox'
 
 jobs:
   probe:
@@ -56,7 +60,9 @@ jobs:
       # This is the identical test on the runner that returns single digits.
       - name: Scroll-method comparison
         if: always()
-        run: python test_wheel_scroll.py --tld "${{ github.event.inputs.tld || 'both' }}" --rounds 55
+        run: |
+          python test_wheel_scroll.py --tld "${{ github.event.inputs.tld || 'both' }}" \
+            --rounds 55 --source "${{ github.event.inputs.source || 'goldbox' }}"
 
       - name: Upload what Amazon served
         if: always()

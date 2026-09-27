@@ -59,10 +59,18 @@ def harvest(driver, seen):
         seen.add(a)
 
 
-def run(tld, headless, mode, max_rounds=60):
-    """mode: 'wheel' (real input) or 'script' (what the scraper does today)."""
-    url = A._goldbox_url(0, 100, tld=tld)
-    log(f"\n{'='*64}\n  amazon.{tld}  |  {'headless' if headless else 'visible'}  |  {mode} scrolling\n{'='*64}")
+def run(tld, headless, mode, max_rounds=60, source="goldbox"):
+    """mode: 'wheel' (real input) or 'script' (what the scraper does today).
+    source: 'goldbox' (/gp/goldbox/, what production uses today) or
+            'deals' (plain /deals, unfiltered — same card markup, confirmed via
+            the built-in pane: data-testid=product-card, data-asin, the same
+            p[id^=title-] title structure. Untested is whether it also hits the
+            same connection-problem wall on CI; that's what this option is for.
+    """
+    url = (f"https://www.amazon.{tld}/deals" if source == "deals"
+           else A._goldbox_url(0, 100, tld=tld))
+    log(f"\n{'='*64}\n  amazon.{tld}  |  {'headless' if headless else 'visible'}  |  "
+        f"{mode} scrolling  |  source={source}\n{'='*64}")
     driver = A._new_driver(headless)
     seen, marks = set(), []
     try:
@@ -125,7 +133,7 @@ def run(tld, headless, mode, max_rounds=60):
                 stagnant = 0
 
         h = driver.execute_script("return document.body.scrollHeight")
-        log(f"\n  RESULT  amazon.{tld} {mode}: {len(seen)} unique deals, final height {h}")
+        log(f"\n  RESULT  amazon.{tld} {mode} ({source}): {len(seen)} unique deals, final height {h}")
         return len(seen)
     except Exception as e:
         log(f"  ERROR: {e.__class__.__name__}: {str(e)[:140]}")
@@ -142,17 +150,22 @@ def main():
     ap.add_argument("--tld", default="both", choices=["com", "ca", "both"])
     ap.add_argument("--show", action="store_true")
     ap.add_argument("--rounds", type=int, default=60)
+    ap.add_argument("--source", default="goldbox", choices=["goldbox", "deals", "both"],
+                    help="goldbox=/gp/goldbox/ (production today), deals=plain /deals, "
+                         "both=run both for direct comparison")
     args = ap.parse_args()
     headless = not args.show
+    sources = ["goldbox", "deals"] if args.source == "both" else [args.source]
 
     results = {}
     for tld in (["com", "ca"] if args.tld == "both" else [args.tld]):
-        results[(tld, "script")] = run(tld, headless, "script", args.rounds)
-        results[(tld, "wheel")] = run(tld, headless, "wheel", args.rounds)
+        for source in sources:
+            results[(tld, "script", source)] = run(tld, headless, "script", args.rounds, source)
+            results[(tld, "wheel", source)] = run(tld, headless, "wheel", args.rounds, source)
 
     log(f"\n{'='*64}\n  SUMMARY ({'headless' if headless else 'visible'})\n{'='*64}")
-    for (tld, mode), n in results.items():
-        log(f"    amazon.{tld:3} {mode:7} -> {n:>4} deals")
+    for (tld, mode, source), n in results.items():
+        log(f"    amazon.{tld:3} {mode:7} {source:8} -> {n:>4} deals")
     return 0
 
 
