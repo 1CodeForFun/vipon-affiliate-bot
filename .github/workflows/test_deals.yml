@@ -25,7 +25,7 @@ on:
         required: false
         default: 'goldbox'
       mode:
-        description: 'full (deals probe + scroll comparison) or load-timing (only the initial-load card-count sampler, skips the other two — use this when only the load-timing question is open, to avoid re-running probes already answered)'
+        description: 'full (deals probe + scroll comparison) / load-timing (initial-load card-count sampler only) / api-direct (test the raw JSON API found under /deals, bypassing scroll+DOM entirely) — each mode skips the others, so a dispatch only pays for what is actually being asked'
         required: false
         default: 'full'
 
@@ -80,6 +80,16 @@ jobs:
       - name: Initial-load timing (no scroll, no click)
         if: ${{ always() && github.event.inputs.mode == 'load-timing' }}
         run: python test_load_timing.py --tld "${{ github.event.inputs.tld || 'both' }}"
+
+      # Found via the browser pane: /deals is backed by a plain JSON API
+      # (d2b/api/v1/products/search), bypassing scroll/click/DOM entirely.
+      # 300 unique products in 3.2s from a residential session. What is
+      # UNKNOWN and can only be answered from here: whether .com serves this
+      # to the runner at all, and whether it needs real browser cookies or a
+      # bare request works with nothing.
+      - name: Raw API direct (bypasses scroll and DOM)
+        if: ${{ always() && github.event.inputs.mode == 'api-direct' }}
+        run: python test_api_direct.py --tld "${{ github.event.inputs.tld || 'both' }}"
 
       - name: Upload what Amazon served
         if: always()
