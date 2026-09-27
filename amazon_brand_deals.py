@@ -599,14 +599,18 @@ def fetch_brand_deals(min_pct=MIN_PCT_DEFAULT, scrolls=60, want=0,
         driver.get(_deals_url(min_pct, 100, tld=tld))
         time.sleep(8)
 
-        # Try the raw API first — see _api_walk. Only falls through to the
-        # scroll/click path below when the API gives back nothing at all,
-        # which is the one failure mode actually observed (an immediate 503
-        # on amazon.ca in testing; amazon.com, the marketplace this module
-        # exists to fix, returned 300 products this way against ~30 the old
-        # path ever got there). Reversible by design: this is one extra check
-        # before the existing loop, not a replacement of it.
-        api_products = _api_walk(driver, tld)
+        # Try the raw API first — see _api_walk. Only on amazon.com: that is
+        # the marketplace this module exists to fix, and the only one this has
+        # ever worked on. On amazon.ca it has failed with an immediate 503
+        # BOTH times it was tried — once in testing, once in the first real
+        # production run, where .ca then also came back 0/0 from its
+        # scroll/click fallback in the same run, a result .ca has never once
+        # produced in this whole investigation. Not proven that the failed API
+        # call caused that — but proven that the API has never helped .ca, so
+        # there is nothing to lose by not attempting it there and every reason
+        # to remove it as a possible cause. .ca gets the exact pre-existing
+        # path, untouched.
+        api_products = _api_walk(driver, tld) if tld == "com" else []
         if api_products:
             log(f"  deals: API returned {len(api_products)} product(s) — using directly")
             for p in api_products:
