@@ -24,6 +24,10 @@ on:
         description: 'Page for the scroll-method comparison: goldbox, deals, or both'
         required: false
         default: 'goldbox'
+      mode:
+        description: 'full (deals probe + scroll comparison) or load-timing (only the initial-load card-count sampler, skips the other two — use this when only the load-timing question is open, to avoid re-running probes already answered)'
+        required: false
+        default: 'full'
 
 jobs:
   probe:
@@ -50,6 +54,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Probe the deals page
+        if: ${{ github.event.inputs.mode != 'load-timing' }}
         run: |
           python test_deals_scrape.py \
             --tld "${{ github.event.inputs.tld || 'both' }}" \
@@ -59,10 +64,22 @@ jobs:
       # Locally, headless, both marketplaces reach 400-500 deals either way.
       # This is the identical test on the runner that returns single digits.
       - name: Scroll-method comparison
-        if: always()
+        if: ${{ always() && github.event.inputs.mode != 'load-timing' }}
         run: |
           python test_wheel_scroll.py --tld "${{ github.event.inputs.tld || 'both' }}" \
             --rounds 55 --source "${{ github.event.inputs.source || 'goldbox' }}"
+
+      # No scroll, no click — samples the on-screen card count every 0.5s for
+      # ~22s right after navigation, to see whether the fixed 8s initial wait
+      # in fetch_brand_deals() is actually long enough, or whether cards are
+      # still mounting well past it (which would explain deals visible in a
+      # real browser before any button click that never make it into the
+      # scrape). See test_load_timing.py's own docstring for why this has to
+      # run from here and not locally: timing is exactly the kind of thing
+      # that can differ between this runner and any other machine.
+      - name: Initial-load timing (no scroll, no click)
+        if: ${{ always() && github.event.inputs.mode == 'load-timing' }}
+        run: python test_load_timing.py --tld "${{ github.event.inputs.tld || 'both' }}"
 
       - name: Upload what Amazon served
         if: always()
