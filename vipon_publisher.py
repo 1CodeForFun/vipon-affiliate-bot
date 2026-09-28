@@ -478,11 +478,14 @@ def _yt_aftercare(video_id: str, product: dict, token_file: str) -> None:
     # The API cannot pin a comment — commentThreads exposes only insert and
     # list, and no isPinned field exists in the v3 schema. Posted as the
     # channel so it can be pinned by hand in Studio.
+    #
+    # Link only — same rule as the description, and for the same reason: this
+    # is meant to be copied by hand, and a title/code/disclaimer sharing the
+    # comment gets swept into that selection along with it. The disclaimer
+    # belongs in the bio only, not on each individual video — already agreed
+    # and shouldn't have been here.
     if video_id:
-        code = (product.get("code") or "").strip()
-        body = (f"🛒 {Q.short_title(title)}\n{link}"
-                + (f"\n🏷️ Use code {code} at checkout" if code else "")
-                + "\n\nAs an Amazon Associate we earn from qualifying purchases.")
+        body = link
         try:
             Q.comment_on_video(video_id, body, token=token)
         except Exception as e:
