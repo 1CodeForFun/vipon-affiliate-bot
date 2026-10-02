@@ -36,7 +36,7 @@ jobs:
         run: |
           sudo apt-get update -y
           # fonts-noto-color-emoji: the hook overlay draws colour emoji with Pillow
-          sudo apt-get install -y ffmpeg chromium-browser chromium-chromedriver fonts-noto-color-emoji
+          sudo apt-get install -y ffmpeg chromium-browser fonts-noto-color-emoji
 
       - name: Install Python dependencies
         run: |

@@ -30,7 +30,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y ffmpeg chromium-browser chromium-chromedriver
+          sudo apt-get install -y ffmpeg chromium-browser
 
       - name: Install Python dependencies
         run: |

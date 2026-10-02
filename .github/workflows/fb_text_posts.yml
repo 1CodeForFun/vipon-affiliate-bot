@@ -31,7 +31,7 @@ jobs:
       - name: Install system dependencies (Chrome)
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y chromium-browser chromium-chromedriver
+          sudo apt-get install -y chromium-browser
 
       # Deliberately NOT -r requirements.txt: this flow's job is posting, and the
       # full file pulls edge-tts, openai, cloudinary and the Google API stack,
