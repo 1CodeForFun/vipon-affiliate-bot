@@ -34,7 +34,7 @@ jobs:
           sudo apt-get install -y ffmpeg chromium-browser fonts-noto-color-emoji
 
       - name: Install Python dependencies
-        run: pip install gspread oauth2client requests selenium six google-auth google-auth-oauthlib google-api-python-client Pillow
+        run: pip install gspread oauth2client requests selenium undetected-chromedriver six google-auth google-auth-oauthlib google-api-python-client Pillow
 
       - name: Install Amazon PA-API SDK from secrets repo
         run: |
