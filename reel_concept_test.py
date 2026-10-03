@@ -431,14 +431,42 @@ def capture_page(asin, td, ffmpeg, tld="com"):
     except ImportError:
         log("  selenium missing"); return imgs, None, 0, 0, None, None, None, {}
     binary, drv = _chrome_bits()
-    opts = Options()
-    for a in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-              "--hide-scrollbars", "--lang=en-US", "--window-size=440,950"):
-        opts.add_argument(a)
-    opts.add_argument("--user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                      "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
-    if binary: opts.binary_location = binary
-    driver = webdriver.Chrome(service=(Service(executable_path=drv) if drv else Service()), options=opts)
+    chrome_args = ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                  "--hide-scrollbars", "--lang=en-US", "--window-size=440,950")
+    ua = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+          "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
+
+    # undetected_chromedriver first — same reasoning and same pattern as
+    # amazon_brand_deals._new_driver(): it matches a driver to whatever Chrome
+    # version is actually installed, which Selenium's own auto-matcher
+    # (Selenium Manager, the only thing the plain-Selenium branch below has)
+    # does not reliably do for Chromium specifically — it is tuned for
+    # official Google Chrome's release numbering. That gap is what crashed
+    # this exact function ("DevToolsActivePort file doesn't exist", Chrome
+    # dying on launch) the first run after the system chromedriver package
+    # was removed: this was the one driver-launch path in the whole project
+    # with no undetected_chromedriver fallback, so it had nothing else to
+    # fall back on once the system driver it had quietly been relying on was
+    # gone. Plain Selenium stays as the second try, not removed — only no
+    # longer the only option.
+    driver = None
+    try:
+        import undetected_chromedriver as uc
+        o = uc.ChromeOptions()
+        for a in chrome_args:
+            o.add_argument(a)
+        o.add_argument(f"--user-agent={ua}")
+        if binary:
+            o.binary_location = binary
+        driver = uc.Chrome(options=o)
+    except Exception as e:
+        log(f"  UC failed for capture_page ({e.__class__.__name__}) — trying plain Selenium")
+        opts = Options()
+        for a in chrome_args:
+            opts.add_argument(a)
+        opts.add_argument(f"--user-agent={ua}")
+        if binary: opts.binary_location = binary
+        driver = webdriver.Chrome(service=(Service(executable_path=drv) if drv else Service()), options=opts)
     shot = os.path.join(td, "page.png")
     pw, ph, price_box, rev_box, title_box = 0, 0, None, None, None
     social = {"bought": "", "rating": "", "rating_count": ""}
